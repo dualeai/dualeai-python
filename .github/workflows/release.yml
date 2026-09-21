@@ -1,12 +1,6 @@
 name: Release
 
 on:
-  # Build runs on every push to main so the release chain is exercised continuously.
-  # The publish jobs are gated on the `release` event -- NOT on a tag. A branch filter
-  # excludes tag pushes, so `git push --tags` runs nothing here; publishing means
-  # creating a GitHub Release.
-  push:
-    branches: [main]
   release:
     types: [published]
   workflow_dispatch:

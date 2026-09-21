@@ -3,17 +3,14 @@
 Submit bounded AI agent work to the Duale AI managed runtime and receive typed results in Python. The SDK is not a
 direct model-provider client.
 
-**Status:** Source preview. The first PyPI release is not published yet.
-Interfaces can change before a stable release.
+**Status:** Public preview. Interfaces can change before a stable release.
 
 ## Install
 
 The distribution is named `dualeai`; import it as `dualeai`. Python 3.10 or newer is required.
 
-Until the first PyPI release, install from the public repository:
-
 ```bash
-python -m pip install "dualeai @ git+https://github.com/dualeai/dualeai-python.git@main"
+python -m pip install dualeai
 ```
 
 ## Before the first request
