@@ -1,0 +1,248 @@
+name: Release
+
+on:
+  # Build runs on every push to main so the release chain is exercised continuously.
+  # The publish jobs are gated on the `release` event -- NOT on a tag. A branch filter
+  # excludes tag pushes, so `git push --tags` runs nothing here; publishing means
+  # creating a GitHub Release.
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CYCLONEDX_CLI_VERSION: v0.33.1 # https://github.com/CycloneDX/cyclonedx-cli/releases
+
+permissions: {}
+
+jobs:
+  build:
+    name: release-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Sigstore signing for attestations
+      attestations: write
+      artifact-metadata: write # Documented by actions/attest v4, which both attest actions wrap
+
+    env:
+      UV_MALWARE_CHECK: "1"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # version.sh needs tags
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # Caching is deliberately OFF in the release path. A poisoned cache entry
+          # would be baked into a published, attested artifact, and the attestation
+          # would faithfully certify the compromised bytes.
+          enable-cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: make install-deps
+
+      - name: Inject version from git tag
+        run: |
+          VERSION=$(./cicd/version.sh -g .)
+          VERSION_FULL=$(./cicd/version.sh -g . -c -m)
+          echo "Injecting version: $VERSION (full: $VERSION_FULL)"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+
+      - name: Build package
+        # Emits BOTH sdist and wheel. The sdist is what lets an auditor diff shipped
+        # source against the git tag with no rebuild -- most of the audit value for
+        # a fraction of the effort of chasing bit-reproducibility.
+        run: uv build
+
+      - name: Verify build artifacts
+        run: |
+          ls -la dist/
+          test -f dist/dualeai-*.whl
+          test -f dist/dualeai-*.tar.gz
+          uv run twine check dist/*
+
+      - name: Generate SBOM (CycloneDX)
+        # --no-dev, NOT --all-extras. This SBOM is attested against dist/*, so it
+        # asserts what the published wheel contains. --all-extras describes the
+        # test and release environment instead of the runtime closure.
+        run: uv export --format cyclonedx1.5 --no-dev --no-emit-project --output-file sbom.cyclonedx.json
+
+      - name: Install CycloneDX CLI
+        run: |
+          curl -sSfL "https://github.com/CycloneDX/cyclonedx-cli/releases/download/${{ env.CYCLONEDX_CLI_VERSION }}/cyclonedx-linux-arm64" -o cyclonedx
+          chmod +x cyclonedx
+
+      - name: Convert to SPDX
+        run: ./cyclonedx convert --input-file sbom.cyclonedx.json --output-file sbom.spdx.json --output-format spdxjson
+
+      - name: Validate SBOMs
+        run: |
+          jq empty sbom.cyclonedx.json
+          jq empty sbom.spdx.json
+          COMPONENTS=$(jq '.components | length' sbom.cyclonedx.json)
+          echo "- CycloneDX components: $COMPONENTS"
+          echo "- SPDX packages: $(jq '.packages | length' sbom.spdx.json)"
+          # The locked runtime closure currently has 43 components across supported
+          # Python markers. Leave a small allowance for an intentional lock update;
+          # the development closure is much larger.
+          test "$COMPONENTS" -le 50 || { echo "SBOM has $COMPONENTS components: dev dependencies leaked"; exit 1; }
+
+      - name: Attest SBOM (CycloneDX)
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/*
+          sbom-path: sbom.cyclonedx.json
+
+      - name: Attest SBOM (SPDX)
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/*
+          sbom-path: sbom.spdx.json
+
+      - name: Attest build provenance
+        # SLSA provenance binds artifact -> commit. PEP 740 alone only proves
+        # "a Trusted Publisher uploaded this"; this step also ties the artifact to
+        # its source commit.
+        #
+        # NOT `actions/attest` with `predicate: "{}"`. That action takes the predicate
+        # verbatim, and an empty one is rejected by the attestations API -- "Invalid
+        # Argument - build definition is nil" -- because a SLSA v1 predicate must carry
+        # a buildDefinition. This action builds the predicate from the workflow run
+        # instead, which is the only way it can name the commit at all.
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: |
+            sbom.cyclonedx.json
+            sbom.spdx.json
+          retention-days: 30
+
+  publish-testpypi:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04 # x64 required: pypi-publish action is amd64 only
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/dualeai
+    permissions:
+      id-token: write # Job level only; PyPI docs call workflow level "discouraged"
+
+    # Exactly two steps. PyPI's own security model: this "keeps the number of steps
+    # that can access the OIDC token to a bare minimum".
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          attestations: true
+          print-hash: true
+
+  publish-pypi:
+    # TestPyPI is a hard gate: PyPI is never reached unless TestPyPI succeeded.
+    needs: [build, publish-testpypi]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04 # x64 required: pypi-publish action is amd64 only
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/dualeai
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          attestations: true
+          print-hash: true
+
+  upload-release:
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: sbom/
+
+      - name: Upload to GitHub release
+        # `gh` ships on the runner, so this drops a third-party action from a job
+        # holding `contents: write` -- one less dependency on the release path.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$TAG" \
+            sbom/sbom.cyclonedx.json \
+            sbom/sbom.spdx.json \
+            dist/* \
+            --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Generate job summary
+        run: |
+          {
+            echo "## Release Summary"
+            echo ""
+            echo "### Published To"
+            echo "- [TestPyPI](https://test.pypi.org/p/dualeai)"
+            echo "- [PyPI](https://pypi.org/p/dualeai)"
+            echo ""
+            # `gh attestation verify -R` matches the repository recorded in the signed
+            # provenance, so this name must remain exact.
+            echo "### Verify this release yourself"
+            echo '```bash'
+            echo "# artifact -> commit (SLSA provenance)"
+            echo "gh attestation verify ./dualeai-*.whl -R dualeai/dualeai-python"
+            echo "# artifact -> publisher (PEP 740, no GitHub account needed)"
+            echo "pypi-attestations verify pypi --repository https://github.com/dualeai/dualeai-python <url>"
+            echo '```'
+            echo ""
+            echo "An attestation tells you WHERE a package came from, not WHETHER to trust it."
+            echo "Neither pip nor uv gate installs on attestations; verification is a step you run."
+          } >> "$GITHUB_STEP_SUMMARY"

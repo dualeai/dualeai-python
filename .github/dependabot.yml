@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Native uv.lock support went GA 2025-03-13; security updates followed 2025-12-16.
+  # Pinning actions to SHAs without automated bumping is only half the control: pins
+  # rot into "old pinned SHA with a known CVE".
+  - package-ecosystem: "uv"
+    directory: "/"
+    # Version updates follow the integration branch. Dependabot security updates target
+    # the repository's default branch instead; CONTRIBUTING.md records that exception.
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      # Match the rolling seven-day exclude-newer window used by uv.
+      default-days: 7
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
