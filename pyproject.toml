@@ -38,7 +38,7 @@ dependencies = [
     "structlog~=25.3",
     "tenacity~=9.0",  # Retry with jitter for SSE reconnection
     "typing-extensions~=4.12",
-    "uuid-utils~=0.11",
+    "uuid-utils>=0.11,<2.0",
 ]
 
 [project.optional-dependencies]
