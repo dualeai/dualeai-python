@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/dualeai/dualeai-python/security/advisories/new
+    about: Do not open a public issue. Report privately; see SECURITY.md.
+  - name: SDK documentation
+    url: https://duale.ai/en/docs/sdk
+    about: Read the SDK concepts, guides, and API reference.

@@ -4,13 +4,18 @@ Submit bounded AI agent work to the Duale AI managed runtime and receive typed r
 direct model-provider client.
 
 **Status:** Public Preview (0.1.x). Interfaces can change before a stable release.
+PyPI publication is pending while the public repository is prepared.
 
 ## Install
 
 The distribution is named `dualeai`; import it as `dualeai`. Python 3.10 or newer is required.
 
+Until the first PyPI release, install from a checkout:
+
 ```bash
-python -m pip install dualeai
+git clone https://github.com/dualeai/dualeai-python.git
+cd dualeai-python
+python -m pip install .
 ```
 
 ## Before the first request
@@ -119,6 +124,11 @@ asyncio.run(main())
 
 `mock_ask()` is a keyed lookup. It does not simulate the real Task transport, streaming, Tool dispatch, or terminal
 errors.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow. Report suspected vulnerabilities through the
+private routes in [SECURITY.md](SECURITY.md), not through a public issue.
 
 ## License
 

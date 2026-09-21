@@ -1,0 +1,41 @@
+name: SDK problem
+description: Report unexpected behavior in the Duale AI Python SDK
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove tokens, customer data, prompts, Tool arguments, and signed upload URLs
+        before posting. Report a suspected vulnerability through SECURITY.md.
+
+  - type: input
+    id: versions
+    attributes:
+      label: SDK, Python, and operating system versions
+      placeholder: "dualeai 0.1.0, CPython 3.12.4, macOS 15"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest code sample that reproduces the problem with fake data.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the exception type or status code. Redact sensitive values.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
