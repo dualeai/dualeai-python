@@ -1,0 +1,89 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # CodSpeed dispatches this to backfill a baseline over historical commits when a
+  # benchmark has no history yet. It is not a substitute for the push trigger above:
+  # a pull request is compared against the latest measured commit on its base branch,
+  # so each supported base branch needs its own push history.
+  workflow_dispatch:
+
+# Deny by default, as in test.yml. A compromised third-party action cannot scrape a
+# broad GITHUB_TOKEN out of runner memory if the token has no scopes to begin with.
+permissions: {}
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  # A newer push starts the replacement measurement. CodSpeed can still use the latest
+  # earlier measured commit on the base branch while that run completes.
+  cancel-in-progress: true
+
+jobs:
+  benchmarks:
+    name: benchmarks
+    # Matches the Linux leg of the test matrix. Treat this as a pin rather than a
+    # preference: changing OS or architecture breaks comparison continuity even though
+    # CodSpeed retains the benchmark history and marks the environment difference.
+    #
+    runs-on: ubuntu-24.04-arm
+    # Simulation runs the suite under a CPU simulator far slower than native.
+    # `make test-bench` also blanks addopts, which discards the --timeout=30 that bounds
+    # a hung test everywhere else; this job timeout remains the outer guard.
+    timeout-minutes: 30
+    permissions:
+      contents: read # For actions/checkout.
+      # OIDC upload, chosen over a long-lived CODSPEED_TOKEN secret. Scoped to this job
+      # rather than the workflow:
+      # GitHub does not restrict the OIDC permission by audience, so granting it at
+      # workflow level would let every other job mint tokens for unrelated services.
+      id-token: write
+
+    env:
+      # Abort a sync BEFORE any install-time code executes if a package is flagged.
+      UV_MALWARE_CHECK: "1"
+      # pytest prepends PYTEST_ADDOPTS independently of the command-line addopts
+      # override. Clear it so an organisation or runner default cannot change the
+      # measured region; the Makefile supplies the benchmark options explicitly.
+      PYTEST_ADDOPTS: ""
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          # Caching is on here and off in release.yml, and the difference is deliberate:
+          # nothing this job produces is published or attested, so a poisoned cache
+          # entry costs a wrong number rather than a signed compromised artefact.
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        # One Python minor line, matching hpke-http. setup-python resolves its current
+        # patch release, so that patch can move between runs. A single line avoids the
+        # conflicting histories that a version matrix would upload under one benchmark id.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: make install-deps
+
+      - name: Run benchmarks
+        # runner-version is deliberately NOT set, so the action uses the version it
+        # pins in .codspeed-runner-version and verifies against its checked-in
+        # SHA-256 manifest. Omitting a second version setting also avoids drift from the
+        # pinned action SHA.
+        uses: CodSpeedHQ/action@0ca9cbbf4623b599a6c3ed4fc8a922942705d9f1 # v5.0.2
+        with:
+          # Match hpke-http: CodSpeed owns both CPU-simulation and memory measurements.
+          mode: simulation,memory
+          # make test-bench, not the pytest line it wraps. The -o "addopts=" that keeps
+          # coverage's trace hook out of the measured region lives in the Makefile
+          # beside the reason it exists; repeating it here is how the two drift apart.
+          run: make test-bench
