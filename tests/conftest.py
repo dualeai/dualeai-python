@@ -147,7 +147,7 @@ def unstarted_sdk_factory(config_factory: Callable[..., DualeAIConfig]) -> Unsta
 # ============================================================================
 
 
-# NOTE: create_test_streaming_update removed - bridge-only models (RFC-051)
+# NOTE: create_test_streaming_update was removed in favor of Task-stream models.
 # Use BridgeContentDeltaResponse for streaming tests instead
 
 
@@ -218,7 +218,7 @@ async def temp_db_path(tmp_path: Path) -> Path:
 
 
 # ============================================================================
-# Network-Boundary Mocking Fixtures (RFC-051 HTTP Transport)
+# HTTP network-boundary fixtures
 # ============================================================================
 
 
@@ -257,22 +257,6 @@ async def minimal_mock_sdk(config_factory: Callable[..., DualeAIConfig], mock_ht
     behavior without network I/O. The transport records requests and supplies
     injected events. It does not exercise ``HTTPTransport`` request building or
     response parsing; HTTP adapter tests must instantiate that class directly.
-
-    Example:
-        async def test_ask_with_real_sdk(minimal_mock_sdk):
-            from tests.mocks.mock_http import require_mock_http_transport
-            sdk = minimal_mock_sdk
-            transport = require_mock_http_transport(sdk)
-
-            # Inject response events
-            transport.inject_events("task-123", [
-                BridgeEvent(id=1, type="task.created", data={"task_id": "task-123"}),
-                BridgeEvent(id=2, type="task.completed", data={"result": "Done"}),
-            ])
-
-            response = await ask(action="Test", sdk=sdk)
-            # Check requests made
-            assert len(transport.get_requests()) > 0
     """
     # Create real config
     config = config_factory(tenant_id=TestTenantIDs.DEFAULT, agent_id="agent-test-default")

@@ -33,15 +33,24 @@ transport. Pure contract tests exercise schema and validation transforms
 without SDK state or transport.
 
 ```python
+import pytest
+
+from dualeai import DualeAISDK, ask
+from tests.mocks.mock_http import require_mock_http_transport
+
+
 @pytest.mark.unit
-class TestMyFeature:
-    async def test_something(self, minimal_mock_sdk: DualeAISDK) -> None:
-        response = await ask(action="Test", sdk=minimal_mock_sdk)
+async def test_action_reaches_the_task_request(minimal_mock_sdk: DualeAISDK) -> None:
+    await ask(action="Test", sdk=minimal_mock_sdk)
+
+    [request] = require_mock_http_transport(minimal_mock_sdk).get_requests()
+    assert request["body"]["action_prompt"] == "Test"
 ```
 
 ## Benchmarks
 
-CodSpeed benchmarks cover hot paths: Pydantic model validation, SSE checksum, cache key generation, JSON serialization, string truncation.
+CodSpeed benchmarks cover Pydantic validation, SSE checksums, cache-key generation,
+JSON serialization, and string truncation.
 
 ```bash
 make test-bench  # Runs via --codspeed, serial execution, no coverage
