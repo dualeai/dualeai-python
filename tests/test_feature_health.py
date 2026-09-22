@@ -1,11 +1,6 @@
-"""Priority 16 tests for health check feature.
+"""Tests for the SDK's local health snapshot.
 
-Tests get_health_status() with real SDK logic using minimal_mock_sdk.
-
-CRITICAL RULES:
-1. Use minimal_mock_sdk for ALL tests - NATS mocked at network boundary
-2. Test REAL SDK code behavior
-3. All tests use @pytest.mark.unit and TestUnit* class naming
+The fixture uses the real SDK with its HTTP transport boundary replaced.
 """
 
 import asyncio
@@ -119,7 +114,7 @@ class TestUnitHealthFeature:
         components_before = _health_components(health_before)
         assert components_before["sdk"] is True
 
-        # Events should be healthy (minimal_mock_sdk has mocked NATS connection)
+        # Events are healthy because the injected HTTP transport is connected.
         assert components_before["events"] is True
 
         # Initialize scheduler
@@ -276,7 +271,7 @@ class TestUnitHealthFeature:
         """Test health detects when events client is connected via mock."""
         sdk = minimal_mock_sdk
 
-        # minimal_mock_sdk has events connected via MockNATSClient
+        # minimal_mock_sdk has a connected client backed by MockHTTPTransport.
         health = sdk.get_health_status()
 
         # Events should be healthy (connected via mock)

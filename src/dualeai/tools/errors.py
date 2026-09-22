@@ -3,7 +3,10 @@
 Pure functions: a raised exception → the truncated ``message`` string the language
 model sees. The truncation length is read from the bridge
 ``BridgeToolResultError.message`` ``maxLength`` (the wire contract), never a
-hand-picked literal (RFC-121 §Tool Execution Errors & Retry).
+hand-picked literal.
+
+Rendering and truncation are covered by ``tests/test_tools_pure.py`` and
+``tests/test_agent_lifecycle.py``.
 """
 
 from __future__ import annotations
@@ -41,11 +44,10 @@ def truncate_to_wire_max(text: str) -> str:
 def format_registered_tool_error(exc: BaseException) -> str:
     """Render a tool failure as ``<module>.<qualname>: <message>`` for the wire result.
 
-    The model and router receive a stable, typed-looking prefix instead of a bare
+    The model receives a stable, typed-looking prefix instead of a bare
     message; the rendered string is truncated to the schema-declared maximum so an
     oversized exception string cannot exceed the wire contract. No error enum and no
-    retryable flag are added — the tool error stays a free-form ``message`` string
-    (RFC-121 §Tool Execution Errors & Retry).
+    retryable flag are added — the Tool error stays a free-form ``message`` string.
     """
     qualified_name = f"{type(exc).__module__}.{type(exc).__qualname__}"
     message = str(exc)
@@ -58,8 +60,8 @@ def apply_tool_error(exc: Exception, transform: Callable[[Exception], str] | Non
 
     Without a transform the default ``<module>.<qualname>: <message>`` is used. With
     one (a per-@tool ``error_transform``), the customer controls the model-facing text
-    — the CWE-209 seam every peer ships — and the result is still truncated to the
-    schema-declared maximum.
+    and the result is still truncated to the schema-declared maximum. Use the
+    transform to remove secrets and internal details before they cross the wire.
     """
     if transform is None:
         return format_registered_tool_error(exc)

@@ -1,48 +1,18 @@
-"""Attachment handling for Library document upload (RFC-113).
+"""Prepare local files and upload them as Library documents for a Task.
 
-The attachment SDK shape is preserved by RFC-113 (superseding RFC-080). Internally,
-all prepared attachments are routed through one call-scope Library at path
-``agent/{agent_id}/task/{task_id}``. The identifiers are path metadata from
-SDK/task context; Library/Profile permissions still authorize the caller's
-functional identity against the resolved Library resource. The SDK resolves
-that path to a ``library_id`` before document creation, while callers still see
-``prepare_attachments`` → ``upload_attachments`` +
-``submit_task(attachments=...)``.
+Preparation records path, name, description, and size without reading file
+contents. Upload validates the recorded files again, resolves a Task-scoped
+Library, streams object-store parts in 64 KiB chunks, and queues one Library
+document per file.
 
-Usage:
-    from dualeai import LibraryDocumentGetRequest
-    from uuid import uuid4
+One batch runs at most eight file pipelines and eight part requests at once.
+Transient client errors, timeouts, and HTTP 500/502/503/504 responses receive up
+to five attempts. Other object-store failures raise ``LibraryUploadError``
+immediately. A batch is not transactional; the error exposes receipts that
+completed before a sibling failed.
 
-    attachments = sdk.prepare_attachments([
-        (Path("contract.pdf"), "Client contract for Q2"),
-        (Path("report.xlsx"), "Financial data"),
-    ])
-
-    task_id = str(uuid4())
-    # agent_id is keyword-only and optional — resolved from the SDK's single
-    # registered agent. Pass it explicitly when multiple agents are registered.
-    receipts = await sdk.upload_attachments(task_id, attachments)
-    for receipt in receipts.values():
-        await sdk.libraries.wait_for_document(
-            LibraryDocumentGetRequest(
-                library_id=receipt.library_id,
-                document_id=receipt.document_id,
-            )
-        )
-    await sdk.submit_task(action="Analyze", attachments=attachments, request_id=task_id)
-
-Upload internals (RFC-113):
-
-- Eight worker tasks bound file pipelines, and one ``Semaphore(8)`` bounds
-  presigned part uploads across the batch.
-- 64 KB streaming sub-chunks via ``aiofiles``; explicit ``Content-Length``
-  (S3 rejects chunked Transfer-Encoding on presigned URLs).
-- ``tenacity.AsyncRetrying``: 5 attempts, exponential backoff 0.5 s → 30 s
-  with 2 s jitter. Retries on ``aiohttp.ClientError``, ``TimeoutError`` and
-  HTTP 500, 502, 503, and 504; other non-200 responses surface as a terminal
-  ``ValueError``.
-- Content SHA-256 uses one additional streaming pass concurrent with part
-  uploads and is sent at Library document creation (RFC-113).
+The local file, retry, concurrency, and partial-receipt behavior is covered by
+``tests/test_attachments.py`` and ``tests/test_attachments_s3.py``.
 """
 
 import asyncio
@@ -108,9 +78,9 @@ async def _gather_related(awaitables: Sequence[Awaitable[_GatherT]]) -> list[_Ga
 class PreparedAttachment(BaseModel):
     """Prepared attachment metadata for upload and task submission.
 
-    Created by :func:`prepare_attachments`. Passed to both
-    :func:`upload_attachments` (for the upload pipeline) and ``submit_task``
-    (for agent context).
+    Created by :func:`prepare_attachments`. Pass the values to
+    :meth:`dualeai.sdk.DualeAISDK.upload_attachments` for upload and then to
+    :meth:`dualeai.sdk.DualeAISDK.submit_task` for Task context.
 
     ``key`` correlates the prepared item with its upload receipt and task/cache
     metadata. The Library assigns the stable ``document_id`` returned by the
@@ -138,7 +108,9 @@ class PreparedAttachment(BaseModel):
 def prepare_attachments(files: list[tuple[Path, str]]) -> list[PreparedAttachment]:
     """Prepare attachment metadata for upload and task submission.
 
-    Instant — no I/O beyond ``stat()``. Reads file sizes.
+    This performs filesystem existence, file-type, and size checks. It does not
+    open or read file contents; upload repeats the checks to detect stale
+    metadata.
 
     Args:
         files: List of ``(path, description)`` tuples.
@@ -149,6 +121,8 @@ def prepare_attachments(files: list[tuple[Path, str]]) -> list[PreparedAttachmen
     Raises:
         FileNotFoundError: If any path does not exist.
         ValueError: If a path is not a regular, non-empty file.
+        pydantic.ValidationError: If a filename or description violates
+            ``PreparedAttachment`` bounds.
     """
     attachments: list[PreparedAttachment] = []
     for path, description in files:
@@ -218,7 +192,6 @@ async def _compute_content_sha256(path: Path) -> str:
     """Compute hex SHA-256 of ``path`` streaming 64 KB at a time.
 
     Single full-file pass via aiofiles — peak memory bounded by sub-chunk size.
-    Server validates this against blob bytes (RFC-113).
     """
     digest = hashlib.sha256()
     async with aiofiles.open(path, "rb") as f:
@@ -231,7 +204,7 @@ async def _compute_content_sha256(path: Path) -> str:
 
 
 class S3UploadError(Exception):
-    """Raised on retryable S3 status codes (5xx)."""
+    """Internal retry sentinel for transient object-store status codes."""
 
     def __init__(self, status: int, message: str) -> None:
         self.status = status
@@ -295,10 +268,9 @@ async def _upload_part(
 def _call_scope_library_path(agent_id: str, task_id: str) -> str:
     """Build the call-scope Library path for flat attachment-helper routing.
 
-    Path convention (RFC-113): ``agent/{agent_id}/task/{task_id}`` — a convention,
-    not a required or reserved grammar (library paths are free-form). These
-    identifiers are routing metadata only, not permission claims; the caller's
-    functional identity still needs an exact Library grant or policy.
+    ``agent/{agent_id}/task/{task_id}`` is an SDK convention, not a reserved
+    grammar for arbitrary Library paths. The identifiers select a path; they do
+    not grant permission to it.
     """
     return f"agent/{agent_id}/task/{task_id}"
 
@@ -312,34 +284,31 @@ async def upload_attachment_to_library(
 ) -> LibraryDocumentCreateResponse:
     """Upload one prepared attachment to an existing Library.
 
-    Flow (RFC-113):
+    Flow:
 
-    1. ``POST /libraries/v1/tenants/{tenant_id}/document-uploads`` with
-       ``{size_bytes}``; receive ``{upload_id, parts[]}``. Plain HTTPS over the
-       public gateway with ``Authorization: Bearer <api_token>``
-       (RFC-113).
-    2. ``PUT`` each part to its presigned S3 URL (plain HTTPS — S3 cannot
-       terminate any custom encryption envelope). 64 KB streaming sub-chunks
-       via ``aiofiles``; explicit ``Content-Length`` header. Up to 5 retries
-       with exponential backoff + jitter on transient failures.
-    3. ``POST /libraries/v1/tenants/{tenant_id}/{library_id}/documents`` with
-       ``upload_id``, ``filename``, ``description``, ``content_sha256``,
-       ``size_bytes``, ``parts`` — Library creates a queued document. Same
-       Library gateway transport as step 1 (plain HTTPS + Bearer).
+    1. Request an upload id and presigned part URLs using the recorded size.
+    2. Stream each part with an explicit ``Content-Length`` and bounded retries.
+    3. Compute SHA-256 in a separate streaming pass while parts upload.
+    4. Create a queued Library document from the upload id, metadata, digest,
+       size, and returned part ETags.
 
     File I/O is non-blocking and bounded: peak memory per concurrent slot is
     ``_STREAM_CHUNK_SIZE`` (64 KB).
 
     Args:
-        transport: HTTP transport for Library calls (plain HTTPS + Bearer;
-            see ``HTTPTransport`` for the bridge-vs-library split).
-        s3_session: Plain aiohttp session for S3 presigned URL uploads.
+        transport: Transport implementing the required Library calls.
+        s3_session: aiohttp session for presigned object-store URLs.
         attachment: Prepared attachment metadata.
         library_id: Stable destination Library identifier.
         part_semaphore: Batch-wide bound for concurrent presigned PUTs.
 
     Returns:
         Queued document identifiers, initial status, and polling location.
+
+    Raises:
+        LibraryUploadError: If a file read or object-store upload cannot
+            complete. The exception identifies the attachment and, for part
+            failures, the part number.
     """
     # 1. Request presigned URLs (size-only payload — caller identity is in JWT).
     upload_request = LibraryDocumentUploadRequest(size_bytes=attachment.size)
@@ -415,7 +384,12 @@ async def upload_attachments_to_library(
     attachments: list[PreparedAttachment],
     library_id: str,
 ) -> dict[str, LibraryDocumentCreateResponse]:
-    """Upload prepared attachments concurrently and key their queued receipts."""
+    """Upload a bounded batch and key queued receipts by attachment key.
+
+    At most eight attachment workers and eight part requests run concurrently.
+    On ``LibraryUploadError``, sibling work is cancelled and the re-raised error
+    contains ``completed_receipts`` for documents already queued.
+    """
     if not attachments:
         return {}
 

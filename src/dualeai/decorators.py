@@ -3,6 +3,9 @@
 All registration state lives on the SDK instance (``sdk.agents``,
 ``sdk.registered_tools``); hosted-tool lifecycle registration is the
 tools-only Bridge manifest published by sdk.serve().
+
+Decorator registration and validation behavior is covered by
+``tests/test_decorators_unit.py``.
 """
 
 from __future__ import annotations
@@ -118,18 +121,33 @@ def activity(
     Callable[[Callable[P, Awaitable[CacheableValue]]], Callable[P, Awaitable[CacheableValue]]]
     | Callable[P, Awaitable[CacheableValue]]
 ):
-    """Cache an async activity result through a specific SDK instance.
+    """Cache and retry an async activity through a specific SDK instance.
 
     Caching can avoid a repeated execution for the same cache key. It does not
-    make the underlying operation idempotent.
+    make the underlying operation idempotent. Every ordinary ``Exception`` is
+    eligible for retry, so a side-effecting activity must be safe for up to
+    ``max_retries + 1`` executions.
+
+    The decorator requires ``async def`` even though
+    :meth:`DualeAISDK.execute_activity <dualeai.sdk.DualeAISDK.execute_activity>`
+    also accepts synchronous callables. Omitting ``cache_ttl`` here selects one
+    hour; passing ``None`` directly to ``execute_activity`` instead stores
+    without backend expiry.
 
     Args:
-        cache_ttl: How long to cache results (default: 1 hour)
-        max_retries: Retries after the initial activity attempt.
+        cache_ttl: How long to cache results. Omission or ``None`` selects one
+            hour for the decorator.
+        max_retries: Retries after the initial activity attempt. Use a
+            non-negative integer; activity retry counts are not proactively
+            validated.
         sdk: SDK instance to use. Required.
 
     Returns:
-        Decorated function with caching and retry behavior
+        Decorated async function with caching and retry behavior.
+
+    Raises:
+        TypeError: When the decorated callable is not asynchronous.
+        ValueError: When ``sdk`` is omitted.
     """
     if not isinstance(cache_ttl, timedelta) and callable(cache_ttl):
         return _decorate_activity(cache_ttl, timedelta(hours=1), max_retries, sdk)

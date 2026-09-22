@@ -1,4 +1,7 @@
-"""Utility functions and classes for the Duale AI SDK."""
+"""Utility functions for the Duale AI SDK.
+
+Behavior is covered by ``tests/test_utils.py``.
+"""
 
 import hashlib
 
@@ -6,11 +9,11 @@ from dualeai.constants import DisplayLimits
 
 
 def tenant_id_from_token(token: str) -> str:
-    """Derive the logical tenant id from an API token (RFC-051).
+    """Return the SHA-256 token fingerprint used as a local namespace.
 
-    One definition so the OpenTelemetry ``tenant.id`` attribute and the cache
-    backend namespace stay byte-identical — deriving them separately risks
-    telemetry silently drifting from the cache isolation boundary.
+    The compatibility name predates its current use. The result is not the
+    configured or canonical tenant id. The cache backend and OpenTelemetry
+    resource both use the same fingerprint; rotating the token changes it.
     """
     return hashlib.sha256(token.encode()).hexdigest()
 

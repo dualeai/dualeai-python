@@ -1,18 +1,21 @@
-"""HTTP/SSE transport for SDK communication (RFC-051, RFC-113).
+"""aiohttp transport for Task SSE streams and Library JSON requests.
 
 Uses aiohttp for async HTTP with custom SSE parser.
 Implements HTTPTransportProtocol for dependency injection.
 
-Bridge SSE (``/v1/tasks/...``): HPKE E2E encryption (RFC-065) handled by
-``HPKEClientSession``. PSK authentication via ``X-HPKE-PSK-ID`` header
-(hpke-http ~=1.6).
+Task SSE calls use ``HPKEClientSession`` with PSK authentication through the
+``X-HPKE-PSK-ID`` header.
 
-Library calls (``/libraries/v1/...``): plain HTTPS over the public gateway
-with ``Authorization: Bearer <api_token>`` (RFC-113). End-to-end body
-encryption for Library is deferred (RFC-113) — the dashboard cannot
-exercise HPKE today and S3 cannot terminate it for part uploads. Library and
-Bridge use SEPARATE aiohttp sessions so the HPKE middleware never touches
-Library bytes.
+Library calls use a separate TLS-protected ``aiohttp.ClientSession`` with
+``Authorization: Bearer <api_token>``. Presigned object-store uploads also use
+ordinary HTTPS. Keeping the sessions separate prevents HPKE middleware from
+rewriting Library request bodies.
+
+Connection, header, retry, and Library request behavior is covered by
+``tests/test_http_transport_connect.py``,
+``tests/test_http_transport_headers.py``,
+``tests/test_http_transport_resilience.py``, and
+``tests/test_http_transport_library_aioresponses.py``.
 """
 
 import asyncio
@@ -118,10 +121,10 @@ def _resolve_retry_method(
 ) -> tuple[str, Mapping[str, object] | None]:
     """Choose POST replay or read-only GET for the next stream attempt.
 
-    After the SDK observes a 2xx, Bridge has published the POST, so later
+    After the SDK observes a 2xx, the server has accepted the POST, so later
     attempts use GET. Before an observed 2xx, server receipt is ambiguous and
     the SDK repeats the original method with the same client-selected task ID.
-    That repeat may republish, but Router admission converges on one graph task.
+    This relies on server-side admission treating that stable ID idempotently.
     """
     if stream_established and method == "POST":
         return "GET", None
@@ -240,7 +243,7 @@ RETRYABLE_STREAM_ERRORS: tuple[type[BaseException], ...] = (
 
 
 class HTTPTransport:
-    """HTTP/SSE transport using aiohttp (RFC-051, RFC-065, RFC-113).
+    """HTTP/SSE transport using separate Task and Library sessions.
 
     Two sessions, two trust profiles:
 
@@ -256,10 +259,8 @@ class HTTPTransport:
     - Auto-reconnect with Last-Event-ID; POST→GET switch on retry
       after the bridge has accepted the original request (see
       _stream_request docstring for the bridge invariant)
-    - HPKE E2E encryption (RFC-065) via HPKEClientSession for Bridge only.
-      Library transport stays plain HTTPS (RFC-113): end-to-end body
-      encryption for upload sessions/document creation is a future RFC; the
-      dashboard has no browser HPKE and S3 cannot decrypt HPKE for parts.
+    - HPKE request/response protection through ``HPKEClientSession`` for Task
+      endpoints only. Library JSON and presigned uploads use ordinary HTTPS.
 
     Implements HTTPTransportProtocol.
 
@@ -308,9 +309,8 @@ class HTTPTransport:
         # Server resolves this hash to lookup the raw token for HPKE decryption
         self._psk_id = hashlib.sha512(token.encode()).digest()
         self._session: HPKEClientSession | None = None
-        # Library calls go through plain HTTPS + Authorization: Bearer
-        # (RFC-113). Kept on a SEPARATE aiohttp.ClientSession so the
-        # HPKE middleware never touches Library bytes.
+        # Library calls use HTTPS + Authorization: Bearer on a separate
+        # aiohttp session so HPKE middleware never touches Library bytes.
         self._library_session: aiohttp.ClientSession | None = None
         self._connected = False
 
@@ -335,15 +335,14 @@ class HTTPTransport:
             sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
         )
 
-        # HPKEClientSession handles E2E encryption transparently (RFC-065)
+        # HPKEClientSession handles request/response protection transparently.
         # - Auto-fetches platform public keys from discovery endpoint
         # - Encrypts request bodies with HPKE
         # - Uses token as PSK for authenticated encryption
         # - Compresses with zstd when compress=True
         # - psk_id sent via X-HPKE-PSK-ID header (hpke-http v1.3.0)
         #
-        # Pure PSK auth: NO Authorization header - avoids MITM token exposure
-        # Server resolves psk_id (hash) to raw token via Profile service
+        # Task calls use PSK auth and therefore send no Authorization header.
         # discovery_url explicit: hpke-http defaults to host-level /.well-known/hpke-keys
         # (per RFC 8615), but the bridge may be behind a path prefix (e.g., /http-bridge).
         discovery_url = _discovery_url(self._endpoint)
@@ -363,10 +362,8 @@ class HTTPTransport:
         )
         await self._session.__aenter__()
 
-        # Library session: plain HTTPS + Authorization: Bearer (RFC-113).
-        # Library does not terminate HPKE; the SDK token rides in a standard
-        # bearer header so the public gateway and Library service can resolve
-        # ``token:{sha512(api_token)}`` to the functional identity via Profile.
+        # Library session: HTTPS + Authorization: Bearer. It intentionally does
+        # not share the Task session's HPKE middleware.
         # Kept on a separate session so the HPKE middleware never wraps
         # Library bytes, and so Library can use its own JSON+Content-Type
         # defaults without bleeding into the Bridge SSE pipeline.
@@ -569,7 +566,7 @@ class HTTPTransport:
         )
 
     async def delete_library(self, request: LibraryDeleteRequest) -> None:
-        """Soft-delete one Library."""
+        """Send a delete request for one Library."""
         self._ensure_connected()
         tenant_id = self._require_library_tenant_id()
         await self._request_library_no_content(
@@ -612,7 +609,7 @@ class HTTPTransport:
         )
 
     async def delete_library_document(self, request: LibraryDocumentDeleteRequest) -> None:
-        """Soft-delete one document."""
+        """Send a delete request for one document."""
         self._ensure_connected()
         tenant_id = self._require_library_tenant_id()
         await self._request_library_no_content(
@@ -629,12 +626,11 @@ class HTTPTransport:
         self,
         request: LibraryDocumentUploadRequest,
     ) -> LibraryDocumentUploadResponse:
-        """Request presigned URLs for document upload (RFC-113).
+        """Request presigned URLs for document upload.
 
         ``POST /libraries/v1/tenants/{tenant_id}/document-uploads`` over plain
-        HTTPS with ``Authorization: Bearer <api_token>``. Body is
-        ``{size_bytes}``; caller identity is resolved server-side from the
-        token hash (RFC-113).
+        HTTPS with ``Authorization: Bearer <api_token>``. The body contains
+        ``size_bytes`` only.
         """
         self._ensure_connected()
         tenant_id = self._require_library_tenant_id()
@@ -654,8 +650,7 @@ class HTTPTransport:
         """Create a queued Library document after all parts uploaded.
 
         ``POST /libraries/v1/tenants/{tenant_id}/{library_id}/documents`` over
-        plain HTTPS with ``Authorization: Bearer <api_token>`` (RFC-113,
-        §5).
+        plain HTTPS with ``Authorization: Bearer <api_token>``.
         """
         self._ensure_connected()
         tenant_id = self._require_library_tenant_id()
@@ -772,17 +767,17 @@ class HTTPTransport:
 
         ## Why retries are safe — and when they aren't
 
-        The bridge's POST handler publishes before returning ``200 OK``.
+        The server accepts a POST before returning ``200 OK``.
         Repeating the POST can therefore publish the same logical request more
-        than once. The stable client-selected task ID makes Router task and
-        route admission idempotent; switching to GET after an observed 2xx
-        avoids needless republishing while the SDK resumes the stream.
+        than once. The retry strategy relies on server-side admission treating
+        the stable client-selected Task ID idempotently. Switching to GET after
+        an observed 2xx avoids needless POST replay while the SDK resumes the
+        stream.
 
-        The bridge's GET handler is read-only. ``Last-Event-ID`` is the exact
-        ``NATS-sequence:event-index`` position last yielded to the caller. The
-        Bridge starts the typed JetStream consumer at that NATS sequence and
-        suppresses events through the recorded index before yielding later
-        events. Without a cursor it reads the task stream from its beginning.
+        The GET endpoint is expected to be read-only. ``Last-Event-ID`` is an
+        opaque cursor last yielded to the caller; the server resumes after that
+        cursor. Without one, the server may replay the Task stream from its
+        beginning.
 
         Decision rule, encoded in ``_resolve_retry_method``:
 
@@ -818,11 +813,9 @@ class HTTPTransport:
 
         GET ``/v1/tasks/{task_id}`` MUST stay read-only and
         idempotent. If the bridge's GET handler ever starts
-        publishing to its message bus, the POST→GET method-switching
-        logic below silently breaks (it would duplicate-publish on
-        retry). When changing the bridge GET path, re-verify that
-        the GET handler only streams events from the existing per-task
-        event source and does not enqueue new work.
+        accepting new work, the POST→GET method-switching logic below silently
+        breaks. Re-verify that GET only streams an existing Task whenever that
+        endpoint changes.
 
         Args:
             method: HTTP method (GET, POST). For POST, the body is
@@ -854,9 +847,9 @@ class HTTPTransport:
         assert self._session is not None
 
         current_last_event_id = last_event_id
-        # Once raise_for_status() returns 2xx, the SDK knows that Bridge
-        # published the POST. Later attempts use GET; before this point receipt
-        # is ambiguous and the same task ID makes POST replay converge in Router.
+        # Once raise_for_status() returns 2xx, the SDK knows the server accepted
+        # the POST. Later attempts use GET; before this point receipt is
+        # ambiguous and replay relies on the stable Task ID.
         stream_established = False
 
         async for attempt in AsyncRetrying(
@@ -869,10 +862,8 @@ class HTTPTransport:
             reraise=True,
         ):
             with attempt:
-                # Pure PSK auth: NO Authorization header - avoids MITM
-                # token exposure. psk_id is sent automatically via
-                # X-HPKE-PSK-ID header by HPKEClientSession. Server
-                # resolves psk_id (hash) to raw token via Profile.
+                # Task calls use PSK auth. HPKEClientSession sends psk_id through
+                # X-HPKE-PSK-ID and does not add an Authorization header.
                 effective_method, effective_body = _resolve_retry_method(
                     method,
                     json_data,
@@ -884,10 +875,8 @@ class HTTPTransport:
                 }
                 if current_last_event_id is not None:
                     headers["Last-Event-ID"] = str(current_last_event_id)
-                # Propagate the active span's W3C trace context so the platform
-                # can stitch SDK spans to bridge/router spans (RFC-115). No-op
-                # when no span is active (e.g. a task submitted outside any host
-                # span).
+                # Propagate active W3C trace context for server-side correlation.
+                # This is a no-op when no span is active.
                 inject_trace_context(headers)
 
                 response = None
@@ -911,8 +900,8 @@ class HTTPTransport:
 
                 except SSEChecksumError as e:
                     # Resume after the last event the parser yielded. The failed
-                    # event's composite cursor cannot be decremented safely: it
-                    # may be the first or a later event in one NATS message.
+                    # event's opaque cursor cannot be decremented safely: it may
+                    # be the first or a later event in one server batch.
                     logger.warning(
                         "SSE checksum mismatch, retrying",
                         task_id=task_id,

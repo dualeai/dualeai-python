@@ -1,4 +1,10 @@
-"""Cache backends for distributed (Redis) and local (SQLite) caching."""
+"""Cache backends for distributed (Redis) and local (SQLite) caching.
+
+Backend behavior is covered by ``tests/test_cache.py``,
+``tests/test_cache_enhanced.py``, and ``tests/test_cache_cleanup.py``.
+No focused automated test currently covers the SDK's token-to-namespace
+selection or token-rotation behavior.
+"""
 
 import asyncio
 import contextlib
@@ -39,37 +45,56 @@ CacheableValue = JsonValue
 
 
 class CacheConfig(BaseModel):
-    """Configuration for cache behavior and limits.
+    """Cache TTL, cleanup, and compatibility limit settings.
 
-    Type Safety Design:
-        - All Optional fields use explicit | None for clarity
-        - timedelta used for time-based configs (predictable resource usage)
-        - Pydantic Field() provides runtime validation
+    TTL jitter applies to every backend. ``cleanup_interval`` is used after
+    :meth:`CacheBackend.start_cleanup_loop` is called; the factory starts that
+    loop automatically, while direct backend construction does not.
 
-    Cleanup Design:
-        - Automatic cleanup ALWAYS ENABLED (no disable flag)
-        - Time-based cleanup interval (timedelta) for predictable timing
-        - Background task pattern with async cleanup loop
-        - Redis: TTL built-in (cleanup is no-op), but task runs for consistency
-        - SQLite: Manual cleanup reclaims disk space, prevents unbounded growth
-        - Mock: Accurate cleanup for testing
+    ``max_entries`` is enforced only by ``MockCacheBackend``. The current
+    Redis and SQLite implementations do not enforce ``max_entries``,
+    ``max_size_bytes``, ``lru_eviction_enabled``, or ``eviction_batch_size``;
+    those fields are retained for configuration compatibility. Mock overflow
+    eviction uses earliest expiry, not access-order LRU.
     """
 
     model_config = ConfigDict(use_attribute_docstrings=True)
 
     # Memory management
-    max_entries: int = Field(default=100_000, ge=1000, le=10_000_000)
-    max_size_bytes: int = Field(default=1_000_000_000, ge=10_000_000)  # 1GB default
+    max_entries: int = Field(
+        default=100_000,
+        ge=1000,
+        le=10_000_000,
+        description="Entry bound enforced by MockCacheBackend only",
+    )
+    max_size_bytes: int = Field(
+        default=1_000_000_000,
+        ge=10_000_000,
+        description="Compatibility field; current backends do not enforce a byte-size bound",
+    )
 
     # TTL jitter to prevent thundering herd
-    ttl_jitter_enabled: bool = Field(default=True)
-    ttl_jitter_factor: float = Field(default=0.1, ge=0.0, le=0.5)  # ±10% jitter
+    ttl_jitter_enabled: bool = Field(default=True, description="Apply randomized jitter to TTL values")
+    ttl_jitter_factor: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=0.5,
+        description="Maximum proportional TTL variation in either direction",
+    )
 
-    # LRU eviction policy
-    lru_eviction_enabled: bool = Field(default=True)
-    eviction_batch_size: int = Field(default=1000, ge=100, le=10000)
+    # Compatibility eviction fields; current backends do not implement LRU.
+    lru_eviction_enabled: bool = Field(
+        default=True,
+        description="Compatibility field; current backends do not implement access-order LRU",
+    )
+    eviction_batch_size: int = Field(
+        default=1000,
+        ge=100,
+        le=10000,
+        description="Compatibility field; current backends do not use this batch size",
+    )
 
-    # Automatic cleanup (ALWAYS ENABLED)
+    # Cleanup interval used when a cleanup loop is started.
     cleanup_interval: timedelta = Field(
         default=timedelta(minutes=10),
         description="Automatic cleanup interval for expired entries (time-based background task)",
@@ -77,18 +102,25 @@ class CacheConfig(BaseModel):
 
 
 class CacheBackend(ABC, Generic[T]):
-    """Abstract base class for cache backends with tenant isolation."""
+    """Abstract cache backend with a caller-supplied key namespace.
+
+    ``DualeAISDK`` supplies a SHA-256 fingerprint of its API token as the
+    namespace. It does not use ``DualeAIConfig.tenant_id``; rotating a token
+    therefore selects a new cache namespace.
+    """
 
     def __init__(self, tenant_id: str, config: CacheConfig | None = None):
-        """Initialize cache backend with tenant context and configuration.
+        """Initialize a cache backend with its key namespace and configuration.
 
         Args:
-            tenant_id: UUID v7 tenant identifier for isolation
-            config: Cache configuration for behavior and limits
+            tenant_id: Namespace prefix. Despite the historical parameter name,
+                this need not be a tenant UUID.
+            config: Cache configuration. See ``CacheConfig`` for which limits
+                each backend enforces.
         """
         self.tenant_id = tenant_id
         self.config = config or CacheConfig()
-        # Pre-bake the tenant prefix once. Cache get/set/delete calls
+        # Pre-bake the namespace prefix once. Cache get/set/delete calls
         # this on every operation; concatenation is faster than an
         # f-string format and the prefix never changes.
         self._tenant_prefix = f"{tenant_id}:"
@@ -96,13 +128,13 @@ class CacheBackend(ABC, Generic[T]):
         self._cleanup_task: asyncio.Task[None] | None = None
 
     def _get_tenant_key(self, key: str) -> str:
-        """Generate tenant-scoped cache key for isolation.
+        """Prefix a cache key with this backend's namespace.
 
         Args:
             key: Base cache key
 
         Returns:
-            Tenant-scoped key in format: {tenant_id}:{key}
+            The namespace prefix followed by ``key``.
         """
         return self._tenant_prefix + key
 
@@ -126,21 +158,20 @@ class CacheBackend(ABC, Generic[T]):
         if any(char in key for char in unsafe_chars):
             raise ValueError("Cache key contains unsafe characters (newlines, null bytes)")
 
-        # Allow colons in keys - they're common in cache key patterns
-        # The tenant isolation is handled by _get_tenant_key method
+        # Allow colons in keys; the namespace prefix remains separate.
 
         # Prevent directory traversal-style attacks
         if ".." in key or key.startswith(("/", "\\")):
             raise ValueError("Cache key cannot contain path traversal patterns")
 
     def _validate_tenant_scoped_key(self, tenant_key: str) -> None:
-        """Validate that a tenant-scoped key belongs to current tenant.
+        """Validate that a prefixed key belongs to this backend namespace.
 
         Args:
-            tenant_key: Fully qualified tenant-scoped key
+            tenant_key: Fully qualified namespaced key.
 
         Raises:
-            ValueError: If key doesn't belong to current tenant
+            ValueError: If the key has a different namespace prefix.
         """
         if not tenant_key.startswith(self._tenant_prefix):
             raise ValueError(
@@ -148,7 +179,7 @@ class CacheBackend(ABC, Generic[T]):
             )
 
     def _validate_and_scope_key(self, key: str) -> str:
-        """Validate the user key, derive the tenant-scoped form, and double-check tenancy.
+        """Validate a user key, prefix it, and verify the resulting namespace.
 
         Centralises the 3-line prelude that get/set/delete all need
         (validate, scope, tenant-check). Returns the scoped key ready
@@ -191,15 +222,15 @@ class CacheBackend(ABC, Generic[T]):
 
     @abstractmethod
     async def get(self, key: str) -> T | None:
-        """Get cached value by tenant-scoped key.
+        """Get a cached value from this backend namespace.
 
         Type Safety Rationale:
             - Returns T | None (explicit None) to indicate cache miss
-            - All implementations MUST return None for missing/expired keys
-            - Type checkers verify proper None handling at call sites
+            - All implementations return None for missing/expired keys
+            - A stored JSON null is therefore indistinguishable from a miss
 
         Args:
-            key: Base cache key (will be tenant-scoped internally)
+            key: Base cache key; the backend prefixes it internally.
 
         Returns:
             Cached value or None if not found/expired
@@ -207,25 +238,25 @@ class CacheBackend(ABC, Generic[T]):
 
     @abstractmethod
     async def set(self, key: str, value: T, ttl: timedelta | None = None) -> None:
-        """Set cached value with optional TTL using tenant-scoped key.
+        """Set a namespaced cached value with an optional TTL.
 
         Args:
-            key: Base cache key (will be tenant-scoped internally)
+            key: Base cache key; the backend prefixes it internally.
             value: Value to cache
-            ttl: Time to live for the cached value
+            ttl: Time to live. ``None`` means no backend expiry.
         """
 
     @abstractmethod
     async def delete(self, key: str) -> None:
-        """Delete cached value by tenant-scoped key.
+        """Delete a value from this backend namespace.
 
         Args:
-            key: Base cache key (will be tenant-scoped internally)
+            key: Base cache key; the backend prefixes it internally.
         """
 
     @abstractmethod
     async def clear(self) -> None:
-        """Clear all cached values."""
+        """Clear cached values in this backend namespace."""
 
     @abstractmethod
     async def cleanup_expired(self) -> int:
@@ -252,7 +283,8 @@ class CacheBackend(ABC, Generic[T]):
         """Start automatic cleanup background task.
 
         Design Rationale:
-            - ALWAYS ENABLED - cleanup runs automatically for all backends
+            - Started automatically by ``create_cache_backend``
+            - Directly constructed backends require an explicit call
             - Time-based (timedelta) for predictable resource management
             - Background task pattern with async cleanup loop
             - Redis: cleanup_expired() is no-op (TTL built-in), but loop runs
@@ -316,14 +348,20 @@ class CacheBackend(ABC, Generic[T]):
 
 
 class RedisCacheBackend(CacheBackend[CacheableValue]):
-    """Redis-based cache backend for distributed caching with tenant isolation."""
+    """Redis cache with namespaced keys and best-effort item operations.
+
+    After initialization, Redis/serialization failures in ``get`` become cache
+    misses and failures in ``set`` or ``delete`` are logged and suppressed.
+    ``clear`` and initialization failures still propagate. Redis itself owns TTL
+    expiry, so ``cleanup_expired`` always returns zero.
+    """
 
     def __init__(self, redis_url: str, tenant_id: str, config: CacheConfig | None = None):
-        """Initialize Redis cache backend with tenant context.
+        """Initialize a Redis cache backend with its key namespace.
 
         Args:
             redis_url: Redis connection URL
-            tenant_id: UUID v7 tenant identifier for key isolation
+            tenant_id: Caller-supplied key namespace.
             config: Cache configuration for behavior and limits
         """
         super().__init__(tenant_id, config)
@@ -355,7 +393,7 @@ class RedisCacheBackend(CacheBackend[CacheableValue]):
                     logger.info("Redis cache initialized")
 
     async def get(self, key: str) -> CacheableValue | None:
-        """Get cached value by tenant-scoped key."""
+        """Get a namespaced value; failures after initialization become misses."""
         await self.ensure_initialized()
         assert self._redis is not None  # Guaranteed by ensure_initialized
 
@@ -371,7 +409,7 @@ class RedisCacheBackend(CacheBackend[CacheableValue]):
             return None
 
     async def set(self, key: str, value: CacheableValue, ttl: timedelta | None = None) -> None:
-        """Set cached value with optional TTL using tenant-scoped key."""
+        """Set a namespaced value; Redis write failures are logged and suppressed."""
         await self.ensure_initialized()
         assert self._redis is not None  # Guaranteed by ensure_initialized
 
@@ -397,7 +435,7 @@ class RedisCacheBackend(CacheBackend[CacheableValue]):
             logger.warning("Redis set failed", tenant_key=tenant_key, error=str(e))
 
     async def delete(self, key: str) -> None:
-        """Delete cached value by tenant-scoped key."""
+        """Delete a namespaced value; Redis failures are logged and suppressed."""
         await self.ensure_initialized()
         assert self._redis is not None  # Guaranteed by ensure_initialized
 
@@ -409,7 +447,7 @@ class RedisCacheBackend(CacheBackend[CacheableValue]):
             logger.warning("Redis delete failed", tenant_key=tenant_key, error=str(e))
 
     async def clear(self) -> None:
-        """Clear only keys owned by this SDK tenant."""
+        """Clear only keys in this backend namespace."""
         await self.ensure_initialized()
         assert self._redis is not None  # Guaranteed by ensure_initialized
         try:
@@ -447,14 +485,18 @@ class RedisCacheBackend(CacheBackend[CacheableValue]):
 
 
 class SQLiteCacheBackend(CacheBackend[CacheableValue]):
-    """SQLite-based cache backend for local development with tenant isolation."""
+    """SQLite cache with namespaced keys and explicit expiry cleanup.
+
+    Unlike Redis item operations, database and serialization failures propagate.
+    The backend creates the database parent directory during construction.
+    """
 
     def __init__(self, db_path: str | Path, tenant_id: str, config: CacheConfig | None = None):
-        """Initialize SQLite cache backend with tenant context.
+        """Initialize a SQLite cache backend with its key namespace.
 
         Args:
             db_path: Path to SQLite database file
-            tenant_id: UUID v7 tenant identifier for key isolation
+            tenant_id: Caller-supplied key namespace.
             config: Cache configuration for behavior and limits
         """
         super().__init__(tenant_id, config)
@@ -487,7 +529,7 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
                     self._initialized = True
 
     async def get(self, key: str) -> CacheableValue | None:
-        """Get cached value by tenant-scoped key."""
+        """Get a namespaced value and propagate database/serialization errors."""
         tenant_key = self._validate_and_scope_key(key)
         await self.ensure_initialized()
         assert self._db is not None  # Guaranteed by ensure_initialized
@@ -504,7 +546,7 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
         return None
 
     async def set(self, key: str, value: CacheableValue, ttl: timedelta | None = None) -> None:
-        """Set cached value with optional TTL using tenant-scoped key."""
+        """Set a namespaced value with an optional expiry."""
         tenant_key = self._validate_and_scope_key(key)
         await self.ensure_initialized()
         assert self._db is not None  # Guaranteed by ensure_initialized
@@ -525,7 +567,7 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
         await self._db.commit()
 
     async def delete(self, key: str) -> None:
-        """Delete cached value by tenant-scoped key."""
+        """Delete a value from this backend namespace."""
         tenant_key = self._validate_and_scope_key(key)
         await self.ensure_initialized()
         assert self._db is not None  # Guaranteed by ensure_initialized
@@ -534,7 +576,7 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
         await self._db.commit()
 
     async def clear(self) -> None:
-        """Clear all cached values for this tenant."""
+        """Clear all cached values in this backend namespace."""
         await self.ensure_initialized()
         assert self._db is not None  # Guaranteed by ensure_initialized
 
@@ -588,14 +630,19 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
 
 
 class MockCacheBackend(CacheBackend[CacheableValue]):
-    """In-memory mock cache backend for testing without external dependencies."""
+    """In-memory test backend approximating JSON serialization and TTL expiry.
+
+    It enforces ``max_entries`` by removing entries with the earliest expiry;
+    this is not access-order LRU. A missing TTL is represented internally by an
+    expiry 100 years in the future rather than true persistence.
+    """
 
     def __init__(self, tenant_id: str, config: CacheConfig | None = None):
         """Initialize in-memory mock cache backend.
 
         Args:
-            tenant_id: UUID v7 tenant identifier for logical isolation
-            config: Cache configuration (mostly ignored for mock)
+            tenant_id: Caller-supplied logical namespace.
+            config: Cache configuration; TTL jitter and ``max_entries`` apply.
         """
         super().__init__(tenant_id, config)
         self._data: dict[str, tuple[str, datetime]] = {}  # key -> (value, expires_at)
@@ -611,7 +658,7 @@ class MockCacheBackend(CacheBackend[CacheableValue]):
         """Mock cache is always initialized."""
 
     def _get_tenant_key(self, key: str) -> str:
-        """Create tenant-scoped cache key for logical isolation."""
+        """Create a namespaced in-memory key."""
         return self._tenant_prefix + key
 
     async def get(self, key: str) -> CacheableValue | None:
@@ -678,7 +725,7 @@ class MockCacheBackend(CacheBackend[CacheableValue]):
         return len(expired_keys)
 
     async def clear(self) -> None:
-        """Clear all entries for this tenant."""
+        """Clear all entries in this backend namespace."""
         keys_to_remove = [k for k in self._data if k.startswith(self._tenant_prefix)]
         for key in keys_to_remove:
             del self._data[key]
@@ -701,16 +748,22 @@ class MockCacheBackend(CacheBackend[CacheableValue]):
 async def create_cache_backend(
     tenant_id: str, redis_url: str | None, sqlite_path: str | None = None, config: CacheConfig | None = None
 ) -> CacheBackend[CacheableValue]:
-    """Create cache backend with tenant isolation and mock/Redis primary/SQLite fallback.
+    """Create and start a namespaced Mock, Redis, or SQLite backend.
+
+    ``mock://`` selects the in-memory backend. Otherwise the factory tries
+    Redis when a URL is present and, on supported connection failures, emits a
+    ``RuntimeWarning`` and falls back to SQLite. Without ``sqlite_path``, the
+    fallback creates ``~/.dualeai/cache/<namespace>/cache.db``. The selected
+    backend's cleanup loop is started before return.
 
     Args:
-        tenant_id: UUID v7 tenant identifier for cache key isolation
+        tenant_id: Cache-key namespace. ``DualeAISDK`` passes a token fingerprint.
         redis_url: Redis connection URL, None to skip Redis, "mock://" for mock backend
-        sqlite_path: SQLite database file path, defaults to tenant-specific file
+        sqlite_path: SQLite database file path; omission uses a namespace-specific file.
         config: Cache configuration for behavior and limits
 
     Returns:
-        Cache backend instance with tenant isolation (Mock for testing, Redis preferred, SQLite fallback)
+        Initialized backend with namespaced keys and a running cleanup loop.
     """
     cache_config = config or CacheConfig()
 
@@ -738,9 +791,9 @@ async def create_cache_backend(
                 stacklevel=2,
             )
 
-    # Fall back to SQLite with tenant-specific database
+    # Fall back to SQLite with a namespace-specific database.
     if not sqlite_path:
-        # Create tenant-specific SQLite database path for isolation
+        # Create a namespace-specific SQLite database path.
         cache_dir = Path.home() / ".dualeai" / "cache" / tenant_id
         cache_dir.mkdir(parents=True, exist_ok=True)
         sqlite_path = str(cache_dir / "cache.db")

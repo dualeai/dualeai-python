@@ -1,18 +1,12 @@
-"""Centralized constants for timing, limits, and configuration values."""
+"""Centralized timing, limit, and configuration values.
+
+Values used as public defaults are covered by ``tests/test_constants.py`` and
+the feature tests that consume them.
+"""
 
 
 class TimingDefaults:
-    """Centralized timing configuration for consistent timeout/retry behavior.
-
-    These constants eliminate hardcoded values and provide platform-wide consistency
-    for timeout, retry, and delay behaviors. Critical settings are optimized for
-    low-latency, real-time streaming performance.
-
-    Performance Impact:
-    - Streaming timeouts (50ms) enable sub-second UI updates
-    - HTTP timeouts tuned for SSE long-polling
-    - Max backoff (10s) prevents excessive delays during recovery
-    """
+    """Default SDK deadlines, lifecycle intervals, and retry delays."""
 
     DEFAULT_TASK_TIMEOUT_SECONDS = 1800
     """Default task deadline in seconds (30 min). Agentic workflows with web
@@ -21,7 +15,7 @@ class TimingDefaults:
     override via the ``deadline`` parameter on ``ask()`` / ``submit_task()``."""
 
     DEFAULT_MAX_JOBS = 100
-    """Default concurrent in-flight task cap for the SDK scheduler."""
+    """Default activity concurrency and, unless overridden, Tool concurrency."""
 
     HEARTBEAT_INTERVAL_SECONDS = 60.0
     """Agent heartbeat interval."""
@@ -30,20 +24,15 @@ class TimingDefaults:
     MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3
     """Transient heartbeat failures tolerated before serve() gives up.
 
-    At the 60s cadence, 3 consecutive misses give up ~180s after the last
-    success — inside the platform's routing band (RFC-121: online < 150s, offline
-    at 240s), so a single network blip does not tear down serve() yet a genuinely
-    dead link surfaces before the platform would keep routing to a zombie. A
-    single auth failure is tolerated once (see
-    MAX_CONSECUTIVE_HEARTBEAT_AUTH_FAILURES) so a token-rotation blip does not
-    tear down serve().
+    With the default interval, three consecutive failures stop the lifecycle
+    loop after roughly three minutes plus jitter. Authentication failures use
+    the separate, lower limit below.
     """
     MAX_CONSECUTIVE_HEARTBEAT_AUTH_FAILURES = 2
     """Consecutive auth-rejected heartbeats tolerated before serve() gives up.
 
-    One transient 403 (a token-rotation blip or a brief Profile authz-cache deny)
-    is retried on the next beat; a second consecutive 403 is a hard revocation and
-    stops serve().
+    One rejected heartbeat is retried on the next interval; a second
+    consecutive rejection stops ``serve()``.
     """
     REGISTRATION_REFRESH_INTERVAL_SECONDS = 600.0
     """Full manifest anti-entropy refresh interval."""
@@ -61,7 +50,7 @@ class TimingDefaults:
 
 
 class HTTPDefaults:
-    """HTTP transport default configuration (RFC-051)."""
+    """HTTP transport header defaults."""
 
     ACCEPT_SSE = "text/event-stream"
     """Accept header for SSE streams."""

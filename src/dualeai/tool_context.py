@@ -4,18 +4,17 @@ A read-only handle giving the callable its ``tool_call_id``, the current attempt
 number, and the absolute deadline. Tools read it with :func:`current_tool_context`.
 
 ``tool_call_id`` is issued by the model provider and passed through, so it is
-retry-constant but NOT platform-minted and NOT guaranteed unique: the router's
-own dispatch key scopes it by route span
-(``sdk-tool-dispatch:{tenant_id}:{parent_route_span_id}:{tool_call_id}``) because
-provider-local ids can repeat across turns of one task. Build an idempotency key
-from ``(task_id, tool_call_id)`` plus an input digest, never from
-``tool_call_id`` alone and never from ``attempt``, which restarts at 1 on every
-redelivery.
+stable across retries but not guaranteed globally unique. Scope it with
+``task_id`` and, for durable side effects, a domain identifier or input digest.
+Do not use ``attempt`` in the key: it restarts at 1 on redelivery.
 
-The deadline is enforced by a forced ``asyncio.wait_for`` cancellation; this
-context lets a callable cooperate — checkpoint before a side effect, or skip work
-it cannot finish — via :meth:`ToolContext.remaining_seconds` /
-:meth:`ToolContext.is_expiring`.
+Async Tool deadlines cancel the coroutine through ``asyncio.wait_for``. A
+synchronous Tool runs in a worker thread and cannot be preempted, so this context
+also lets it cooperate by checking time before side effects through
+:meth:`ToolContext.remaining_seconds` and :meth:`ToolContext.is_expiring`.
+
+Context propagation and deadline helpers are covered by
+``tests/test_tool_context.py`` and ``tests/test_agent_lifecycle.py``.
 """
 
 from __future__ import annotations
@@ -34,18 +33,17 @@ _CURRENT_TOOL_CONTEXT: contextvars.ContextVar[ToolContext | None] = contextvars.
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Read-only context for the currently executing tool call."""
+    """Read-only context for the currently executing Tool call."""
 
     tool_call_id: str
-    """Provider-issued call id. Stable across retries of one call, NOT unique.
+    """Provider-issued call id, stable across retries but not globally unique.
 
     Never use it alone as an idempotency key. Pair it with ``task_id`` and an
-    input digest. Nothing guarantees that two genuine requests differ even then:
-    the provider may reuse an id, and every turn of one conversation shares a
-    task. Give a repeatable effect its own discriminator in the tool input."""
+    input or domain discriminator appropriate to the side effect. Durable
+    deduplication remains the Tool application's responsibility."""
 
     task_id: str
-    """The task/conversation stream this tool call belongs to."""
+    """The Task stream on which this Tool call arrived."""
 
     attempt: int
     """1-based attempt number (1 on the first run; increments on opt-in retry)."""

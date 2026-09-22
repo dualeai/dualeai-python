@@ -1,4 +1,4 @@
-"""SDK agent lifecycle tests for RFC-121."""
+"""SDK hosted-Tool lifecycle and dispatch tests."""
 
 from __future__ import annotations
 
@@ -616,8 +616,8 @@ async def test_registered_tool_rejects_model_attribute_parameter_name(
 def test_registered_tool_error_is_module_class_prefixed_and_bounded() -> None:
     """Tool errors render as ``<module>.<class>: <message>``, length-bounded.
 
-    RFC-121 tool error model: a stable module.class prefix plus a truncated free-form
-    message; no error enum, no retryable flag.
+    The wire contract uses a stable module.class prefix plus a truncated
+    free-form message, without an error enum or retryable flag.
     """
     # Known builtin: literal expected value, not derived from the implementation.
     assert format_registered_tool_error(ValueError("boom")) == "builtins.ValueError: boom"
@@ -979,16 +979,16 @@ async def test_registered_tool_returns_pydantic_result_as_mapping(
 
 
 @pytest.mark.unit
-async def test_registered_tool_router_deadline_caps_long_tool_timeout(
+async def test_registered_tool_request_deadline_caps_long_tool_timeout(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A near router deadline fires before a far decorator timeout.
+    """A near request deadline fires before a far decorator timeout.
 
     Observable-outcome twin of
     test_tool_exceeding_timeout_yields_error_and_cancels_callable (which covers
     the decorator-timeout-first arm): a never-returning tool with a 60s
-    decorator timeout but a ~0.05s router deadline must be cancelled and report
+    decorator timeout but a ~0.05s request deadline must be cancelled and report
     an error result — proving the earliest limit governs, not the mechanism.
     """
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
@@ -1280,7 +1280,7 @@ async def test_serve_stops_after_two_consecutive_heartbeat_auth_failures(
     mock_http_transport: MockHTTPTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """serve() tolerates one auth-rejected beat (rotation/authz blip), then stops on a second (RFC-121 DX #5)."""
+    """serve() tolerates one rejected heartbeat, then stops on a second."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     calls = 0
@@ -1307,7 +1307,7 @@ async def test_serve_survives_single_heartbeat_auth_blip(
     mock_http_transport: MockHTTPTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A single auth-rejected beat is tolerated; serve() continues when the next beat recovers (RFC-121 DX #5)."""
+    """serve() continues when one rejected heartbeat is followed by recovery."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     stop = asyncio.Event()
@@ -1736,7 +1736,7 @@ async def test_tool_input_rejects_int_bool_confusion(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """int<->bool args are rejected, not silently coerced to a wrong value (RFC-121 DX #20)."""
+    """int<->bool arguments are rejected rather than silently coerced."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1817,7 +1817,7 @@ async def test_tool_input_rejects_int_bool_confusion_through_optional(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """The int<->bool guard applies through Optional/union, not just bare scalars (RFC-121 DX #20)."""
+    """The int<->bool guard applies through Optional/union types."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1849,7 +1849,7 @@ async def test_tool_error_transform_redacts_model_facing_message(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A per-@tool error_transform controls the model-facing error text — CWE-209 seam (RFC-121 DX #2)."""
+    """A per-@tool error_transform controls the model-facing error text."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1888,7 +1888,7 @@ async def test_tool_use_error_names_invalid_input_parameter(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A bad scalar input names the offending parameter so the model can self-correct (RFC-121 DX #25)."""
+    """A bad scalar input names the offending parameter."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1923,7 +1923,7 @@ async def test_tool_can_read_its_call_context(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """current_tool_context() exposes call id (idempotency key), attempt, task, deadline (RFC-121 DX #1/#15)."""
+    """current_tool_context() exposes call id, attempt, Task, and deadline."""
     from dualeai import current_tool_context
 
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
@@ -2198,7 +2198,7 @@ async def test_tool_scalar_return_is_wrapped_as_result(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A non-mapping JSON return wraps as {"result": value} instead of erroring (RFC-121 DX #7)."""
+    """A non-mapping JSON return wraps as {"result": value}."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -2230,7 +2230,7 @@ async def test_sync_tool_executes_via_thread_offload(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A plain (sync) @tool executes end-to-end, offloaded to a worker thread (RFC-121 DX #3)."""
+    """A plain synchronous @tool runs in a worker thread."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -2270,7 +2270,7 @@ async def test_expired_deadline_fast_fails_without_calling_tool(
     mock_http_transport: MockHTTPTransport,
     retries: int,
 ) -> None:
-    """An expired router deadline prevents invocation regardless of retry budget."""
+    """An expired request deadline prevents invocation regardless of retry budget."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()

@@ -1,70 +1,25 @@
-"""Duale AI SDK - Central orchestration point for AI agent development.
+"""Async facade for Duale AI Tasks, hosted Tools, Libraries, and activities.
 
-The SDK provides a unified interface for building and deploying AI agents
-with enterprise-grade features like caching, streaming, and multi-tenant isolation.
+Task submissions return :class:`dualeai.response.AgentResponse` objects backed
+by an HTTP/SSE operation. Registered Tools execute in the caller's process when
+they are delivered on a Task stream. Library and attachment operations use the
+same SDK configuration but ordinary HTTP request/response calls.
 
-Architecture Overview (RFC-051):
---------------------------------
-SDK → HTTP Bridge (SSE) → Platform → LLM Workers
+Cached activities use a process-local scheduler and a Redis backend when it is
+available, otherwise SQLite. Invalidation is TTL-, backend-, or caller-driven;
+the SDK does not detect function changes or upstream data changes.
 
-All operations are:
-- Tenant-scoped via API token authentication
-- Agent-isolated using unique agent_id per SDK instance
-- Real-time streaming via Server-Sent Events (SSE)
+Constructing the SDK reconfigures process-global stdlib and structlog logging.
+When telemetry is enabled it may also install process-global OpenTelemetry
+providers and optional instrumentors. See :mod:`dualeai.logging_config` and
+:mod:`dualeai.observability` before embedding the SDK in an application that
+already owns either subsystem.
 
-Core Capabilities:
------------------
-1. Agent Registration & Lifecycle:
-   - Bind one centrally provisioned agent_id to the SDK instance
-   - Publish registered tool manifests through sdk.serve()
-   - Automatic heartbeat monitoring
-   - Graceful shutdown and resource cleanup
-
-2. Task Submission & Orchestration:
-   - Submit tasks with routing policies
-   - Real-time streaming with SSE
-   - Process-local dependency circuit breaking
-   - Type-safe responses with Pydantic validation
-
-3. Activity Caching:
-   - TTL-based caching for expensive operations
-   - Redis primary, SQLite fallback
-   - Automatic cache invalidation
-
-4. Multi-Tenant Isolation:
-   - Complete tenant separation via API authentication
-   - Agent-specific message routing
-   - No cross-tenant data leakage
-
-Performance Optimizations:
--------------------------
-- SSE streaming for real-time updates
-- Auto-reconnect with Last-Event-ID
-- Connection pooling and reuse
-- Per-task ``asyncio.Task`` lifecycle: cancel propagates to bridge
-
-Usage Pattern:
--------------
-async with DualeAISDK(config) as sdk:
-    # Register agents
-    sdk.register_agent("my-agent", process_func, agent_config)
-
-    # Submit a task — returns AgentResponse[T]; await response.model() for the result.
-    response = await sdk.submit_task(
-        action="Process document",
-        skills=[SkillEnum.ocr, SkillEnum.parsing],
-        streaming=True,
-    )
-    async for delta in response.stream():
-        print(delta.delta, end="", flush=True)
-    final = await response.model()
-
-    # Execute a cached activity
-    result = await sdk.execute_activity(
-        expensive_operation,
-        cache_ttl=timedelta(hours=1),
-        *args,
-    )
+The local behaviors summarized here are covered across
+``tests/test_feature_ask.py``, ``tests/test_feature_caching.py``,
+``tests/test_agent_lifecycle.py``, ``tests/test_attachments.py``, and
+``tests/test_feature_health.py``. Service-side authorization and execution
+outcomes are not enforced by this repository's tests.
 """
 
 import asyncio
@@ -204,7 +159,7 @@ class ScheduledToolUse:
 
 @lru_cache(maxsize=128)
 def _generate_json_schema_cached(response_type: type) -> dict[str, JsonValue | None]:
-    """Generate JSON Schema from Python type for router validation (cached, module-level).
+    """Generate JSON Schema from a Python type for request validation.
 
     This is a module-level cached function to avoid memory leaks from instance-level caching.
     All SDK instances share this cache, preventing unbounded memory growth.
@@ -234,7 +189,13 @@ def _generate_json_schema_cached(response_type: type) -> dict[str, JsonValue | N
 
 
 class DualeAISDK:
-    """Simplified SDK manager for agents, activities, and caching."""
+    """Manage Tasks, hosted Tools, Libraries, attachments, and activities.
+
+    Instances lazily create their network, cache, and activity-scheduler
+    resources. Use the async context manager or call :meth:`cleanup` to release
+    those resources. Task and Library authorization remains a server concern;
+    local cache namespacing uses a SHA-256 fingerprint of the configured token.
+    """
 
     def __init__(  # Wide constructor: many independent field initializations
         self,
@@ -248,22 +209,37 @@ class DualeAISDK:
         graceful_shutdown_timeout: float = 0.0,
         transport: HTTPTransportProtocol | None = None,
     ):
-        """Initialize SDK with configuration.
+        """Initialize an SDK instance.
+
+        Construction calls :func:`dualeai.logging_config.configure_logging`,
+        which replaces root handlers and changes process-wide logging settings.
+        Enabled observability can also affect global OpenTelemetry state.
 
         Args:
-            config: Configuration object (creates default if not provided)
-            agent_id: Pre-provisioned agent identifier used by lifecycle endpoints.
+            config: Configuration object. Omission loads ``DUALEAI_*`` settings.
+            agent_id: Provisioned identity for hosted-tool lifecycle calls.
+                Overrides ``config.agent_id`` and is exposed as ``sdk.agent_id``;
+                attachment uploads require it explicitly unless exactly one
+                legacy agent is registered.
             max_jobs: Default concurrent cached-activity and registered-tool limit.
             job_timeout: Cached-activity timeout in seconds.
-            auto_start: Automatically start heartbeat and registration
+            auto_start: Schedule hosted-tool registration and heartbeats when an
+                event loop is running, and start them on async context entry.
+                Direct construction defaults to ``True``; :func:`dualeai.create_sdk`
+                defaults to ``False``.
             backpressure_config: Activity scheduler and task circuit-breaker policy.
             max_concurrent_tools: Max concurrent registered-tool executions. Defaults to
                 ``max_jobs`` so tool concurrency is decoupled from the job-scheduler pool
                 only when explicitly set.
             graceful_shutdown_timeout: Seconds to let in-flight tool results finish on
                 shutdown before cancelling them. Default 0.0 cancels immediately.
-            transport: Optional pre-configured HTTP transport for dependency injection.
-                       If None, HTTPTransport will be created during connect().
+            transport: Preconfigured HTTP transport for dependency injection.
+                Omission creates the production transport on first use.
+
+        Raises:
+            RuntimeError: If default configuration cannot be loaded.
+            pydantic.ValidationError: If ``agent_id`` or a supplied configuration
+                value fails validation.
         """
         # If no config provided, try to load from environment variables
         if config is None:
@@ -312,7 +288,7 @@ class DualeAISDK:
         )
         self._tool_result_tasks: set[asyncio.Task[None]] = set()
         # Bound concurrent registered-tool executions so a burst of tool.use
-        # events cannot spawn unbounded in-flight customer work (RFC-121).
+        # events cannot spawn unbounded in-flight customer work.
         # Bounded pool: a registered tool must not synchronously block on a
         # sibling registered tool, or the pool cannot drain.
         self._max_concurrent_tools = max_concurrent_tools if max_concurrent_tools is not None else max_jobs
@@ -355,11 +331,21 @@ class DualeAISDK:
     # --- Lifecycle delegators (state + machine live in dualeai.lifecycle.LifecycleManager) ---
 
     async def start(self) -> None:
-        """Start SDK agent registration and heartbeat (delegates to the lifecycle manager)."""
+        """Publish the hosted Tool manifest and start lifecycle heartbeats.
+
+        The call is idempotent. A configured ``agent_id`` is required when any
+        hosted Tools are registered; with neither an agent id nor Tools it is a
+        no-op.
+        """
         await self._lifecycle.start()
 
     async def serve(self, *, stop_event: asyncio.Event | None = None) -> None:
-        """Run the hosted-agent lifecycle until stopped; teardown ownership stays on the SDK."""
+        """Run the hosted-Tool lifecycle until stopped or a heartbeat fails.
+
+        ``serve`` publishes the manifest and maintains heartbeats; Tool calls
+        themselves arrive on Task streams opened by this same SDK instance. On
+        exit, ``serve`` calls :meth:`cleanup` for the whole SDK.
+        """
         await self._lifecycle.serve(stop_event=stop_event, on_stop=self.cleanup)
 
     def _estimated_server_time(self, local_now: datetime | None = None) -> datetime:
@@ -374,12 +360,11 @@ class DualeAISDK:
         """Ensure cache backend is initialized."""
         cache = self._cache
         if cache is None:
-            # Try Redis first, fallback to SQLite with production cache configuration
-            # RFC-051: tenant_id derived from token hash for cache isolation
-            # Server-side identity resolution handles actual tenant mapping
+            # Try Redis first, then fall back to SQLite. The namespace is a
+            # token fingerprint, not the configured Library tenant id.
             cache_config = CacheConfig()
             sqlite_path_value = str(self.config.sqlite_path) if self.config.sqlite_path else None
-            # Use token hash for cache tenant isolation (token resolves to tenant server-side)
+            # Token rotation intentionally selects a different cache namespace.
             # config.token is always str — field_validator raises if None/missing
             token = self.config.token
             assert token is not None, "config.token must be set (validated by DualeAIConfig)"
@@ -421,7 +406,12 @@ class DualeAISDK:
         return self._scheduler
 
     def register_agent(self, agent_id: str, func: Callable[..., object], agent_config: AgentConfig) -> None:
-        """Register an agent function."""
+        """Record legacy local agent metadata.
+
+        This registry supports compatibility decorators and attachment-agent
+        inference. It is not the hosted Tool manifest published by
+        :meth:`serve`; use :meth:`tool` or ``@dualeai.tool`` for hosted Tools.
+        """
         self.agents[agent_id] = (func, agent_config)
         # Hosted-agent lifecycle registration is sent separately by sdk.serve().
 
@@ -443,7 +433,32 @@ class DualeAISDK:
         retries: int = 0,
         error_transform: Callable[[Exception], str] | None = None,
     ) -> RegisteredTool:
-        """Register a customer-hosted tool (``async def`` or plain ``def``) on this SDK."""
+        """Compile and register one customer-hosted Tool on this SDK.
+
+        The callable can be synchronous or asynchronous. Registration compiles
+        its annotated signature into the same Pydantic contract used for the
+        published schema and invocation validation. See
+        :func:`dualeai.decorators.tool` for the execution, retry, cancellation,
+        return-value, and idempotency contract.
+
+        Args:
+            func: Annotated callable to expose under its Python name.
+            description: Non-empty model-facing Tool description. The callable's
+                docstring is not published.
+            timeout: Positive per-attempt timeout shared with the absolute
+                invocation deadline.
+            retries: Non-negative additional attempts after the first.
+            error_transform: Optional redactor for model-facing exception text.
+
+        Returns:
+            A detached copy of the generated wire manifest entry.
+
+        Raises:
+            RuntimeError: If this SDK has no provisioned ``agent_id``.
+            ValueError: If description, timeout, retries, name, or registration
+                uniqueness is invalid.
+            TypeError: If the callable signature cannot form a Tool contract.
+        """
         if self.agent_id is None:
             raise RuntimeError("SDK tools require agent_id. Configure DualeAISDK(agent_id=...) or DUALEAI_AGENT_ID.")
         if not description.strip():
@@ -547,15 +562,13 @@ class DualeAISDK:
         Args:
             task_id: Child task that emitted the matching ``tool.use`` events.
                 Never substitute its continuation parent.
-            results: Successful or failed outputs keyed by tool-call ID.
-            last_event_id: Exact ``NATS-sequence:event-index`` cursor of the
-                triggering ``tool.use`` event. Passing it resumes after that
-                event on the same child stream.
+            results: Successful or failed outputs, each carrying its Tool-call id.
+            last_event_id: Opaque SSE cursor of the triggering ``tool.use``
+                event. Passing it resumes after that event on the same child
+                stream.
 
         Returns:
-            The terminal event from the same public ``task_id`` stream. Bridge
-            may use a hidden internal continuation to carry the tool results;
-            that internal ID is not a public SDK task.
+            The terminal event from the same public ``task_id`` stream.
         """
         request = BridgeToolResultsRequest(type="tool_results", tool_results=results)
         client = await self._ensure_events_client()
@@ -724,10 +737,9 @@ class DualeAISDK:
         docstring); a per-attempt timeout cancels the coroutine mid-run, so a
         retried side effect may have partially applied.
         """
-        # TODO(RFC-121 §Out of Scope): add a per-client retry-ratio budget and a
-        # suppress-when-failing throttle before enabling wide fan-out retries.
-        # V1 bounds retry by the per-call attempt count and the absolute deadline
-        # only (Google SRE Ch. 21 fan-out amplification; Bronson et al. HotOS 2021).
+        # A future retry-ratio budget could further limit fan-out amplification.
+        # Today retries are bounded by the per-call attempt count and absolute
+        # deadline only.
         deadline_budget = max(0.0, (deadline_at - self._estimated_server_time()).total_seconds())
         # Surface when the deadline is too short for the configured retries to fire —
         # otherwise `retries=N` silently degrades to fewer (or zero) real attempts.
@@ -855,7 +867,39 @@ class DualeAISDK:
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> CacheableValue:
-        """Execute activity with caching, retry logic, and job management."""
+        """Execute and cache a callable through the activity scheduler.
+
+        The cache key is derived from the callable name and ``repr`` of its
+        arguments. Changing a callable's implementation does not invalidate old
+        entries, and different inputs with identical representations can collide.
+        Version inputs explicitly when that distinction matters. A cached JSON
+        ``null`` is indistinguishable from a cache miss.
+
+        A synchronous callable runs directly on the event-loop thread. Use an
+        async callable, or perform blocking work in your own executor. Every
+        ordinary ``Exception`` is retried, so side-effecting activities must be
+        idempotent before ``max_retries`` is greater than zero.
+
+        Args:
+            func: Synchronous or asynchronous callable returning a JSON value.
+            cache_ttl: Entry lifetime. ``None`` stores without backend expiry;
+                it does not disable caching.
+            max_retries: Additional attempts after the first call. Use a
+                non-negative integer; this method does not proactively validate
+                negative values.
+            *args: Positional arguments forwarded to ``func`` and included in
+                the cache-key input.
+            **kwargs: Keyword arguments forwarded to ``func`` and included in
+                the cache-key input.
+
+        Returns:
+            The cached or newly computed JSON-compatible result.
+
+        Raises:
+            TimeoutError: If scheduler execution exceeds ``job_timeout``.
+            Exception: The final callable failure after retries, or an error
+                raised while initializing a non-best-effort backend.
+        """
         # Extract function name: FunctionType has __name__; fallback to class name for callables
         func_name = func.__name__ if isinstance(func, types.FunctionType) else type(func).__name__
         # Start observability tracking
@@ -972,6 +1016,12 @@ class DualeAISDK:
 
         Returns:
             List of PreparedAttachment with key, filename, description, size.
+
+        Raises:
+            FileNotFoundError: If a path does not exist.
+            ValueError: If a path is not a regular, non-empty file.
+            pydantic.ValidationError: If generated metadata or a description
+                violates ``PreparedAttachment`` bounds.
         """
         return prepare_attachments(files)
 
@@ -1015,21 +1065,17 @@ class DualeAISDK:
         *,
         agent_id: str | None = None,
     ) -> dict[str, LibraryDocumentCreateResponse]:
-        """Upload attachments in parallel via presigned URLs.
+        """Upload prepared attachments to a Task-scoped Library.
 
         Resolve the call-scoped Library once, then create an upload session,
         upload presigned S3 parts, and create a queued Library document for
-        each attachment. All attachments upload concurrently.
-
-        Library calls go through the transport over plain HTTPS with
-        ``Authorization: Bearer <api_token>`` (RFC-113 — end-to-end
-        body encryption for Library is deferred). The Bridge SSE pipeline
-        on the same transport keeps HPKE for its task stream.
-        S3 presigned URL PUTs use a plain aiohttp session.
+        each attachment. At most eight file pipelines and eight presigned-part
+        requests are active at once. The batch is not transactional.
 
         Args:
-            task_id: Client-selected task identifier (UUID4 by default).
-            attachments: Prepared attachments from prepare_attachments().
+            task_id: Client-selected task identifier that will also be supplied
+                as ``request_id`` when the Task is submitted.
+            attachments: Values returned by :meth:`prepare_attachments`.
             agent_id: Agent identifier (keyword-only). Optional when a single
                 agent is registered on this SDK — resolved automatically. Required
                 when zero or multiple agents are registered because the
@@ -1040,7 +1086,15 @@ class DualeAISDK:
 
         Raises:
             ValueError: If ``agent_id`` is omitted but cannot be unambiguously
-                resolved from the SDK's registered agents.
+                resolved, an attachment key is duplicated, or a prepared file
+                is no longer a regular non-empty file of the recorded size.
+            FileNotFoundError: If a prepared file no longer exists.
+            LibraryUploadError: If a local read or object-store upload fails.
+                ``completed_receipts`` contains documents already queued by the
+                non-transactional batch.
+            DualeAIAuthError: If the Library request is unauthorized.
+            BusinessError: If the Library request is rejected.
+            DualeAIConnectionError: If a Library transport or server failure occurs.
         """
         if not attachments:
             return {}
@@ -1056,18 +1110,24 @@ class DualeAISDK:
         return await self._libraries.upload(library.id, attachments)
 
     async def stop_task(self, task_id: str, reason: str) -> TaskStopAccepted:
-        """Stop a running task and every task started under it.
+        """Request that the platform stop a Task.
 
-        The call returns as soon as the platform accepts the request. The task
-        ends with a stopped result carrying this reason, and awaiting the
-        response raises :class:`TaskStoppedError`.
-
-        Usage measured before the stop is billed as for a task that finished on
-        its own. Work the stop prevents is never started, so it costs nothing.
+        The returned receipt only acknowledges the request. It does not prove
+        that the target exists, is eligible to stop, or will later emit a
+        ``task.stopped`` event. If such an event is observed, awaiting
+        :meth:`AgentResponse.model <dualeai.response.AgentResponse.model>` raises
+        :class:`dualeai.exceptions.TaskStoppedError` with the event's reason.
 
         Args:
             task_id: The task to stop.
-            reason: Why it is being stopped. Returned with the stopped result.
+            reason: Non-empty explanation sent with the request.
+
+        Returns:
+            The request-acceptance receipt.
+
+        Raises:
+            ValueError: If ``reason`` is empty or whitespace.
+            DualeAIError: If the request fails before acceptance.
         """
         if not reason or not reason.strip():
             raise ValueError("Stop reason cannot be empty")
@@ -1089,18 +1149,46 @@ class DualeAISDK:
         task_type: str = "completion",
         attachments: list[PreparedAttachment] | None = None,
     ) -> "AgentResponse[T]":
-        """Submit an agent execution request under the dependency circuit breaker.
+        """Submit a root Task under the process-local dependency circuit breaker.
 
         Returns an :class:`AgentResponse` whose ``task`` attribute is
         the ``asyncio.Task`` running the bridge SSE iteration. Cancel
         via ``response.task.cancel()`` propagates to the bridge
-        connection (TCP closed). Router-side cancel is a separate
-        concern.
+        connection (TCP closed). Use :meth:`stop_task` to send a separate
+        platform stop request.
 
-        BREAKING CHANGE (pre-1.0): previously returned a ``str`` task_id;
-        now returns an ``AgentResponse``. Read ``response.task_id`` for the
-        prior value, ``await response.model()`` / ``response.stream()`` for
-        the result.
+        Args:
+            action: Non-empty Task instruction.
+            skills: Skills used to derive ``required_skills`` when
+                ``routing_policy`` is omitted.
+            routing_policy: Explicit routing policy. Takes precedence over the
+                policy derived from ``skills``.
+            response_type: Optional type for local ``AgentResponse.model()``
+                validation and, unless overridden, request-schema derivation.
+            response_schema: Optional JSON Schema used when deriving a response
+                format from ``response_type``.
+            response_format: Explicit wire response format. Takes precedence
+                over ``response_schema`` derivation.
+            streaming: Request content delta/reset events.
+            deadline: Optional absolute deadline. Omission uses the SDK default.
+                A timezone-naive value currently fails with ``TypeError`` during
+                deadline arithmetic.
+            request_id: Optional client-selected root Task id; omission generates
+                UUID4. Use the same id previously used for attachment upload.
+            task_type: Observability label only; it does not change routing.
+            attachments: Prepared metadata for files already uploaded under
+                ``request_id``. This method does not upload or verify them.
+
+        Returns:
+            A response handle whose runner may still be in flight.
+
+        Raises:
+            ValueError: If ``action`` is empty or whitespace.
+            TypeError: If a supplied ``deadline`` is timezone-naive.
+            RuntimeError: If the process-local Task dependency circuit is open.
+
+        Transport failures after the runner is created surface through
+        ``response.model()`` or by awaiting ``response.task``.
         """
         if not action or not action.strip():
             raise ValueError("Action cannot be empty")
@@ -1602,7 +1690,14 @@ class DualeAISDK:
             )
 
     def get_health_status(self) -> dict[str, object]:
-        """Get SDK health status with observability metrics."""
+        """Return a local component snapshot and record its metrics.
+
+        This is diagnostic state, not a remote service readiness probe. Optional
+        components that have not been initialized report healthy. Cache health
+        means only that the SDK has not observed a local cache-state failure;
+        this method performs no backend I/O. If component inspection itself
+        raises, the pre-inspection healthy value is retained.
+        """
         components = self._component_health()
         self._update_health_metrics(components)
 
@@ -1625,7 +1720,7 @@ class DualeAISDK:
 
     @property
     def events_client(self) -> CloudEventsClient | None:
-        """Cloud events client."""
+        """Lower-level HTTP/SSE client after first connection, otherwise ``None``."""
         return self._events_client
 
     @events_client.setter
@@ -1669,7 +1764,12 @@ class DualeAISDK:
 
     @property
     def backpressure_controller(self) -> BackpressureController:
-        """Task circuit-breaker controller."""
+        """Process-local Task dependency circuit-breaker controller.
+
+        Activity queue bounds live in the same configuration, but this
+        controller does not impose a universal limit on Task streams, Library
+        operations, or Tool delivery.
+        """
         return self._backpressure_controller
 
     async def _cleanup_scheduler(self) -> None:
@@ -1739,7 +1839,14 @@ class DualeAISDK:
         self._scheduled_tool_uses.clear()
 
     async def cleanup(self) -> None:
-        """Clean up resources (heartbeat, startup tasks, scheduler, cache, connections)."""
+        """Close resources owned directly by this SDK instance.
+
+        This cancels Task runners and Tool-result work, stops lifecycle tasks,
+        and closes the scheduler, network transport, cache, and dedicated Tool
+        executor. It does not flush or shut down process-global OpenTelemetry
+        providers and does not call
+        :meth:`SDKObservability.cleanup <dualeai.observability.SDKObservability.cleanup>`.
+        """
         # Cancel in-flight task runners first so they stop touching the bridge.
         await self._cleanup_inflight_tasks()
         await self._cleanup_tool_result_tasks()

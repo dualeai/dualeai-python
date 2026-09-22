@@ -1,8 +1,8 @@
-"""The SDK returns a marked answer with every code point intact (RFC-139).
+"""The SDK returns terminal answer text with every code point intact.
 
-A customer verifies the mark on the text this parser hands back. One altered
-code point invalidates the signature, so the wire form — ASCII-escaped by the
-Bridge and framed across `data:` lines — must decode exactly.
+The fixture contains visible text plus an opaque suffix. The JSON-escaped SSE
+wire form must decode exactly; the SDK neither assigns meaning to the suffix nor
+modifies it.
 
 The fixture is real codec output, so this suite does not need the codec.
 """
@@ -43,7 +43,7 @@ def _completion_of(event_data: object) -> str:
 
 
 class TestMarkedAnswerReachesTheCaller:
-    """What Router marked is what the SDK returns."""
+    """The terminal text emitted by the server is what the SDK returns."""
 
     @pytest.mark.unit
     async def test_completion_survives_parsing(self) -> None:

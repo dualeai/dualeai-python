@@ -1,14 +1,17 @@
 """SSE (Server-Sent Events) parser for aiohttp.
 
 Custom implementation since aiohttp-sse-client is inactive. Parses the SSE wire
-format (https://html.spec.whatwg.org/multipage/server-sent-events.html) SCOPED to
-the bridge's emission profile: line terminators are LF/CRLF only (bare-CR
-delimiters are NOT handled), and ``id`` is the strict
-``NATS-sequence:event-index`` cursor. Not a general-purpose SSE reader.
+format (https://html.spec.whatwg.org/multipage/server-sent-events.html), scoped
+to the Task API's emission profile: line terminators are LF/CRLF only (bare-CR
+delimiters are not handled), and ``id`` is treated as an opaque server-defined
+cursor. This is not a general-purpose SSE reader.
 
 Integrity validation: Server sends `: crc={hex}` comment before each event.
 Client validates CRC32 of "{event_type}:{data}" against checksum.
 On mismatch, raises SSEChecksumError for retry with Last-Event-ID.
+
+Parsing and exact-text preservation are covered by ``tests/test_sse_parser.py``
+and ``tests/test_marked_answer_parsing.py``.
 """
 
 import json

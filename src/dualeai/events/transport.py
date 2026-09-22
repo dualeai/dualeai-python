@@ -1,4 +1,4 @@
-"""Transport Protocol for SDK communication (RFC-051).
+"""Structural protocol for SDK HTTP and SSE communication.
 
 Provides clean dependency injection boundary for testing.
 
@@ -6,6 +6,9 @@ Protocol:
 - HTTPTransportProtocol: HTTP/SSE bridge transport
 
 Production uses HTTPTransport, tests use MockHTTPTransport.
+
+Protocol conformance is exercised through the production and mock transports in
+``tests/test_http_transport_connect.py`` and ``tests/mocks/mock_http.py``.
 """
 
 from collections.abc import AsyncIterator
@@ -45,7 +48,7 @@ if TYPE_CHECKING:
 
 
 class HTTPTransportProtocol(Protocol):
-    """Protocol for HTTP/SSE bridge transport (RFC-051).
+    """Protocol implemented by production and test HTTP/SSE transports.
 
     Abstracts HTTP bridge operations for clean dependency injection.
     Production uses HTTPTransport, tests use MockHTTPTransport.
@@ -67,10 +70,10 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def stop_task(self, task_id: str, request: "TaskStopRequest") -> "TaskStopAccepted":
-        """Ask the platform to stop a running task and everything under it.
+        """Submit a Task stop request and return its acceptance receipt.
 
-        POST /v1/tasks/{task_id}/stop. Returns once the platform accepts the
-        request; the task ends with `task.stopped` on its event stream.
+        Acceptance does not prove that the target exists, is eligible to stop,
+        or will later emit ``task.stopped``.
         """
         ...
 
@@ -113,8 +116,8 @@ class HTTPTransportProtocol(Protocol):
 
         POST /v1/tasks/{task_id} with type=tool_results. The bridge publishes
         an internal tool-result continuation beneath the URL task and returns
-        that URL task's existing stream. ``last_event_id`` is the exact
-        ``NATS-sequence:event-index`` cursor for the triggering ``tool.use``.
+        that URL task's existing stream. ``last_event_id`` is the opaque SSE
+        cursor for the triggering ``tool.use``.
         """
         ...
 
@@ -147,7 +150,7 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def delete_library(self, request: "LibraryDeleteRequest") -> None:
-        """Soft-delete one Library."""
+        """Send a delete request for one Library."""
         ...
 
     async def list_library_documents(self, request: "LibraryDocumentListRequest") -> "LibraryDocumentPage":
@@ -159,20 +162,18 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def delete_library_document(self, request: "LibraryDocumentDeleteRequest") -> None:
-        """Soft-delete one document."""
+        """Send a delete request for one document."""
         ...
 
     async def create_document_upload(
         self,
         request: "LibraryDocumentUploadRequest",
     ) -> "LibraryDocumentUploadResponse":
-        """Request presigned URLs for document upload (RFC-113).
+        """Request presigned URLs for document upload.
 
         ``POST /libraries/v1/tenants/{tenant_id}/document-uploads`` over plain
-        HTTPS with ``Authorization: Bearer <api_token>``. Caller identity is
-        carried by the bearer token (the server resolves
-        ``token:{sha512(api_token)}`` via Profile); the body is just
-        ``{size_bytes}``.
+        HTTPS with ``Authorization: Bearer <api_token>``. The body contains only
+        ``size_bytes``.
 
         Args:
             request: Upload request body.
@@ -192,8 +193,8 @@ class HTTPTransportProtocol(Protocol):
         """Create a queued Library document after all parts uploaded.
 
         ``POST /libraries/v1/tenants/{tenant_id}/{library_id}/documents`` over
-        plain HTTPS with ``Authorization: Bearer <api_token>`` (RFC-113,
-        §5). The body binds a temporary upload session to a stable Library id.
+        plain HTTPS with ``Authorization: Bearer <api_token>``. The body binds
+        a temporary upload session to a stable Library id.
 
         Args:
             request: Operation request with the stable Library identifier and

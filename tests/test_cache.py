@@ -54,8 +54,8 @@ class TestRedisCacheCommands:
         client.set.assert_awaited_once_with("dualeai:sdk:tenant-test:key", '"value"')
         client.setex.assert_not_awaited()
 
-    async def test_clear_deletes_only_the_sdk_tenant_namespace(self):
-        """Redis clear targets only the current SDK tenant namespace."""
+    async def test_clear_deletes_only_the_backend_namespace(self):
+        """Redis clear targets only the current backend namespace."""
         backend, client = _create_mock_redis_backend()
         scanned: list[dict[str, str | int]] = []
 
@@ -157,7 +157,7 @@ class TestCacheBasicOperations:
         assert await cache_backend.get(key) is None
 
     async def test_clear(self, cache_backend: CacheBackend[object]):
-        """Test clear operation removes all tenant keys."""
+        """Test clear operation removes all keys in the backend namespace."""
         # Set multiple keys
         keys = ["key1", "key2", "key3"]
         for key in keys:
@@ -206,12 +206,12 @@ class TestCacheBasicOperations:
 
 
 @pytest.mark.unit
-class TestCacheTenantIsolation:
-    """Test tenant isolation in cache backends."""
+class TestCacheNamespaceIsolation:
+    """Test caller-supplied namespace separation in cache backends."""
 
     @pytest.mark.parametrize("cache_factory", ["sqlite"], indirect=True)
-    async def test_tenant_isolation(self, cache_factory: CacheFactory):
-        """Test that different tenants have isolated cache spaces."""
+    async def test_namespace_isolation(self, cache_factory: CacheFactory):
+        """Different namespace prefixes isolate otherwise identical keys."""
         cache1 = await cache_factory("12345678-1234-5678-9012-123456789001")
         cache2 = await cache_factory("12345678-1234-5678-9012-123456789002")
 

@@ -1,4 +1,4 @@
-"""Production aiojobs scheduler factory."""
+"""Factory for the bounded aiojobs scheduler used by cached activities."""
 
 import aiojobs
 
@@ -8,7 +8,7 @@ def create_production_scheduler(
     close_timeout: float = 5.0,
     pending_limit: int = 1000,
 ) -> aiojobs.Scheduler:
-    """Create a production-ready aiojobs scheduler.
+    """Create an ``aiojobs.Scheduler`` with explicit running/pending bounds.
 
     Args:
         max_jobs: Maximum concurrent jobs.
@@ -16,7 +16,9 @@ def create_production_scheduler(
         pending_limit: Maximum pending jobs in queue.
 
     Returns:
-        Configured ``aiojobs.Scheduler`` for production use.
+        Configured ``aiojobs.Scheduler``.
+
+    Configuration forwarding is exercised by ``tests/test_feature_caching.py``.
     """
     return aiojobs.Scheduler(
         limit=max_jobs,

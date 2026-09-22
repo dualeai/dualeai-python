@@ -213,8 +213,8 @@ class TestMessagingConnectionError:
     """MessagingConnectionError lifts ``endpoint``."""
 
     def test_endpoint_round_trips(self):
-        error = MessagingConnectionError("connect failed", endpoint="nats://localhost:4222")
-        assert error.endpoint == "nats://localhost:4222"
+        error = MessagingConnectionError("connect failed", endpoint="https://api.example.test")
+        assert error.endpoint == "https://api.example.test"
 
 
 @pytest.mark.unit

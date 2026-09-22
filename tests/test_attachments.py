@@ -1,4 +1,4 @@
-"""Unit tests for attachment handling (RFC-113).
+"""Unit tests for attachment preparation and upload handling.
 
 Layered with ``test_attachments_s3.py`` (the end-to-end moto+aiohttp suite):
 
@@ -699,7 +699,7 @@ def _noop_agent_func(*_args: object, **_kwargs: object) -> None:
 class TestUploadAttachmentsAgentResolution:
     """``DualeAISDK.upload_attachments`` resolves agent_id from public calls.
 
-    Contract (RFC-113 call-scope path):
+        Call-scope path contract:
 
     - ``agent_id`` is keyword-only and optional.
     - One registered agent → resolved silently.

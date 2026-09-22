@@ -548,10 +548,7 @@ async def test_psk_id_header_is_the_pinned_cross_tier_token_digest():
             headers = request_call.kwargs.get("headers", {})
 
             expected = base64.urlsafe_b64encode(bytes.fromhex(PINNED_DIGEST)).rstrip(b"=").decode()
-            assert headers["X-HPKE-PSK-ID"] == expected, (
-                "the identity this SDK presents is not SHA-512 of the complete token; Profile "
-                "resolves the raw token by these exact bytes and would find no row"
-            )
+            assert headers["X-HPKE-PSK-ID"] == expected, "the PSK identity is not SHA-512 of the complete token"
 
         finally:
             await transport.disconnect()
@@ -572,13 +569,12 @@ def test_the_pinned_digest_is_what_stdlib_sha512_makes_of_the_whole_token():
 async def test_no_authorization_header_pure_psk_auth():
     """Verify HTTPTransport does NOT send Authorization header (hpke-http v1.3.0).
 
-    hpke-http v1.3.0 uses pure PSK authentication:
+    The configured hpke-http transport uses PSK authentication:
     - psk_id (SHA-512 of token) sent via X-HPKE-PSK-ID header by HPKEClientSession
-    - NO Authorization header - avoids MITM token exposure at TLS proxy
-    - Server resolves psk_id → raw token via Profile service
+    - no duplicate Authorization bearer header on Task requests
 
-    The Authorization header was removed to prevent exposing the token in clear
-    HTTP headers (only TLS protects headers, MITM at proxy would see it).
+    This test pins the observable request headers, not server-side identity
+    resolution.
     """
     transport = HTTPTransport(
         endpoint=_BASE_URL,

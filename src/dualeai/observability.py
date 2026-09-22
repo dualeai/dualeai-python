@@ -1,8 +1,20 @@
-"""
-Simplified Duale AI SDK Observability.
+"""Optional OpenTelemetry traces, metrics, and log correlation for the SDK.
 
-Provides OpenTelemetry-based metrics, tracing, and logging integration
-with pre-created instruments and streamlined configuration.
+Telemetry is enabled only when both an OTLP endpoint and telemetry token are
+configured. The SDK exports traces and metrics; it does not install an
+OpenTelemetry log exporter. Optional aiohttp, Redis, SQLite, and system
+instrumentors are activated only when their instrumentation packages are
+installed. OTLP exporters are base dependencies; the ``telemetry`` extra adds
+only those optional instrumentors.
+
+OpenTelemetry providers and instrumentors are process-global. Existing host
+providers take precedence where the OpenTelemetry API exposes them, while a
+provider installed here can be reused by later SDK instances. SDK cleanup does
+not flush or shut down global providers.
+
+Provider, instrumentor, and redaction behavior is covered by
+``tests/test_feature_observability.py`` and
+``tests/test_observability_tool_error_redaction.py``.
 """
 
 import functools
@@ -36,9 +48,13 @@ from dualeai.version import get_version
 class Instrumentor(Protocol):
     """Optional OpenTelemetry instrumentor methods used by the SDK."""
 
-    def instrument(self) -> None: ...
+    def instrument(self) -> None:
+        """Activate this process-global instrumentor."""
+        ...
 
-    def uninstrument(self) -> None: ...
+    def uninstrument(self) -> None:
+        """Deactivate this process-global instrumentor when supported."""
+        ...
 
 
 InstrumentorFactory = Callable[[], Instrumentor]
@@ -83,7 +99,7 @@ ExporterT = TypeVar("ExporterT", OTLPSpanExporter, OTLPMetricExporter)
 
 
 def safe_observability(func: Callable[P, ReturnT]) -> Callable[P, ReturnT | None]:
-    """Decorator to safely handle observability operations with error suppression."""
+    """Suppress ordinary observability failures so they cannot fail SDK work."""
 
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> ReturnT | None:
@@ -141,13 +157,26 @@ def inject_trace_context(headers: dict[str, str], enabled: bool = True) -> dict[
 
 
 class SDKObservability:
-    """Simplified observability for Duale AI SDK with pre-created instruments."""
+    """Configure SDK traces and metrics and expose pre-created instruments.
+
+    The object is disabled unless ``config.observability.token`` and endpoint
+    are both non-empty. Its ``tenant_id`` attribute is a SHA-256 API-token
+    fingerprint used for telemetry correlation and cache namespacing; it is not
+    ``DualeAIConfig.tenant_id`` or a canonical tenant identifier.
+
+    When this object installs a tracer provider it uses ``ALWAYS_ON`` sampling.
+    If the host has already installed a provider, that provider and its sampling
+    policy remain in control. Optional-instrumentor and metric-recording
+    failures are suppressed; initial provider/exporter construction is not a
+    universal failure boundary and can still make SDK construction fail.
+    """
 
     def __init__(self, config: "DualeAIConfig"):
-        """Initialize observability with pre-created instruments for performance."""
+        """Initialize no-op or OTLP-backed instruments from SDK configuration."""
         self.config = config
         self.service_name = "dualeai-sdk"
-        # RFC-051: tenant_id derived from token hash (identity resolved server-side)
+        # This historical attribute name holds a token fingerprint, not the
+        # configured Library tenant id.
         # config.token is always str here — the field_validator raises if None/missing
         token = config.token
         # DualeAIConfig.validate_token_present_and_format raises if token is None/missing
@@ -222,8 +251,8 @@ class SDKObservability:
             # Provider already set by another component, skip to avoid override warning
             return
 
-        # RFC-115: SDK sends 100% (AlwaysOn); the OTel Collector tail tier owns trace
-        # sampling (it must see whole traces for force-keep + whole-trace decisions).
+        # When the SDK owns the provider it samples every span. A host-installed
+        # provider retains its own sampler because setup returns before this point.
         tracer_provider = TracerProvider(resource=resource, sampler=ALWAYS_ON)
         trace.set_tracer_provider(tracer_provider)
 
@@ -414,7 +443,13 @@ class SDKObservability:
         )
 
     async def cleanup(self) -> None:
-        """Cleanup observability resources."""
+        """Remove optional global instrumentors installed by this module.
+
+        This does not flush or shut down tracer/meter providers. It is not
+        called by ``DualeAISDK.cleanup`` and affects process-global
+        instrumentation, so applications with multiple SDK instances should
+        coordinate ownership before calling it directly.
+        """
         if self.enabled:
             self._apply_instrumentors(instrument=False)  # Cleanup automatic instrumentation
 

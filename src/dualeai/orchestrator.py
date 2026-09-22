@@ -1,8 +1,11 @@
-"""Task orchestration and response handling with HTTP bridge (RFC-051).
+"""Convenience functions for Task submission and continuation.
 
 Thin convenience wrappers around ``DualeAISDK.submit_task`` and
 ``AgentResponse.next``. Both return ``AgentResponse`` directly; the
 orchestrator forwards arguments and applies skill→task_type derivation.
+
+Forwarding behavior is covered by ``tests/test_feature_ask.py`` and
+``tests/test_feature_multiturn.py``.
 """
 
 from datetime import datetime
@@ -30,8 +33,24 @@ async def continue_conversation(
     """Continue a successful response with a new message.
 
     The response owns both its public parent ID and its SDK instance. The
-    returned response carries the client-generated child ID. State preservation
-    and sibling semantics match :meth:`AgentResponse.next`.
+    returned response carries the client-generated child ID. Waiting and sibling
+    behavior match :meth:`AgentResponse.next`.
+
+    Args:
+        response: Parent response, which must finish successfully first.
+        message: User message for the child Task.
+        deadline: Optional timezone-aware child deadline.
+        response_format: Explicit wire response format for the child.
+
+    Returns:
+        A non-streaming child response using the parent's expected result type.
+
+    Raises:
+        DualeAIError: If the parent ended with ``task.error``.
+        TaskStoppedError: If the parent ended with ``task.stopped``.
+        ValueError: If ``deadline`` is timezone-naive.
+        asyncio.CancelledError: If this waiter is cancelled; the shared parent
+            Task continues.
     """
     return await response.next(
         message=message,
@@ -101,12 +120,43 @@ async def ask(
     request_id: str | None = None,
     sdk: "DualeAISDK",
 ) -> "AgentResponse[T] | AgentResponse[object]":
-    """Ask for work to be done by an agent.
+    """Submit a root Task and return its response handle.
 
-    Submits a task via the HTTP bridge and returns an
-    ``AgentResponse`` whose ``task`` attribute drives the bridge SSE
-    iteration. Cancel via ``response.task.cancel()`` propagates to
-    the bridge connection.
+    ``await ask(...)`` returns after the local SSE runner is created, not after
+    the Task completes. Canceling ``response.task`` closes that local stream; use
+    ``response.stop()`` for a separate platform stop request. Await
+    ``response.model()`` to translate terminal errors and validate the result.
+
+    Args:
+        action: Non-empty instruction for the Task.
+        skills: Optional routing skills. When ``routing`` is absent they become
+            ``required_skills``; they also select an observability ``task_type``.
+        res: Optional Python/Pydantic type for local result validation. When no
+            explicit ``response_format`` is supplied, its JSON Schema is sent in
+            the request.
+        response_format: Explicit wire response format; takes precedence over
+            schema derivation from ``res``.
+        routing: Explicit routing policy. When present it takes precedence over
+            the policy otherwise derived from ``skills``.
+        streaming: Request content delta/reset events for ``response.stream()``.
+        deadline: Optional timezone-aware absolute deadline. Omission uses the
+            SDK's default Task timeout.
+        attachments: Prepared attachments already uploaded for the same Task id.
+            This function does not upload or verify their remote state.
+        request_id: Optional client-selected root Task id. When attachments are
+            used, pass the same id used for upload. Omission generates UUID4.
+        sdk: SDK instance that owns the Task stream.
+
+    Returns:
+        ``AgentResponse`` for the root Task.
+
+    Raises:
+        ValueError: If ``action`` is empty or whitespace.
+        TypeError: If a supplied root ``deadline`` is timezone-naive.
+        RuntimeError: If the process-local Task dependency circuit is open.
+
+    Transport failures after the runner is created surface when ``model()`` or
+    the runner Task is awaited.
 
     Example:
         # With type — returns AgentResponse[Invoice]

@@ -1,18 +1,12 @@
-"""HTTP/SSE client for SDK communication (RFC-051).
+"""Typed HTTP/SSE client used by the public SDK facade.
 
-This module provides the primary SDK interface to the platform via HTTP/SSE bridge.
-All communication is tenant-isolated through API authentication.
+Despite the compatibility name ``CloudEventsClient``, this class sends HTTP
+request bodies and consumes Server-Sent Events. The transport owns reconnects
+and ``Last-Event-ID`` handling. An injected transport provides the network
+boundary used by tests.
 
-Key Features:
-- HTTP/SSE streaming for real-time updates
-- Tenant isolation via API token
-- Auto-reconnect with Last-Event-ID
-- Clean dependency injection for testing
-
-Design Decisions:
-- SSE for streaming (simpler than WebSockets, native browser support)
-- Auto-reconnect handled at transport layer
-- Bridge models only (RFC-051 compliant)
+Client dispatch and error translation are covered by
+``tests/test_feature_ask.py`` and ``tests/test_libraries_client.py``.
 """
 
 import types
@@ -111,13 +105,11 @@ def _dispatch_stream_event(
 
 
 class CloudEventsClient:
-    """SDK client for HTTP/SSE bridge communication (RFC-051).
+    """Lower-level client for Task streams, lifecycle calls, and Libraries.
 
-    This client provides:
-    - HTTP/SSE streaming for task execution
-    - Tenant isolation via API token
-    - Auto-reconnect with exponential backoff
-    - Clean dependency injection for testing
+    Applications normally use ``DualeAISDK`` rather than constructing this
+    compatibility-named class directly. The client sends the configured API
+    token; it does not itself establish authorization or tenant isolation.
     """
 
     def __init__(

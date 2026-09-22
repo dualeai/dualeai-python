@@ -1,12 +1,7 @@
-"""Tests for agent registration feature (Priority 12).
+"""Tests for legacy local ``@agent`` registration metadata.
 
-Priority 12 (Score 5): Agent registration with REAL SDK.
-Tests agent decorator registration, unique ID generation, config storage, and NATS publishing.
-
-CRITICAL RULES:
-- Use minimal_mock_sdk for ALL tests - NATS mocked at network boundary
-- Test REAL SDK code behavior
-- All tests use @pytest.mark.unit and TestUnit* class naming
+The fixture uses the real SDK with its HTTP transport boundary replaced. These
+tests do not assert hosted-Tool manifest publication.
 """
 
 import asyncio

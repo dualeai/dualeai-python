@@ -1,4 +1,4 @@
-"""Duale AI SDK - HTTP Bridge Transport (RFC-051)."""
+"""Public imports and the convenience factory for the Duale AI Python SDK."""
 
 # Type hints
 from typing import TypedDict
@@ -9,7 +9,7 @@ from typing_extensions import Unpack
 # UUID utilities
 from uuid_utils import uuid7
 
-# Attachments (RFC-113 Library upload flow)
+# Attachments
 from dualeai.attachments import PreparedAttachment, prepare_attachments
 
 # Cache backends
@@ -47,13 +47,13 @@ from dualeai.exceptions import (
     ValidationError,
 )
 
-# Libraries (RFC-113)
+# Libraries
 from dualeai.libraries import LibrariesClient
 
 # Logging
 from dualeai.logging_config import configure_logging, get_logger
 
-# Bridge models (RFC-051)
+# Task-stream wire models
 from dualeai.models.bridge import (
     BridgeContentDeltaResponse,
     BridgeContentResetResponse,
@@ -105,13 +105,14 @@ from dualeai.version import __version__
 
 # Type definitions for better type safety
 class SDKConfigKwargs(TypedDict, total=False):
-    """Type definition for SDK configuration keyword arguments (RFC-051).
+    """Keyword arguments accepted by :func:`create_sdk`.
 
     Configuration via environment variables:
     - DUALEAI_TOKEN: API token for HTTP bridge authentication; starts with dualeai_ [required]
     - DUALEAI_ENDPOINT: HTTP bridge endpoint URL [optional]
-    - DUALEAI_TENANT_ID: Tenant path segment for Library operations [optional]
-    - DUALEAI_AGENT_ID: Provisioned identity for hosted tools and task attachments [optional]
+    - DUALEAI_TENANT_ID: Tenant path segment [required for Library operations]
+    - DUALEAI_AGENT_ID: Provisioned identity [required for hosted Tools unless
+      supplied programmatically; pass ``sdk.agent_id`` explicitly to attachment uploads]
     - DUALEAI_REDIS_URL: Redis server URL for caching [optional]
     """
 
@@ -138,13 +139,35 @@ class _SDKConstructorConfig(BaseModel):
 
 
 def create_sdk(**kwargs: Unpack[SDKConfigKwargs]) -> DualeAISDK:
-    """Create a DualeAISDK instance with optional configuration.
+    """Create an SDK from flat configuration and constructor overrides.
+
+    Unlike direct ``DualeAISDK`` construction, this factory defaults
+    ``auto_start`` to ``False``. Its typed surface exposes the three constructor
+    controls in ``SDKConfigKwargs`` but not dependency injection, nested
+    observability configuration, Tool concurrency, graceful shutdown, or
+    backpressure; use ``DualeAISDK`` with ``DualeAIConfig`` for those cases.
+    Runtime keys not declared by ``DualeAIConfig`` are currently ignored by its
+    Pydantic ``extra="ignore"`` policy, so use type checking to catch misspelled
+    keyword names.
+
+    Construction reconfigures process-global logging. See
+    :func:`configure_logging` before using the factory in a host that owns its
+    root logging setup.
+
+    Constructor-argument coercion is covered by
+    ``tests/test_agent_lifecycle.py::test_create_sdk_coerces_constructor_arguments_with_pydantic``.
+    No focused automated test currently covers ignored unknown factory keys.
 
     Args:
-        **kwargs: Configuration overrides for DualeAIConfig (supports SDKConfigKwargs)
+        **kwargs: Keys declared by ``SDKConfigKwargs``. ``max_jobs``,
+            ``job_timeout``, and ``auto_start`` configure the SDK constructor;
+            remaining keys configure ``DualeAIConfig``.
 
     Returns:
-        DualeAISDK instance
+        A configured SDK instance. Network and cache resources remain lazy.
+
+    Raises:
+        pydantic.ValidationError: If a supplied configuration value is invalid.
     """
     config_kwargs = dict(kwargs)
 

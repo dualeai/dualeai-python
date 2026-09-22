@@ -1,7 +1,7 @@
 """Real-session Library tests (aioresponses, not a hand-rolled session stub).
 
-Library calls go over a plain aiohttp.ClientSession (origin base_url + Bearer,
-RFC-113). Driving them through aioresponses exercises the REAL session — base_url
+Library calls go over a plain aiohttp.ClientSession (origin base URL + Bearer).
+Driving them through aioresponses exercises the real session — base URL
 join, headers, JSON encode/decode — instead of a fake that could drift.
 """
 

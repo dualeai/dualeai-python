@@ -1,4 +1,9 @@
-"""Core Library and document management for the Python SDK."""
+"""Core Library and document management for the Python SDK.
+
+Client request construction, polling, and error translation are covered by
+``tests/test_libraries_client.py``. Service-side storage and retention behavior
+is not exercised by this repository's tests.
+"""
 
 from __future__ import annotations
 
@@ -38,21 +43,30 @@ _DOCUMENT_POLL_INTERVAL = timedelta(seconds=5)
 
 
 class LibrariesClient:
-    """Core Library metadata and document operations."""
+    """Library metadata, document, upload, and ingestion-polling operations.
+
+    Obtain this client from :attr:`dualeai.sdk.DualeAISDK.libraries`; its
+    constructor callback is an SDK integration detail. HTTP failures are
+    translated consistently: authentication rejection to ``DualeAIAuthError``,
+    other rejected requests to ``BusinessError``, and transport or server
+    failures to ``DualeAIConnectionError``. When present, the platform's
+    ``ProblemDetails`` is attached to the exception.
+    """
 
     def __init__(self, ensure_events_client: EnsureEventsClient) -> None:
         self._ensure_events_client = ensure_events_client
 
     async def create(self, request: LibraryCreateRequest) -> LibraryWithRevision:
-        """Create a Library or return a writable active Library at the path.
+        """Create or resolve a Library for ``request.path``.
 
-        The request carries only ``path``: the server owns the Library
-        identity. Paths are mutable, non-unique display metadata, so the
-        returned Library id is the stable handle for later operations.
+        The request carries a path, while the response supplies the stable
+        Library id used by later operations.
 
-        A server-side Library id collision raises ``BusinessError``. A failed
-        document-storage initialization raises ``DualeAIConnectionError``; the
-        server then deletes the Library row it just wrote.
+        Args:
+            request: Validated Library creation request.
+
+        Returns:
+            The server-returned Library and revision metadata.
         """
         events = await self._ensure_events_client()
         try:
@@ -61,7 +75,7 @@ class LibrariesClient:
             _raise_translated("Library create failed", error)
 
     async def list(self) -> LibraryListResponse:
-        """List Libraries accessible to the configured token."""
+        """List Libraries accessible to the configured credentials."""
         events = await self._ensure_events_client()
         try:
             return await events.transport.list_libraries()
@@ -69,7 +83,14 @@ class LibrariesClient:
             _raise_translated("Library list failed", error)
 
     async def get(self, request: LibraryGetRequest) -> LibraryWithRevision:
-        """Get one Library by stable id."""
+        """Get one Library by stable id.
+
+        Args:
+            request: Library identifier.
+
+        Returns:
+            The server-returned Library and revision metadata.
+        """
         events = await self._ensure_events_client()
         try:
             return await events.transport.get_library(request)
@@ -81,6 +102,12 @@ class LibrariesClient:
 
         Set ``request.patch.tags`` to ``{}`` to clear all tags. The method does
         not merge keys with the current map.
+
+        Args:
+            request: Library id and replacement patch fields.
+
+        Returns:
+            The updated server representation.
         """
         events = await self._ensure_events_client()
         try:
@@ -89,12 +116,14 @@ class LibrariesClient:
             _raise_translated("Library update failed", error)
 
     async def delete(self, request: LibraryDeleteRequest) -> None:
-        """Delete one Library and its documents.
+        """Send a delete request for one Library.
 
-        A later delete of the same Library succeeds, and so does a delete of a
-        Library that never existed. A Library without a valid document-tree
-        activation stays active instead: the server answers 503, so every call
-        raises ``DualeAIConnectionError``.
+        The method returns after a successful no-content HTTP response. Any
+        idempotency, retention, or cascading behavior is defined by the service,
+        not implemented by this client.
+
+        Args:
+            request: Library identifier to delete.
         """
         events = await self._ensure_events_client()
         try:
@@ -109,8 +138,23 @@ class LibrariesClient:
     ) -> dict[str, LibraryDocumentCreateResponse]:
         """Upload prepared attachments and return queued receipts by key.
 
-        The batch is concurrent, not transactional. A ``LibraryUploadError``
-        carries receipts that completed before a local or object-store failure.
+        The batch runs at most eight file pipelines and eight part requests at
+        once; it is not transactional. A ``LibraryUploadError`` carries receipts
+        that completed before a local or object-store failure.
+
+        Args:
+            library_id: Stable destination Library id.
+            attachments: Prepared attachments to validate and upload.
+
+        Returns:
+            Queued document receipts keyed by attachment correlation key.
+
+        Raises:
+            FileNotFoundError: If a prepared path no longer exists.
+            ValueError: If an attachment key is duplicated or a prepared file
+                is no longer a regular non-empty file of the recorded size.
+            LibraryUploadError: If local reading or an object-store upload
+                fails. Inspect ``completed_receipts`` for partial completion.
         """
         if not attachments:
             return {}
@@ -126,7 +170,14 @@ class LibrariesClient:
             _raise_translated("Library document upload failed", error)
 
     async def list_documents(self, request: LibraryDocumentListRequest) -> LibraryDocumentPage:
-        """List one bounded page of live documents in one Library."""
+        """List one bounded document page for a Library.
+
+        Args:
+            request: Library id, page bound, and optional cursor.
+
+        Returns:
+            Documents and the optional cursor for the next page.
+        """
         events = await self._ensure_events_client()
         try:
             return await events.transport.list_library_documents(request)
@@ -134,7 +185,7 @@ class LibrariesClient:
             _raise_translated("Library document page failed", error)
 
     async def get_document(self, request: LibraryDocumentGetRequest) -> PublicIndexedDocument:
-        """Get one document's current public state."""
+        """Get a document's current public ingestion state."""
         events = await self._ensure_events_client()
         try:
             return await events.transport.get_library_document(request)
@@ -147,7 +198,26 @@ class LibrariesClient:
         *,
         timeout: float = _DOCUMENT_WAIT_TIMEOUT.total_seconds(),
     ) -> PublicIndexedDocument:
-        """Poll until document ingestion reaches ``ready`` or ``failed``."""
+        """Poll every five seconds until ingestion is ``ready`` or ``failed``.
+
+        Both terminal states are returned; callers must inspect ``status`` and
+        handle ``failed`` explicitly. The default deadline is 360 seconds.
+
+        Args:
+            request: Library and document identifiers to poll.
+            timeout: Positive total wait in seconds.
+
+        Returns:
+            The first document state whose status is ``ready`` or ``failed``.
+
+        Raises:
+            ValueError: If ``timeout`` is not greater than zero.
+            TimeoutError: If no terminal state arrives before ``timeout``.
+            DualeAIAuthError: If a poll is unauthorized.
+            BusinessError: If a poll request is rejected.
+            DualeAIConnectionError: If polling encounters a transport or server
+                failure.
+        """
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
 
@@ -182,7 +252,11 @@ class LibrariesClient:
             await asyncio.sleep(_DOCUMENT_POLL_INTERVAL.total_seconds())
 
     async def delete_document(self, request: LibraryDocumentDeleteRequest) -> None:
-        """Move one document to trash; repeated deletes succeed."""
+        """Send a delete request for one document.
+
+        The method returns after a successful no-content HTTP response. Any
+        trash, retention, or idempotency behavior is defined by the service.
+        """
         events = await self._ensure_events_client()
         try:
             await events.transport.delete_library_document(request)

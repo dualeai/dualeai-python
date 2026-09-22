@@ -21,7 +21,7 @@ from tests.mocks.mock_http import require_mock_http_transport
 
 @pytest.mark.unit
 class TestUnitAskFunction:
-    """Test ask() function with REAL SDK (NATS boundary mocking only)."""
+    """Test ``ask()`` with only the HTTP transport boundary replaced."""
 
     async def test_ask_returns_agent_response(self, minimal_mock_sdk: DualeAISDK):
         """Test ask() returns AgentResponse with valid task_id."""
@@ -54,8 +54,8 @@ class TestUnitAskFunction:
         # Verify HTTP request was not made (validation happened first)
         assert len(require_mock_http_transport(minimal_mock_sdk).get_requests()) == 0
 
-    async def test_ask_publishes_cloudevent_to_nats(self, minimal_mock_sdk: DualeAISDK):
-        """Test ask() publishes CloudEvent to correct NATS subject."""
+    async def test_ask_sends_action_prompt_in_http_request(self, minimal_mock_sdk: DualeAISDK):
+        """The Task request body carries the action as ``action_prompt``."""
         action = "Process document with OCR"
         await ask(action=action, sdk=minimal_mock_sdk)
 
@@ -67,7 +67,7 @@ class TestUnitAskFunction:
         assert requests[0]["body"]["action_prompt"] == action
 
     async def test_ask_includes_skills_in_request(self, minimal_mock_sdk: DualeAISDK):
-        """Skills are serialized in CloudEvent payload."""
+        """Skills are serialized in the HTTP Task request's routing policy."""
         skills = [SkillEnum.instruction_following, SkillEnum.analysis]
         await ask(action="Extract and analyze", skills=skills, sdk=minimal_mock_sdk)
 

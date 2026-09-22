@@ -1,4 +1,4 @@
-"""Stopping a task through the public SDK surface (RFC-137)."""
+"""Task stop requests and independently supplied stopped terminal events."""
 
 from datetime import datetime, timezone
 

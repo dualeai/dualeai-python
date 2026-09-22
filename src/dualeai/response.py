@@ -1,13 +1,16 @@
-"""Agent response handling with HTTP bridge streaming support.
+"""Task response handling for terminal results and optional SSE content events.
 
 This module provides the AgentResponse class that wraps an
 ``asyncio.Task`` running the bridge SSE iteration.
 
-Key Features:
-- SSE streaming via bridge API (real-time deltas)
-- Type-safe response validation with Pydantic models
-- ``response.task.cancel()`` closes the local bridge connection only; the
-  platform keeps running the task. ``response.stop()`` stops the work itself.
+``response.task.cancel()`` cancels the local stream runner and closes its
+connection; it is not a platform stop request. ``response.stop()`` submits a
+stop request and returns its acceptance receipt, which does not by itself prove
+that the Task has stopped.
+
+Terminal, streaming, continuation, and stop behavior is covered by
+``tests/test_feature_results.py``, ``tests/test_streaming_callbacks.py``,
+``tests/test_feature_multiturn.py``, and ``tests/test_task_stop.py``.
 """
 
 import asyncio
@@ -59,7 +62,7 @@ def _exception_from_terminal(terminal: BridgeTaskErrorResponse, task_id: str) ->
     ``BILLING_LIMIT_EXCEEDED``, ``AUTHORIZATION_FAILED``,
     ``RESOURCE_NOT_FOUND``, ``TOOL_VALIDATION_FAILED``,
     ``LOOP_DETECTED``, ``INTERNAL_ROUTING``) and callers branch on it
-    directly. Cloudflare extension fields (``retryable``,
+    directly. Additional envelope fields (``retryable``,
     ``retry_after_seconds``, ``owner_action_required``, ``error_category``,
     ``ai_hints``) live on ``exc.problem_details`` so retry logic reads them
     without an SDK-side mapping table.
@@ -79,9 +82,11 @@ def _exception_from_terminal(terminal: BridgeTaskErrorResponse, task_id: str) ->
 
 
 class AgentResponse(Generic[T]):
-    """Response from an agent execution with HTTP bridge streaming support.
+    """Handle one Task's content events and terminal result.
 
-    Generic over T, the expected response type.
+    ``T`` is the optional local result type used by :meth:`model`. Iterating
+    :meth:`stream` exposes content preview events only; call :meth:`model`
+    afterward to apply terminal error and result-validation semantics.
     """
 
     def __init__(
@@ -99,11 +104,9 @@ class AgentResponse(Generic[T]):
 
         Args:
             task_id: ID of the task being executed.
-            task: The ``asyncio.Task`` running the bridge SSE
-                iteration (returned by
-                :meth:`DualeAISDK._spawn_run_task`). It awaits to a
-                ``BridgeTaskCompletedResponse`` or
-                ``BridgeTaskErrorResponse``.
+            task: The ``asyncio.Task`` running SSE iteration for a Task created
+                by ``DualeAISDK.submit_task`` or ``AgentResponse.next``. It
+                resolves to a completed, error, or stopped terminal event.
             expected_type: Expected result type for ``model()``
                 validation.
             sdk: SDK instance — kept on the response so ``next()`` can
@@ -155,9 +158,9 @@ class AgentResponse(Generic[T]):
     def _unwrap_llm_result(self, result: LLMResult, *, warn_on_empty: bool = False) -> object:
         """Cache the LLMResult and return its inner payload.
 
-        Order: ``validated_data`` (router-validated against the
-        expected schema) → ``completion`` (raw LLM text) → the wrapper
-        itself. Both model and stream extraction funnel through here so
+        Order: ``validated_data`` (when supplied in the terminal envelope) →
+        ``completion`` (raw LLM text) → the wrapper itself. Both model and
+        stream extraction funnel through here so
         the LLMResult cache and the field-precedence rule live in one
         place.
         """
@@ -196,7 +199,8 @@ class AgentResponse(Generic[T]):
         return ValidationError(
             f"Result validation failed for type {self.expected_type.__name__}",
             context={
-                # Never include result CONTENT (PII). Type metadata only.
+                # The complete result is not attached directly. Pydantic's
+                # validation text can still contain rejected input fragments.
                 "expected_type": self.expected_type.__name__,
                 "result_type": get_type_name(result),
                 "validation_error": str(error),
@@ -288,14 +292,22 @@ class AgentResponse(Generic[T]):
             The task result, validated against expected_type if provided.
 
         Raises:
-            DualeAIError: If the router emitted a `task.error` terminal event. The
+            TaskStoppedError: If the stream ended with ``task.stopped``.
+            DualeAIError: If the platform emitted a ``task.error`` terminal event. The
                 raised instance carries the canonical RFC 9457 ProblemDetails on
-                `exc.problem_details` (with `error_code`, `detail`, and Cloudflare
-                extension fields `retryable`, `retry_after_seconds`,
-                `owner_action_required`, `error_category`, `ai_hints`). Callers
-                branch on `exc.problem_details.error_code` directly — there is
+                ``exc.problem_details`` (with ``error_code``, ``detail``, and
+                extension fields ``retryable``, ``retry_after_seconds``,
+                ``owner_action_required``, ``error_category``, ``ai_hints``).
+                Callers
+                branch on ``exc.problem_details.error_code`` directly — there is
                 no SDK-side re-mapping table.
-            ValidationError: If result doesn't match expected_type schema.
+            ValidationError: If the result does not match ``expected_type``.
+                Its context, and debug-level validation logs, can contain
+                rejected result fragments; treat both as potentially sensitive.
+            asyncio.CancelledError: If the local Task runner is cancelled.
+
+        Exceptions raised by the underlying stream or transport task propagate
+        unchanged.
         """
         terminal = await self._await_terminal()
 
@@ -307,7 +319,7 @@ class AgentResponse(Generic[T]):
         result = self._extract_result(terminal)
 
         logger.debug(
-            # Never log result CONTENT (PII). Type metadata only.
+            # This log call includes type metadata only.
             "SDK received result - checking type",
             task_id=self.task_id,
             result_type=get_type_name(result),
@@ -360,8 +372,12 @@ class AgentResponse(Generic[T]):
         the buffered ``_deltas`` list — useful for re-rendering on UI
         re-mount.
 
-        With ``streaming=False`` this method just awaits the task and
-        returns without yielding.
+        With ``streaming=False`` this method just awaits the task and returns
+        without yielding. Terminal ``task.error`` and ``task.stopped`` events
+        end iteration; this method does not translate them into
+        ``DualeAIError`` or ``TaskStoppedError``. Call :meth:`model` for the
+        authoritative terminal result. Exceptions raised by the local stream
+        runner itself still propagate.
         """
         if not self.streaming:
             await self.task
@@ -407,12 +423,25 @@ class AgentResponse(Generic[T]):
                     await get_task
 
     async def cache_hit(self) -> bool | None:
-        """Check if the response was served from cache."""
+        """Return the terminal LLM result's cache flag when available.
+
+        ``None`` means the completed result was not an ``LLMResult`` or no
+        completed result was available. Terminal error/stop events and ordinary
+        stream-runner exceptions also produce ``None`` here; call :meth:`model`
+        when that distinction matters. Local Task cancellation still propagates.
+        """
         await self._ensure_llm_result_loaded()
         return self._llm_result.cache_hit if self._llm_result else None
 
     async def llm_metrics(self) -> LLMResult | None:
-        """Get the full LLM metrics object."""
+        """Return the terminal ``LLMResult`` envelope when available.
+
+        The historical method name is broader than the returned model:
+        ``LLMResult`` exposes completion, validated data, cache status, and
+        Tool calls, but no token, cost, or latency measurements. Terminal
+        error/stop events and ordinary stream-runner exceptions return ``None``;
+        local Task cancellation propagates.
+        """
         await self._ensure_llm_result_loaded()
         return self._llm_result
 
@@ -424,25 +453,25 @@ class AgentResponse(Generic[T]):
         deadline: datetime | None = None,
         response_format: ResponseFormat | None = None,
     ) -> "AgentResponse[T]":
-        """Continue this task with the next message, maintaining conversation context.
+        """Submit a next message as a child of this Task.
 
         Waits for this response to finish successfully before the SDK creates
         and submits a distinct child task. A parent error or cancellation is
         propagated without submitting a child.
 
-        The platform preserves the canonical conversation lineage, routing
-        context, and original attachment references. Each model call receives
-        the history allowed by its context budget and checkpoints. Every call
-        creates an independent, non-streaming child of this response; it does
-        not mutate this parent or another sibling continuation.
+        The request sends this response's ``task_id`` as ``parent_task_id`` and
+        creates a new, non-streaming child with its own UUID4 identifier. It
+        does not mutate this response or another child. Conversation history,
+        routing, and attachment treatment beyond those wire fields are platform
+        behavior rather than guarantees implemented by this class.
 
         Args:
             message: New user turn for the child task.
             res: Optional result type for local validation. When
                 ``response_format`` is absent, the SDK also derives its JSON
                 Schema for the request.
-            deadline: Timezone-aware child deadline. Omission uses the SDK task
-                timeout; the platform bounds it by the parent route deadline.
+            deadline: Timezone-aware child deadline. Omission uses the SDK's
+                default Task timeout.
             response_format: Explicit wire response format. It takes precedence
                 over schema derivation from ``res``.
 
@@ -451,17 +480,20 @@ class AgentResponse(Generic[T]):
 
         Raises:
             DualeAIError: If the parent finished with a task error.
+            TaskStoppedError: If the parent finished with a stopped event.
             ValueError: If ``deadline`` is timezone-naive.
+            asyncio.CancelledError: If this waiter is cancelled. The shared
+                parent Task continues running.
 
         Cancelling this waiter does not cancel the shared parent task or other
         callers waiting to create sibling continuations.
 
         Example:
             response = await ask(action="What's 2+2?", sdk=sdk)
-            result = await response.model()  # "4"
+            result = await response.model()
 
             continued = await response.next(message="and times two?")
-            final = await continued.model()  # "8"
+            final = await continued.model()
         """
         terminal = await self._await_terminal(isolate_waiter_cancellation=True)
         if isinstance(terminal, BridgeTaskStoppedResponse):
@@ -478,21 +510,23 @@ class AgentResponse(Generic[T]):
         )
 
     async def stop(self, reason: str) -> TaskStopAccepted:
-        """Stop this task and every task started under it.
+        """Submit a stop request for this Task.
 
         Unlike :meth:`next`, this does not wait for the task to finish — waiting
-        would defeat the purpose. It returns as soon as the platform accepts the
-        request; the task then ends with a stopped result, so awaiting
-        :meth:`model` raises :class:`TaskStoppedError` carrying this reason.
-
-        A stopped task is still billed for what it already consumed, and work
-        already sent to a model provider or a tool is not undone.
+        would defeat the purpose. The returned receipt acknowledges only the
+        request: it does not prove that this Task exists, is eligible to stop,
+        or will emit ``task.stopped``. If that terminal event later arrives,
+        :meth:`model` raises :class:`TaskStoppedError` with the event's reason.
 
         Args:
             reason: Why the task is being stopped. Required, non-empty.
 
         Returns:
-            ``TaskStopAccepted``, naming the task and the moment of acceptance.
+            ``TaskStopAccepted`` request receipt.
+
+        Raises:
+            ValueError: If ``reason`` is empty or whitespace.
+            DualeAIError: If the stop request fails before acceptance.
 
         Example:
             response = await ask(action="Analyse this contract", sdk=sdk)

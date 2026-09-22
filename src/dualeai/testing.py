@@ -10,6 +10,8 @@ Usage in tests:
         sdk.set_mock_response("hello", "world")
         result = await sdk.mock_ask("hello")
         assert result == "world"
+
+Behavior is covered by ``tests/test_mock_sdk.py``.
 """
 
 from __future__ import annotations
@@ -46,7 +48,13 @@ TestOutput = str | int | float | bool | dict[str, str | int | float | bool] | li
 
 
 class MockLibrariesClient(LibrariesClient):
-    """In-memory implementation of the public Library client."""
+    """In-memory subset of the Library client for deterministic tests.
+
+    It performs no HTTP, authentication, object-store upload, or asynchronous
+    ingestion. ``wait_for_document`` changes a queued document to ``ready``
+    immediately, and deletes remove in-memory records rather than modelling
+    service retention or trash behavior.
+    """
 
     def __init__(self, *, tenant_id: str = "tenant-test") -> None:
         self._tenant_id = tenant_id
@@ -222,8 +230,8 @@ class MockSDK(DualeAISDK):
     """Offline test helper with keyed responses and an in-memory Library client.
 
     ``mock_ask()`` is a deterministic lookup, not the production ``ask()``
-    transport. It does not simulate streaming, tool dispatch, or terminal
-    errors.
+    transport. It does not simulate streaming, Tool dispatch, terminal errors,
+    authentication, retries, object storage, or asynchronous document ingestion.
     """
 
     def __init__(self) -> None:

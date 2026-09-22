@@ -1,4 +1,11 @@
-"""Custom exceptions for Duale AI SDK with rich context and debugging support."""
+"""Package-defined exceptions and their structured context values.
+
+Public SDK calls can also raise built-in exceptions, Pydantic validation
+errors, and ``asyncio.CancelledError`` as documented by each operation.
+
+Exception hierarchy and context behavior is covered by
+``tests/test_exceptions.py``.
+"""
 
 from __future__ import annotations
 
@@ -42,7 +49,7 @@ def _build_error_context(context: ErrorContextInput, **additional_fields: object
 
 
 class DualeAIError(Exception):
-    """Base exception for all Duale AI SDK errors with context support."""
+    """Base class for package-defined SDK exceptions with structured context."""
 
     @staticmethod
     def _create_default_context() -> ErrorContext:
@@ -67,12 +74,12 @@ class DualeAIError(Exception):
         """
         super().__init__(message)
         self.message = message
-        # RFC 9457 ProblemDetails attached when the SDK lifts an error event
-        # from the bridge `task.error` SSE channel (see `response._exception_from_terminal`).
+        # RFC 9457 ProblemDetails attached when the SDK lifts an error response
+        # or a `task.error` SSE event (see `response._exception_from_terminal`).
         # `None` when the exception originates client-side (validation, transport,
         # config).
         #
-        # Cloudflare RFC 9457 §3.2 extension fields live on the envelope:
+        # Platform extension fields live on the ProblemDetails envelope:
         #     exc.problem_details.retryable
         #     exc.problem_details.retry_after_seconds
         #     exc.problem_details.owner_action_required
@@ -107,7 +114,11 @@ class DualeAIError(Exception):
 
 
 class BusinessError(DualeAIError):
-    """Raised when a business rule is violated."""
+    """A non-authentication client request was rejected by the platform.
+
+    This includes business-rule and request-validation responses; inspect
+    ``problem_details`` and its ``error_code`` when the server supplied them.
+    """
 
 
 class LibraryUploadError(DualeAIError):
@@ -148,7 +159,11 @@ class LibraryUploadError(DualeAIError):
 
 
 class RoutingError(DualeAIError):
-    """Raised when agent routing fails."""
+    """Compatibility exception carrying skills associated with a routing failure.
+
+    Current Task terminal errors are exposed as ``DualeAIError`` with
+    ``problem_details`` rather than being remapped to this subclass.
+    """
 
     def __init__(
         self,
@@ -168,7 +183,11 @@ class RoutingError(DualeAIError):
 
 
 class TaskTimeoutError(DualeAIError):
-    """Raised when a task execution times out."""
+    """Compatibility exception carrying Task timeout context.
+
+    Current Task terminal errors are exposed as ``DualeAIError`` with their
+    platform ``error_code`` rather than being remapped to this subclass.
+    """
 
     def __init__(
         self,
@@ -191,7 +210,10 @@ class TaskTimeoutError(DualeAIError):
 
 
 class ActivityTimeoutError(TaskTimeoutError):
-    """Raised when an activity execution times out."""
+    """Compatibility timeout type carrying an activity name.
+
+    ``execute_activity`` currently raises the built-in ``TimeoutError``.
+    """
 
     def __init__(
         self,
@@ -213,11 +235,14 @@ class ActivityTimeoutError(TaskTimeoutError):
 
 
 class CacheError(DualeAIError):
-    """Raised when cache operations fail."""
+    """Base class for package-defined cache exceptions."""
 
 
 class CacheConnectionError(CacheError):
-    """Raised when cache connection fails."""
+    """Compatibility cache-connection error with sanitized backend context.
+
+    Current cache backends do not translate their failures to this type.
+    """
 
     def __init__(
         self,
@@ -244,7 +269,10 @@ class CacheConnectionError(CacheError):
 
 
 class CacheSerializationError(CacheError):
-    """Raised when cache serialization/deserialization fails."""
+    """Compatibility cache-serialization error carrying key/type context.
+
+    Current cache backends do not translate their failures to this type.
+    """
 
     def __init__(
         self,
@@ -266,19 +294,20 @@ class CacheSerializationError(CacheError):
 
 
 class MessagingError(DualeAIError):
-    """Raised when messaging operations fail."""
+    """Base class for package-defined transport and streaming errors."""
 
 
 class StreamingError(MessagingError):
-    """Streaming quality degraded beyond acceptable threshold.
+    """Compatibility type for a stream-quality policy violation.
 
-    Raised when message drop percentage exceeds configured limit,
-    indicating network issues or consumer performance problems.
+    Current Task streaming does not calculate a drop percentage or raise this
+    subclass; parser and transport failures propagate through their active
+    error types.
     """
 
 
 class MessagingConnectionError(MessagingError):
-    """Raised when transport connection fails."""
+    """Base connection exception carrying an optional endpoint."""
 
     def __init__(
         self,
@@ -302,13 +331,17 @@ class DualeAIConnectionError(MessagingError):
 
 
 class DualeAIAuthError(DualeAIError):
-    """Raised when authentication fails (invalid/expired API key, missing credentials)."""
+    """An HTTP request was rejected as unauthorized.
+
+    Missing or malformed local configuration fails earlier with Pydantic
+    validation (or ``RuntimeError`` when the SDK loads defaults).
+    """
 
 
 class TransportUnavailableError(MessagingConnectionError):
-    """Raised when transport backend is unavailable or connection is lost.
+    """Compatibility connection error that normalizes selected low-level messages.
 
-    Provides user-friendly error messages for common connection issues.
+    Current HTTP paths primarily raise ``DualeAIConnectionError`` directly.
     """
 
     def __init__(
@@ -351,14 +384,15 @@ class TransportUnavailableError(MessagingConnectionError):
 
 
 class DualeAITimeoutError(TaskTimeoutError):
-    """Raised when an operation times out."""
+    """Compatibility alias subclass for an SDK operation timeout."""
 
 
 class TaskStoppedError(DualeAIError):
-    """Raised when an agent stopped the task before it produced a result.
+    """Raised when ``AgentResponse.model()`` observes ``task.stopped``.
 
     A stop is not a failure of the task, so it carries no problem details — only
-    the reason the caller supplied.
+    the reason supplied by the terminal event. The SDK does not infer whether
+    the initiating stop request came from this process or another source.
     """
 
     def __init__(
@@ -383,7 +417,11 @@ class TaskStoppedError(DualeAIError):
 
 
 class AgentRegistrationError(DualeAIError):
-    """Raised when agent registration fails."""
+    """Compatibility error carrying agent-registration context.
+
+    Current hosted-tool lifecycle calls expose authentication, connection, or
+    request errors directly rather than translating them to this subclass.
+    """
 
     def __init__(
         self,
@@ -406,7 +444,11 @@ class AgentRegistrationError(DualeAIError):
 
 
 class TaskSubmissionError(DualeAIError):
-    """Raised when task submission fails."""
+    """Compatibility error carrying Task-submission context.
+
+    Current Task submissions expose transport errors or terminal
+    ``DualeAIError`` values directly rather than using this subclass.
+    """
 
     def __init__(
         self,

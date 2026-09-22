@@ -1,10 +1,12 @@
-"""Configuration management for Duale AI SDK using Pydantic Settings (RFC-051).
+"""Pydantic settings for the Duale AI SDK.
 
-Identity Resolution:
-- tenant_id and agent_id are resolved server-side from the API token
-- Profile service validates token and returns canonical identity
-- SDK task streaming only needs token + endpoint for authentication
-- SDK Library operations need tenant_id for the public URL path
+Task requests authenticate with ``token`` at ``endpoint``. Library operations
+also require ``tenant_id`` because it is part of their URL. Hosted-tool
+lifecycle operations require ``agent_id``; the attachment convenience API can
+instead use an explicit agent id or the sole legacy agent registered locally.
+
+Local validation and environment-loading behavior is covered by
+``tests/test_config.py`` and ``tests/test_token_removal_validation.py``.
 """
 
 from pathlib import Path
@@ -18,15 +20,17 @@ class ObservabilityConfig(BaseModel):
     """OpenTelemetry observability configuration."""
 
     endpoint: str = Field(
-        description="Base OpenTelemetry OTLP endpoint for traces and metrics (SDK logs are never exported)",
+        description=(
+            "Base OTLP/HTTP endpoint for SDK traces and metrics. The SDK does not "
+            "install an OTLP log exporter; host-application logging remains separate."
+        ),
     )
-    # TODO(ingest-auth) RFC-132 §Deferred: today this is a client-side enable
-    # gate sent as a Bearer header the relay does not validate. When ingest
-    # auth lands, the value becomes a backend-minted per-tenant ingest JWT
-    # (validated by the collector oidc extension) with no SDK code change.
     token: str | None = Field(
         default=None,
-        description="Telemetry token for the OTLP endpoint (never the dualeai_ API token)",
+        description=(
+            "Bearer token sent to the OTLP endpoint. Setting it enables SDK telemetry; "
+            "do not reuse the Duale AI API token."
+        ),
     )
 
     def get_headers(self) -> dict[str, str]:
@@ -37,24 +41,23 @@ class ObservabilityConfig(BaseModel):
 
 
 class DualeAIConfig(BaseSettings):
-    """Duale AI SDK configuration with HTTP bridge transport (RFC-051).
+    """Configuration loaded from arguments, environment variables, and ``.env``.
 
-    The SDK communicates via HTTP/SSE bridge:
+    Task transport uses HTTP and Server-Sent Events:
     - POST /v1/tasks/{task_id} → SSE stream (create task, type=create)
     - POST /v1/tasks/{task_id} → SSE stream (tool results, type=tool_results)
     - POST /v1/tasks/{task_id} → SSE stream (continue, type=continue)
     - GET /v1/tasks/{task_id} → SSE stream (reconnect)
 
-    Identity Resolution (RFC-051 §7.2):
-    - tenant_id and agent_id are resolved by Profile from the API token
-    - SDK sends token, bridge computes hash, Profile resolves to canonical identity
-    - tenant_id is only used for RFC-113 Library URL paths
+    ``tenant_id`` and ``agent_id`` are not interchangeable with the API token:
+    Library URL construction needs ``tenant_id`` and hosted-tool lifecycle calls
+    need ``agent_id``. Ordinary task requests need only the token and endpoint.
 
     Environment variables:
     - DUALEAI_TOKEN: API token for HTTP bridge authentication; starts with dualeai_ [required]
     - DUALEAI_ENDPOINT: Duale AI API endpoint URL [optional]
     - DUALEAI_TENANT_ID: Library tenant path segment [required for Library operations]
-    - DUALEAI_AGENT_ID: Provisioned agent identity [required for hosted tools and task attachments]
+    - DUALEAI_AGENT_ID: Provisioned identity [required for hosted Tools unless passed to the SDK]
     - DUALEAI_REDIS_URL: Redis server URL for caching [optional]
     - DUALEAI_OBSERVABILITY__ENDPOINT: OTLP endpoint URL [optional]
     - DUALEAI_OBSERVABILITY__TOKEN: OTLP authentication token [optional]
@@ -68,7 +71,7 @@ class DualeAIConfig(BaseSettings):
         use_attribute_docstrings=True,
     )
 
-    # HTTP Bridge Authentication (RFC-051)
+    # Task API authentication.
     # Default None — pydantic-settings fills from DUALEAI_TOKEN env var.
     # Validator ensures a valid token is present after all sources are loaded.
     token: str | None = Field(
@@ -107,7 +110,7 @@ class DualeAIConfig(BaseSettings):
         default=None,
         min_length=1,
         description=(
-            "Tenant path segment for Library operations. Task streaming still resolves identity from the API token."
+            "Tenant URL segment required by Library operations; ordinary task requests do not read this field."
         ),
     )
 
@@ -116,7 +119,10 @@ class DualeAIConfig(BaseSettings):
         min_length=3,
         max_length=50,
         pattern="^[a-zA-Z][a-zA-Z0-9_-]*$",
-        description="Pre-provisioned agent identifier used by SDK lifecycle endpoints.",
+        description=(
+            "Provisioned agent identifier used by hosted-tool lifecycle calls. "
+            "Attachment uploads do not select it automatically; pass sdk.agent_id explicitly when desired."
+        ),
     )
 
     @field_validator("endpoint")

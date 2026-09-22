@@ -453,7 +453,7 @@ class TestToolDecorator:
         assert registered.tool.parameters.properties["reason"]["type"] == "string"
         assert close_security_gate.__doc__ is not None
         assert "Developer maintenance note" in close_security_gate.__doc__
-        # Docstring stays developer-facing: it must never leak into the published manifest (RFC-121).
+        # Docstring stays developer-facing; it must never leak into the published manifest.
         assert "Developer maintenance note" not in json.dumps(registered.model_dump(mode="json", by_alias=True))
         assert test_sdk.registered_tools == [registered]
 
@@ -470,7 +470,7 @@ class TestToolDecorator:
         assert sync_tool("north") == "north"
 
     def test_instance_bound_tool_decorator_registers_without_sdk_arg(self, test_sdk: DualeAISDK) -> None:
-        """@sdk.tool registers a tool without the explicit sdk= argument (RFC-121 DX #21)."""
+        """@sdk.tool registers a Tool without the explicit sdk= argument."""
 
         @test_sdk.tool(description="Instance-bound gate.", timeout=timedelta(seconds=1))
         async def bound_gate(gate_id: str) -> dict[str, str]:

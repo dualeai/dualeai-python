@@ -1,4 +1,4 @@
-"""CloudEvents integration for Duale AI SDK."""
+"""Lower-level HTTP/SSE Task client used by ``DualeAISDK``."""
 
 from dualeai.events.client import CloudEventsClient
 

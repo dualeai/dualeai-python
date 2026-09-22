@@ -1,9 +1,7 @@
-"""Priority 10 tests for activity caching feature.
+"""Tests for cached activity execution.
 
-Tests execute_activity() caching with REAL SDK code.
-Uses minimal_mock_sdk (NATS mocked at boundary) + MockCacheBackend.
-
-CRITICAL: Tests REAL SDK behavior, mocks ONLY external dependencies.
+The suite uses the real SDK with ``MockCacheBackend`` and an injected HTTP
+transport where a network boundary is needed.
 """
 
 from datetime import timedelta
@@ -213,8 +211,8 @@ class TestUnitActivityCaching:
         assert second_b == first_b
         assert invocations == [(10, 20), (10, 21)]
 
-    async def test_cache_isolated_by_tenant(self, config_factory):
-        """Test cache entries are isolated by tenant."""
+    async def test_separate_cache_backends_do_not_share_entries(self, config_factory):
+        """Independently injected cache instances do not share entries."""
         from unittest.mock import AsyncMock
 
         from dualeai import DualeAISDK
@@ -223,8 +221,7 @@ class TestUnitActivityCaching:
         sdk1 = DualeAISDK(config=config_factory(tenant_id=TestTenantIDs.DEFAULT), auto_start=False)
         sdk2 = DualeAISDK(config=config_factory(tenant_id=TestTenantIDs.ISOLATED), auto_start=False)
 
-        # Mock events client to prevent NATS connections (this test focuses on cache, not network)
-        # Set backing field directly — events_client is a read-only property
+        # Avoid network work; this test focuses on explicitly injected caches.
         sdk1._events_client = AsyncMock()
         sdk2._events_client = AsyncMock()
 

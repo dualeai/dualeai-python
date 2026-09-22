@@ -1,12 +1,8 @@
-"""Invariants behind the published tool-hosting contract (RFC-121).
+"""Invariants behind the public hosted-Tool contract.
 
-`docs/sdk/tools` tells readers that publishing a tool and running it are
-separate acts: `serve()` publishes the manifest, while the call itself arrives
-on the event stream of the task using it. Three properties carry that claim, and
-none of them is enforced anywhere else, so a refactor could quietly reverse the
-documentation without failing a test.
-
-See `CLAUDE.md`, "An invariant lives in a test, and the test says so".
+Publishing a Tool and running it are separate acts: ``serve()`` publishes the
+manifest, while a call arrives on the stream of the Task using it. These tests
+pin the implementation properties behind that public documentation.
 """
 
 from __future__ import annotations
@@ -37,7 +33,7 @@ class TestToolUseCarriesNoTaskIdentity:
 
         This is the structural reason a `serve()`-only process cannot execute a
         tool: even if it received the event, nothing in the payload would tell it
-        which task to answer. `docs/sdk/tools` states the consequence.
+        which Task to answer.
         """
         assert "task_id" not in BridgeToolUseResponse.model_fields
         assert set(BridgeToolUseResponse.model_fields) >= {"tool_call_id", "name", "input", "deadline_at"}
@@ -48,8 +44,8 @@ class TestServeOpensNoTaskStream:
     async def test_serve_makes_lifecycle_requests_only(self, mock_http_transport: MockHTTPTransport) -> None:
         """`serve()` publishes and heartbeats; it never opens a task stream.
 
-        Guards the sentence in `docs/sdk/tools` that publishing is what makes a
-        tool available, not what delivers the call.
+        Publishing makes a Tool available; it is not the channel that delivers
+        a call.
         """
         sdk = _serving_sdk(mock_http_transport)
 
@@ -83,9 +79,9 @@ class TestUnregisteredToolUseIsSilent:
     async def test_unknown_tool_name_posts_no_result(self, mock_http_transport: MockHTTPTransport) -> None:
         """An unknown tool name yields no result, so the platform waits out the deadline.
 
-        `docs/sdk/tools` warns that a tool set published by one process does not
-        make another process able to answer. This pins the branch that produces
-        that outcome: `_schedule_tool_use` drops the event, and nothing is sent.
+        Publishing a Tool set from one process does not make another process
+        able to answer it. This pins the branch that produces that outcome:
+        ``_schedule_tool_use`` drops the event, and nothing is sent.
         """
         sdk = _serving_sdk(mock_http_transport)
         await sdk._ensure_events_client()

@@ -1,4 +1,4 @@
-"""Mock implementations for testing (RFC-051)."""
+"""HTTP transport doubles used by the test suite."""
 
 from tests.mocks.mock_http import MockHTTPTransport
 
