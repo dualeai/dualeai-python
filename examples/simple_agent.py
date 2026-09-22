@@ -1,10 +1,20 @@
+"""Publish a Tool manifest and maintain Agent lifecycle state.
+
+This serve-only process opens no Task stream, so it cannot execute Tool calls
+by itself. See ``tool_execution.py`` for the smallest same-SDK execution path.
+
+Requires ``DUALEAI_TOKEN`` and ``DUALEAI_AGENT_ID``. Run with
+``python examples/simple_agent.py`` and interrupt it to stop heartbeats. This
+manual example is not executed by the automated test suite.
+"""
+
 import asyncio
 import contextlib
 from datetime import timedelta
 
 from pydantic import BaseModel, ConfigDict
 
-from dualeai import DualeAIConfig, DualeAISDK, tool
+from dualeai import DualeAISDK, tool
 
 
 class GateCommand(BaseModel):
@@ -27,8 +37,8 @@ class GateState(BaseModel):
 
 
 async def main() -> None:
-    """Run a customer-hosted registered-tool agent."""
-    sdk = DualeAISDK(config=DualeAIConfig())
+    """Publish one registered Tool and serve lifecycle heartbeats."""
+    sdk = DualeAISDK(auto_start=False)
 
     @tool(
         sdk=sdk,
@@ -36,9 +46,9 @@ async def main() -> None:
         timeout=timedelta(seconds=10),
     )
     async def close_security_gate(command: GateCommand) -> GateState:
-        """Developer maintenance note; not sent to the language model or router."""
+        """Developer maintenance note; not sent to the language model or service."""
         # Side-effecting tools must be idempotent or retry-safe. If this SDK
-        # process restarts before persisting a result, bridge replay can
+        # process restarts before persisting a result, event replay can
         # redeliver a received tool.use event.
         return GateState(
             gate_id=command.gate_id,

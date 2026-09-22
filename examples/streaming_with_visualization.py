@@ -1,35 +1,33 @@
-"""
-Advanced streaming example with Rich visualization.
+"""Advanced streaming example with Rich visualization.
 
 Demonstrates real-time streaming visualization with:
 - Live updating panels
 - Color-coded status
 
-Requires: pip install rich
+Requires ``rich``, ``DUALEAI_TOKEN``, and access to a configured model. Install
+the extra dependency with ``python -m pip install rich``, then run
+``python examples/streaming_with_visualization.py``. This manual example is not
+executed by the automated test suite.
 """
 
 import asyncio
-import random
+import contextlib
 
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from dualeai import DualeAIConfig, DualeAISDK, SkillEnum, ask
-from dualeai.models.bridge import BridgeContentResetResponse
+from dualeai import BridgeContentResetResponse, ask, create_sdk
 
 console = Console()
 
 
 async def main() -> None:
     """Run advanced streaming demo with Rich visualization."""
-    config = DualeAIConfig()
-
-    async with DualeAISDK(config=config, auto_start=False) as sdk:
+    async with create_sdk() as sdk:
         response = await ask(
-            action=f"Write a detailed story about space exploration. Make it engaging! ID: {random.randint(100, 999)}",
-            skills=[SkillEnum.general],
+            action="Write a detailed story about space exploration.",
             streaming=True,
             sdk=sdk,
         )
@@ -66,9 +64,8 @@ async def main() -> None:
                     )
                 )
 
-            # Final panel shows the authoritative answer, not the accumulated
-            # preview: the terminal result is the source of truth and the only
-            # text carrying the machine-generated content mark.
+            # Final panel shows the authoritative answer, which can differ
+            # from the accumulated preview.
             live.update(
                 Panel(
                     Text(f"{await response.model()}"),
@@ -83,7 +80,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(main())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user[/yellow]")
