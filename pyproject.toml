@@ -121,7 +121,7 @@ addopts = [
     "--cov=dualeai",               # Package name
     "--cov-report=term-missing", # Show missing lines in terminal
     "--cov-report=html",         # Generate HTML report
-    "--cov-fail-under=70",       # Require 70% minimum coverage
+    "--cov-fail-under=90",       # Require 90% minimum coverage
     "--tb=short",                # Short traceback format
     "-v",                        # Verbose output, easier LLM debugging
     "--strict-markers",          # Ensure all markers are registered
