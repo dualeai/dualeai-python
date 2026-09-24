@@ -10,11 +10,18 @@ from typing import NamedTuple, Protocol
 
 import aioboto3
 import pytest
-from aiohttp import web
 
 from dualeai import DualeAISDK, prepare_attachments
 from dualeai.config import DualeAIConfig
-from dualeai.models.library import LibraryDocumentCreateRequest
+from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
+from dualeai.models.bridge import BridgeSSEEvent
+from dualeai.models.library import (
+    LibraryDocumentCreateOperationRequest,
+    LibraryDocumentCreateRequest,
+    LibraryDocumentCreateResponse,
+    LibraryDocumentUploadRequest,
+    LibraryDocumentUploadResponse,
+)
 
 TEST_BUCKET = "test-sdk-upload"
 TEST_TENANT_ID = "tenant-test"
@@ -69,7 +76,7 @@ class UploadRecord(NamedTuple):
 class DocumentCreateCall(NamedTuple):
     library_id: str
     document_id: str
-    body: dict[str, object]
+    document: LibraryDocumentCreateRequest
 
 
 class LibraryHarness(NamedTuple):
@@ -77,20 +84,8 @@ class LibraryHarness(NamedTuple):
     boundary: LibraryBoundary
 
 
-def _assert_tenant_path(request: web.Request) -> None:
-    if request.match_info["tenant_id"] != TEST_TENANT_ID:
-        raise AssertionError(f"Unexpected tenant path: {request.match_info['tenant_id']!r}")
-
-
-async def _json_object_body(request: web.Request) -> dict[str, object]:
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise TypeError("Library request body must be a JSON object")
-    return {str(key): value for key, value in body.items()}
-
-
 class LibraryBoundary:
-    """Local Library HTTP boundary that issues real moto presigned URLs."""
+    """Metadata fixture that issues real moto presigned URLs."""
 
     def __init__(self, moto_s3: MotoS3) -> None:
         self._moto_s3 = moto_s3
@@ -98,13 +93,8 @@ class LibraryBoundary:
         self.uploads: dict[str, UploadRecord] = {}
         self.document_create_calls: list[DocumentCreateCall] = []
 
-    async def create_upload(self, request: web.Request) -> web.Response:
-        _assert_tenant_path(request)
-        body = await _json_object_body(request)
-        if set(body) != {"size_bytes"} or not isinstance(body["size_bytes"], int):
-            raise AssertionError(f"Unexpected upload request: {body!r}")
-
-        size_bytes = body["size_bytes"]
+    async def create_upload(self, request: LibraryDocumentUploadRequest) -> LibraryDocumentUploadResponse:
+        size_bytes = request.size_bytes
         upload_id = _test_uuid(0x600 + self._next_upload)
         self._next_upload += 1
         object_key = f"uploads/{upload_id}"
@@ -150,20 +140,17 @@ class LibraryBoundary:
 
         self.uploads[upload_id] = UploadRecord(object_key, multipart_upload_id)
         now = datetime.now(timezone.utc).isoformat()
-        return web.json_response(
+        return LibraryDocumentUploadResponse.model_validate(
             {
                 "upload_id": upload_id,
                 "parts": parts,
                 "expires_at": now,
                 "parts_expires_at": now,
             },
-            status=201,
         )
 
-    async def create_document(self, request: web.Request) -> web.Response:
-        _assert_tenant_path(request)
-        body = await _json_object_body(request)
-        document_request = LibraryDocumentCreateRequest.model_validate(body)
+    async def create_document(self, request: LibraryDocumentCreateOperationRequest) -> LibraryDocumentCreateResponse:
+        document_request = request.document
         upload_id = str(document_request.upload_id)
         if upload_id not in self.uploads:
             raise AssertionError(f"Unknown upload id: {upload_id!r}")
@@ -177,28 +164,54 @@ class LibraryBoundary:
                 MultipartUpload={"Parts": completed_parts},
             )
 
-        library_id = request.match_info["library_id"]
+        library_id = str(request.library_id)
         document_id = _test_uuid(0x700 + len(self.document_create_calls) + 1)
-        self.document_create_calls.append(DocumentCreateCall(library_id, document_id, body))
-        return web.json_response(
+        self.document_create_calls.append(DocumentCreateCall(library_id, document_id, document_request))
+        return LibraryDocumentCreateResponse.model_validate(
             {
                 "document_id": document_id,
                 "library_id": library_id,
                 "status": "queued",
-                "location": f"/v1/tenants/{TEST_TENANT_ID}/{library_id}/documents/{document_id}",
+                "location": f"/v1/hpke/tenants/{TEST_TENANT_ID}/{library_id}/documents/{document_id}",
             },
-            status=202,
         )
 
     async def read_uploaded_bytes(self, call: DocumentCreateCall) -> bytes:
-        upload_id = call.body["upload_id"]
-        if not isinstance(upload_id, str):
-            raise AssertionError("Document create upload_id must be a string")
+        upload_id = str(call.document.upload_id)
         response = await self._moto_s3.client.get_object(
             Bucket=self._moto_s3.bucket,
             Key=self.uploads[upload_id].object_key,
         )
         return await response["Body"].read()
+
+
+class _MotoMetadataTransport(HTTPTransportProtocol):
+    """Supply metadata at the SDK transport boundary for the object-store test."""
+
+    def __init__(self, boundary: LibraryBoundary) -> None:
+        self.boundary = boundary
+        self._connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    async def connect(self) -> None:
+        self._connected = True
+
+    async def disconnect(self) -> None:
+        self._connected = False
+
+    def run_task(self, task_id: str, request: BridgeTaskRequest) -> AsyncIterator[BridgeSSEEvent]:
+        raise NotImplementedError("Task streams are outside this object-store fixture")
+
+    async def create_document_upload(self, request: LibraryDocumentUploadRequest) -> LibraryDocumentUploadResponse:
+        return await self.boundary.create_upload(request)
+
+    async def create_library_document(
+        self, request: LibraryDocumentCreateOperationRequest
+    ) -> LibraryDocumentCreateResponse:
+        return await self.boundary.create_document(request)
 
 
 @pytest.fixture(scope="module")
@@ -235,21 +248,14 @@ async def moto_s3(moto_server: str, request: pytest.FixtureRequest) -> AsyncIter
 
 
 @pytest.fixture
-async def library_harness(moto_s3: MotoS3, aiohttp_server) -> AsyncIterator[LibraryHarness]:
+async def library_harness(moto_s3: MotoS3) -> AsyncIterator[LibraryHarness]:
     boundary = LibraryBoundary(moto_s3)
-    application = web.Application()
-    application.router.add_post("/libraries/v1/tenants/{tenant_id}/document-uploads", boundary.create_upload)
-    application.router.add_post(
-        "/libraries/v1/tenants/{tenant_id}/{library_id}/documents",
-        boundary.create_document,
-    )
-    server = await aiohttp_server(application)
     sdk = DualeAISDK(
         config=DualeAIConfig(
-            endpoint=f"http://{server.host}:{server.port}",
             token=TEST_TOKEN,
             tenant_id=TEST_TENANT_ID,
         ),
+        transport=_MotoMetadataTransport(boundary),
         auto_start=False,
     )
     try:
@@ -259,7 +265,7 @@ async def library_harness(moto_s3: MotoS3, aiohttp_server) -> AsyncIterator[Libr
 
 
 def _call_for_filename(boundary: LibraryBoundary, filename: str) -> DocumentCreateCall:
-    return next(call for call in boundary.document_create_calls if call.body["filename"] == filename)
+    return next(call for call in boundary.document_create_calls if call.document.filename == filename)
 
 
 @pytest.mark.integration
@@ -287,9 +293,9 @@ async def test_public_upload_preserves_bytes_and_document_metadata(
         stored = await library_harness.boundary.read_uploaded_bytes(call)
         assert stored == attachment.path.read_bytes()
         assert call.library_id == TEST_LIBRARY_ID
-        assert call.body["description"] == attachment.description
-        assert call.body["size_bytes"] == attachment.size
-        assert call.body["content_sha256"] == hashlib.sha256(stored).hexdigest()
+        assert call.document.description == attachment.description
+        assert call.document.size_bytes == attachment.size
+        assert call.document.content_sha256 == hashlib.sha256(stored).hexdigest()
         assert str(receipts[attachment.key].document_id) == call.document_id
 
 
@@ -307,7 +313,7 @@ async def test_public_upload_preserves_true_multipart_bytes_and_opaque_etags(
 
     call = _call_for_filename(library_harness.boundary, attachment.filename)
     stored = await library_harness.boundary.read_uploaded_bytes(call)
-    document_request = LibraryDocumentCreateRequest.model_validate(call.body)
+    document_request = call.document
     assert stored == content
     assert [part.part_number for part in document_request.parts] == [1, 2]
     assert all(part.etag for part in document_request.parts)

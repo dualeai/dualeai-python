@@ -1,8 +1,7 @@
-"""Decorators for defining agents, tools, and activities with dependency injection.
+"""Decorators for defining tools and activities with dependency injection.
 
-All registration state lives on the SDK instance (``sdk.agents``,
-``sdk.registered_tools``); hosted-tool lifecycle registration is the
-tools-only Bridge manifest published by sdk.serve().
+Tool registration state lives on the SDK instance; hosted-tool lifecycle
+registration publishes its Tool manifest through ``sdk.serve()``.
 
 Decorator registration and validation behavior is covered by
 ``tests/test_decorators_unit.py``.
@@ -16,8 +15,6 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, overload
 
-from dualeai.messages import AgentConfig
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.tools._util import callable_name
 
 if TYPE_CHECKING:
@@ -31,69 +28,6 @@ def _ensure_async_function(func: Callable[..., object], kind: str) -> None:
     """Reject non-async decorators without changing static callable typing."""
     if not inspect.iscoroutinefunction(func):
         raise TypeError(f"{kind} function {callable_name(func)} must be async")
-
-
-def _callable_module(func: Callable[..., object]) -> str:
-    """Return the defining module segment when Python exposes one."""
-    if inspect.isfunction(func) and func.__module__:
-        return func.__module__.split(".")[-1]
-    module_name = type(func).__module__
-    return module_name.split(".")[-1] if module_name else "unknown"
-
-
-def agent(
-    name: str,
-    org: set[str] | None = None,
-    capabilities: list[SkillEnum] | None = None,
-    *,
-    sdk: DualeAISDK | None = None,
-) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
-    """Legacy decorator that records local agent-function metadata.
-
-    This metadata is not published by the hosted-tool lifecycle. New hosted
-    integrations should declare ``@tool`` functions and call ``sdk.serve()``.
-
-    Args:
-        name: Agent name
-        org: Organization hierarchy (e.g., {"Finance", "Accounting"})
-        capabilities: Legacy local skill metadata; not part of the hosted-tool lifecycle manifest
-        sdk: SDK instance that stores the local metadata. Required.
-
-    Returns:
-        The original async behavior, with local metadata registered on the SDK.
-
-    Note:
-        Hosted-tool lifecycle registration uses tools declared with @tool and
-        published by sdk.serve(); this metadata is not sent as the manifest.
-    """
-
-    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-        _ensure_async_function(func, "Agent")
-        if sdk is None:
-            raise ValueError(
-                "SDK instance required. Pass sdk parameter to @agent decorator. Example: @agent('MyAgent', sdk=my_sdk)"
-            )
-        agent_sdk = sdk
-        function_name = callable_name(func)
-
-        agent_config = AgentConfig(
-            name=name,
-            org=list(org or set()),
-            function_name=function_name,
-            capabilities=capabilities or [],
-        )
-
-        module_name = _callable_module(func)
-        agent_id = f"{module_name}_{function_name}"
-        agent_sdk.register_agent(agent_id, func, agent_config)
-
-        @functools.wraps(func)
-        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            return await func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
 
 
 @overload

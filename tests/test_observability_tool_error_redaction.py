@@ -31,7 +31,9 @@ def _enabled_sdk_with_inmem_spans(
     transport: MockHTTPTransport | None = None,
 ) -> tuple[DualeAISDK, InMemorySpanExporter]:
     """An observability-enabled SDK whose spans land in an in-memory exporter."""
-    config = DualeAIConfig.model_validate({"token": "dualeai_test_token_12345", "agent_id": "agent-test-rc3"})
+    config = DualeAIConfig.model_validate(
+        {"token": "dualeai_test_token_12345_padded_to_32bytes", "agent_id": "agent-test-rc3"}
+    )
     config.observability.endpoint = "http://localhost:4318"
     config.observability.token = "test-token"
     sdk = DualeAISDK(config=config, transport=transport, auto_start=False)

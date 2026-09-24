@@ -45,33 +45,14 @@ CacheableValue = JsonValue
 
 
 class CacheConfig(BaseModel):
-    """Cache TTL, cleanup, and compatibility limit settings.
+    """Cache TTL jitter and cleanup settings.
 
     TTL jitter applies to every backend. ``cleanup_interval`` is used after
     :meth:`CacheBackend.start_cleanup_loop` is called; the factory starts that
     loop automatically, while direct backend construction does not.
-
-    ``max_entries`` is enforced only by ``MockCacheBackend``. The current
-    Redis and SQLite implementations do not enforce ``max_entries``,
-    ``max_size_bytes``, ``lru_eviction_enabled``, or ``eviction_batch_size``;
-    those fields are retained for configuration compatibility. Mock overflow
-    eviction uses earliest expiry, not access-order LRU.
     """
 
-    model_config = ConfigDict(use_attribute_docstrings=True)
-
-    # Memory management
-    max_entries: int = Field(
-        default=100_000,
-        ge=1000,
-        le=10_000_000,
-        description="Entry bound enforced by MockCacheBackend only",
-    )
-    max_size_bytes: int = Field(
-        default=1_000_000_000,
-        ge=10_000_000,
-        description="Compatibility field; current backends do not enforce a byte-size bound",
-    )
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     # TTL jitter to prevent thundering herd
     ttl_jitter_enabled: bool = Field(default=True, description="Apply randomized jitter to TTL values")
@@ -80,18 +61,6 @@ class CacheConfig(BaseModel):
         ge=0.0,
         le=0.5,
         description="Maximum proportional TTL variation in either direction",
-    )
-
-    # Compatibility eviction fields; current backends do not implement LRU.
-    lru_eviction_enabled: bool = Field(
-        default=True,
-        description="Compatibility field; current backends do not implement access-order LRU",
-    )
-    eviction_batch_size: int = Field(
-        default=1000,
-        ge=100,
-        le=10000,
-        description="Compatibility field; current backends do not use this batch size",
     )
 
     # Cleanup interval used when a cleanup loop is started.
@@ -113,10 +82,9 @@ class CacheBackend(ABC, Generic[T]):
         """Initialize a cache backend with its key namespace and configuration.
 
         Args:
-            tenant_id: Namespace prefix. Despite the historical parameter name,
-                this need not be a tenant UUID.
-            config: Cache configuration. See ``CacheConfig`` for which limits
-                each backend enforces.
+            tenant_id: Key namespace. The SDK passes a token fingerprint, not
+                the configured Library tenant ID.
+            config: TTL jitter and cleanup settings.
         """
         self.tenant_id = tenant_id
         self.config = config or CacheConfig()
@@ -154,7 +122,7 @@ class CacheBackend(ABC, Generic[T]):
             raise ValueError("Cache key too long (max 250 characters)")
 
         # Check for potentially unsafe characters that could cause injection
-        unsafe_chars = ["\n", "\r", "\0"]  # Allow spaces and tabs for compatibility
+        unsafe_chars = ["\n", "\r", "\0"]  # Spaces and tabs are valid cache-key characters.
         if any(char in key for char in unsafe_chars):
             raise ValueError("Cache key contains unsafe characters (newlines, null bytes)")
 
@@ -362,7 +330,7 @@ class RedisCacheBackend(CacheBackend[CacheableValue]):
         Args:
             redis_url: Redis connection URL
             tenant_id: Caller-supplied key namespace.
-            config: Cache configuration for behavior and limits
+            config: TTL jitter and cleanup settings.
         """
         super().__init__(tenant_id, config)
         self._tenant_prefix = f"{REDIS_KEY_NAMESPACE}:{tenant_id}:"
@@ -497,7 +465,7 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
         Args:
             db_path: Path to SQLite database file
             tenant_id: Caller-supplied key namespace.
-            config: Cache configuration for behavior and limits
+            config: TTL jitter and cleanup settings.
         """
         super().__init__(tenant_id, config)
         self.db_path = Path(db_path)
@@ -620,21 +588,12 @@ class SQLiteCacheBackend(CacheBackend[CacheableValue]):
             self._db = None
             self._initialized = False
 
-    async def connect(self) -> None:
-        """Connect to SQLite database (for compatibility)."""
-        await self.ensure_initialized()
-
-    async def disconnect(self) -> None:
-        """Disconnect from SQLite database (for compatibility)."""
-        await self.close()
-
 
 class MockCacheBackend(CacheBackend[CacheableValue]):
     """In-memory test backend approximating JSON serialization and TTL expiry.
 
-    It enforces ``max_entries`` by removing entries with the earliest expiry;
-    this is not access-order LRU. A missing TTL is represented internally by an
-    expiry 100 years in the future rather than true persistence.
+    A missing TTL is represented internally by an expiry 100 years in the
+    future rather than true persistence.
     """
 
     def __init__(self, tenant_id: str, config: CacheConfig | None = None):
@@ -642,7 +601,7 @@ class MockCacheBackend(CacheBackend[CacheableValue]):
 
         Args:
             tenant_id: Caller-supplied logical namespace.
-            config: Cache configuration; TTL jitter and ``max_entries`` apply.
+            config: Cache configuration for TTL jitter and cleanup.
         """
         super().__init__(tenant_id, config)
         self._data: dict[str, tuple[str, datetime]] = {}  # key -> (value, expires_at)
@@ -699,14 +658,6 @@ class MockCacheBackend(CacheBackend[CacheableValue]):
 
         self._data[tenant_key] = (serialized_value, expires_at)
 
-        # Basic memory management - remove oldest entries if too many
-        if len(self._data) > self.config.max_entries:
-            # Remove oldest 10% of entries
-            num_to_remove = len(self._data) // 10
-            oldest_keys = sorted(self._data.keys(), key=lambda k: self._data[k][1])[:num_to_remove]
-            for old_key in oldest_keys:
-                del self._data[old_key]
-
     async def delete(self, key: str) -> None:
         """Delete key from mock cache."""
         self._validate_cache_key(key)
@@ -738,12 +689,6 @@ class MockCacheBackend(CacheBackend[CacheableValue]):
         await self.stop_cleanup_loop()
         self._data.clear()
 
-    async def connect(self) -> None:
-        """Connect to mock cache (no-op for compatibility)."""
-
-    async def disconnect(self) -> None:
-        """Disconnect from mock cache (no-op for compatibility)."""
-
 
 async def create_cache_backend(
     tenant_id: str, redis_url: str | None, sqlite_path: str | None = None, config: CacheConfig | None = None
@@ -760,7 +705,7 @@ async def create_cache_backend(
         tenant_id: Cache-key namespace. ``DualeAISDK`` passes a token fingerprint.
         redis_url: Redis connection URL, None to skip Redis, "mock://" for mock backend
         sqlite_path: SQLite database file path; omission uses a namespace-specific file.
-        config: Cache configuration for behavior and limits
+        config: TTL jitter and cleanup settings.
 
     Returns:
         Initialized backend with namespaced keys and a running cleanup loop.

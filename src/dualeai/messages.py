@@ -5,23 +5,10 @@ types) are generated and exposed from the ``dualeai.models`` package.
 
 This file contains SDK-internal models that are not part of the platform schema.
 
-``AgentConfig`` is SDK-local metadata. Hosted-agent lifecycle registration
-publishes the tools-only Bridge manifest from ``dualeai.models.bridge``.
+Hosted-agent lifecycle registration uses the generated Bridge models.
 """
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from dualeai.models.skill_enum import SkillEnum
-
-
-class AgentConfig(BaseModel):
-    """Legacy SDK-local agent metadata, not a hosted-agent lifecycle manifest."""
-
-    name: str
-    org: list[str] = Field(default_factory=list, description="Organization hierarchy")
-    function_name: str | None = None
-    capabilities: list[SkillEnum] = Field(default_factory=list, description="Agent capabilities from SkillEnum")
-
 
 # Note: Agent lifecycle models are generated from the Bridge schema.
 # See: dualeai.models.bridge.AgentHeartbeatMessage.

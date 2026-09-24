@@ -1,8 +1,9 @@
 """Core Library and document management for the Python SDK.
 
-Client request construction, polling, and error translation are covered by
-``tests/test_libraries_client.py``. Service-side storage and retention behavior
-is not exercised by this repository's tests.
+Public CRUD dispatch through the protected transport is covered by
+``tests/test_http_transport_v3.py``. Upload request construction, polling, and
+error translation are covered by ``tests/test_libraries_client.py``. Service-side
+storage and retention behavior is not exercised by this repository's tests.
 """
 
 from __future__ import annotations

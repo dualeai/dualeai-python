@@ -39,7 +39,7 @@ class TestUnitObservabilityFeature:
 
         def _create(**overrides: object) -> DualeAIConfig:
             if "token" not in overrides:
-                overrides["token"] = "dualeai_test_token_12345"
+                overrides["token"] = "dualeai_test_token_12345_padded_to_32bytes"
             config = DualeAIConfig.model_validate(overrides)
             config.observability.endpoint = "http://localhost:4318"
             config.observability.token = "test-token"

@@ -15,24 +15,22 @@ from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from dualeai import create_sdk
 from dualeai.config import DualeAIConfig
 from dualeai.constants import TimingDefaults
-from dualeai.decorators import agent, tool
+from dualeai.decorators import tool
 from dualeai.exceptions import DualeAIAuthError, DualeAIConnectionError
 from dualeai.models.bridge import (
+    AgentDeregistrationMessage,
     AgentHeartbeatMessage,
     AgentHeartbeatResponse,
     AgentRegistrationMessage,
-    Attachment,
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
     BridgeTaskContinueRequest,
-    BridgeTaskCreateRequest,
     BridgeToolResultError,
     BridgeToolResultsRequest,
     BridgeToolResultSuccess,
     BridgeToolUseResponse,
     RegisteredTool,
 )
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.orchestrator import ask
 from dualeai.sdk import DualeAISDK
 from dualeai.tools.errors import TOOL_ERROR_MESSAGE_MAX_CHARS, format_registered_tool_error
@@ -40,6 +38,18 @@ from tests.mocks.mock_http import MockHTTPTransport
 
 # Module-level so get_type_hints can resolve it under `from __future__ import annotations`.
 _UnboundToolParam = TypeVar("_UnboundToolParam")
+
+
+def _lifecycle_types(transport: MockHTTPTransport) -> list[type[object]]:
+    """Record typed lifecycle calls without deriving routes from the mock."""
+    return [
+        type(record["request"])
+        for record in transport.get_requests()
+        if isinstance(
+            record.get("request"),
+            (AgentRegistrationMessage, AgentHeartbeatMessage, AgentDeregistrationMessage),
+        )
+    ]
 
 
 async def _model_config_parameter(model_config: str) -> str:
@@ -89,7 +99,7 @@ class GateCommandResult(BaseModel):
 def test_create_sdk_coerces_constructor_arguments_with_pydantic() -> None:
     """create_sdk uses a Pydantic boundary for constructor-only settings."""
     sdk = create_sdk(
-        token="dualeai_test_token",
+        token="dualeai_test_token_padded_to_32bytes",
         tenant_id="tenant-test",
         agent_id="agent_security_operations",
         max_jobs="7",
@@ -101,6 +111,15 @@ def test_create_sdk_coerces_constructor_arguments_with_pydantic() -> None:
     assert sdk.job_timeout == 11
     assert sdk.auto_start is False
     assert sdk.config.tenant_id == "tenant-test"
+
+
+@pytest.mark.unit
+def test_constructor_rejects_empty_agent_id_override(config_factory) -> None:
+    """An explicit invalid Agent ID must not select the configured identity."""
+    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
+
+    with pytest.raises(ValidationError):
+        DualeAISDK(config=config, agent_id="", auto_start=False)
 
 
 @pytest.mark.unit
@@ -188,21 +207,25 @@ async def test_start_registers_manifest_and_first_heartbeat(
         await sdk.start()
 
         requests = mock_http_transport.get_requests()
-        registration = next(request for request in requests if request["path"] == "/v1/agent/registration")
-        heartbeat = next(request for request in requests if request["path"] == "/v1/agent/heartbeat")
+        registration = next(
+            request for request in requests if isinstance(request.get("request"), AgentRegistrationMessage)
+        )
+        heartbeat = next(request for request in requests if isinstance(request.get("request"), AgentHeartbeatMessage))
 
-        registration_body = AgentRegistrationMessage.model_validate(registration["body"])
-        heartbeat_body = AgentHeartbeatMessage.model_validate(heartbeat["body"])
-        assert registration_body.agent_id == "agent_security_operations"
-        assert registration_body.tools[0].tool.name == "close_security_gate"
-        assert registration_body.tools[0].tool.description == (
+        registration_request = registration["request"]
+        heartbeat_request = heartbeat["request"]
+        assert isinstance(registration_request, AgentRegistrationMessage)
+        assert isinstance(heartbeat_request, AgentHeartbeatMessage)
+        assert registration_request.agent_id == "agent_security_operations"
+        assert registration_request.tools[0].tool.name == "close_security_gate"
+        assert registration_request.tools[0].tool.description == (
             "Close a named security gate and return the final gate state."
         )
-        assert registration_body.tools[0].timeout_seconds == 10.0
-        assert len(registration_body.config_hash) == 64
-        assert heartbeat_body.agent_id == registration_body.agent_id
-        assert heartbeat_body.process_id == registration_body.process_id
-        assert heartbeat_body.config_hash == registration_body.config_hash
+        assert registration_request.tools[0].timeout_seconds == 10.0
+        assert len(registration_request.config_hash) == 64
+        assert heartbeat_request.agent_id == registration_request.agent_id
+        assert heartbeat_request.process_id == registration_request.process_id
+        assert heartbeat_request.config_hash == registration_request.config_hash
         assert sdk.heartbeat_task is not None
     finally:
         await sdk.cleanup()
@@ -237,56 +260,6 @@ def test_registered_tools_returns_detached_models(
 
 
 @pytest.mark.unit
-async def test_lifecycle_manifest_excludes_legacy_agent_capabilities(
-    config_factory,
-    mock_http_transport: MockHTTPTransport,
-) -> None:
-    """Legacy @agent metadata must not leak into the hosted-tool lifecycle manifest."""
-    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
-    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
-
-    @tool(
-        sdk=sdk,
-        description="Close a named gate and return the final state.",
-        timeout=timedelta(seconds=10),
-    )
-    async def close_security_gate(gate_id: str) -> dict[str, str]:
-        return {"gate_id": gate_id, "state": "closed"}
-
-    tools_only_hash = sdk._config_hash()
-
-    @agent(
-        name="LegacySecurityAgent",
-        org={"Security"},
-        capabilities=[SkillEnum.analysis, SkillEnum.reasoning],
-        sdk=sdk,
-    )
-    async def legacy_security_agent() -> None:
-        return None
-
-    registration = sdk._lifecycle._registration_message()
-    heartbeat = sdk._lifecycle._heartbeat_message(local_sent_at=datetime.now(timezone.utc))
-    body = registration.model_dump(mode="json", by_alias=True)
-
-    assert sdk.agents
-    assert registration.config_hash == tools_only_hash
-    assert heartbeat.config_hash == tools_only_hash
-    assert set(body) == {
-        "agent_id",
-        "process_id",
-        "tools",
-        "config_hash",
-        "manifest_publication_id",
-        "time",
-        "sdk_version",
-    }
-    assert body["tools"][0]["tool"]["name"] == "close_security_gate"
-    forbidden_payload = json.dumps(body, sort_keys=True)
-    for forbidden in ("LegacySecurityAgent", "Security", "skills", "capabilities", "agent_type"):
-        assert forbidden not in forbidden_payload
-
-
-@pytest.mark.unit
 async def test_heartbeat_registers_changed_manifest_before_new_hash(
     config_factory,
     mock_http_transport: MockHTTPTransport,
@@ -307,15 +280,16 @@ async def test_heartbeat_registers_changed_manifest_before_new_hash(
 
     await sdk._lifecycle._send_heartbeat_once()
     requests = mock_http_transport.get_requests()
-    lifecycle_paths = [request["path"] for request in requests if str(request["path"]).startswith("/v1/agent/")]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
     ]
-    refreshed_registration = AgentRegistrationMessage.model_validate(requests[-2]["body"])
-    refreshed_heartbeat = AgentHeartbeatMessage.model_validate(requests[-1]["body"])
+    refreshed_registration = requests[-2]["request"]
+    refreshed_heartbeat = requests[-1]["request"]
+    assert isinstance(refreshed_registration, AgentRegistrationMessage)
+    assert isinstance(refreshed_heartbeat, AgentHeartbeatMessage)
     assert refreshed_registration.tools[0].tool.name == "open_security_gate"
     assert refreshed_heartbeat.config_hash == refreshed_registration.config_hash
 
@@ -365,21 +339,25 @@ async def test_heartbeat_uses_the_manifest_snapshot_sent_by_its_registration(
     await first_heartbeat
 
     first_requests = mock_http_transport.get_requests()
-    first_registration = AgentRegistrationMessage.model_validate(
-        next(item for item in first_requests if item["path"] == "/v1/agent/registration")["body"]
+    first_registration = next(
+        item["request"] for item in first_requests if isinstance(item.get("request"), AgentRegistrationMessage)
     )
-    first_beat = AgentHeartbeatMessage.model_validate(
-        next(item for item in first_requests if item["path"] == "/v1/agent/heartbeat")["body"]
+    first_beat = next(
+        item["request"] for item in first_requests if isinstance(item.get("request"), AgentHeartbeatMessage)
     )
+    assert isinstance(first_registration, AgentRegistrationMessage)
+    assert isinstance(first_beat, AgentHeartbeatMessage)
     assert [item.tool.name for item in first_registration.tools] == ["close_security_gate"]
     assert first_beat.config_hash == first_registration.config_hash
 
     await sdk._lifecycle._send_heartbeat_once()
     all_requests = mock_http_transport.get_requests()
-    registrations = [item for item in all_requests if item["path"] == "/v1/agent/registration"]
-    heartbeats = [item for item in all_requests if item["path"] == "/v1/agent/heartbeat"]
-    latest_registration = AgentRegistrationMessage.model_validate(registrations[-1]["body"])
-    latest_beat = AgentHeartbeatMessage.model_validate(heartbeats[-1]["body"])
+    registrations = [item for item in all_requests if isinstance(item.get("request"), AgentRegistrationMessage)]
+    heartbeats = [item for item in all_requests if isinstance(item.get("request"), AgentHeartbeatMessage)]
+    latest_registration = registrations[-1]["request"]
+    latest_beat = heartbeats[-1]["request"]
+    assert isinstance(latest_registration, AgentRegistrationMessage)
+    assert isinstance(latest_beat, AgentHeartbeatMessage)
     assert [item.tool.name for item in latest_registration.tools] == [
         "close_security_gate",
         "open_security_gate",
@@ -401,13 +379,11 @@ async def test_heartbeat_refreshes_manifest_after_anti_entropy_interval(
 
     await sdk._lifecycle._send_heartbeat_once()
 
-    requests = mock_http_transport.get_requests()
-    lifecycle_paths = [request["path"] for request in requests if str(request["path"]).startswith("/v1/agent/")]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
     ]
 
     await sdk.cleanup()
@@ -1196,14 +1172,9 @@ async def test_start_is_idempotent_when_called_concurrently(
         release_registration.set()
         await asyncio.gather(first_start, second_start)
 
-        lifecycle_paths = [
-            request["path"]
-            for request in mock_http_transport.get_requests()
-            if str(request["path"]).startswith("/v1/agent/")
-        ]
-        assert lifecycle_paths == [
-            "/v1/agent/registration",
-            "/v1/agent/heartbeat",
+        assert _lifecycle_types(mock_http_transport) == [
+            AgentRegistrationMessage,
+            AgentHeartbeatMessage,
         ]
     finally:
         await sdk.cleanup()
@@ -1257,15 +1228,10 @@ async def test_serve_runs_until_stop_event_and_deregisters(
             with suppress(asyncio.CancelledError):
                 await serve_task
 
-    lifecycle_paths = [
-        request["path"]
-        for request in mock_http_transport.get_requests()
-        if str(request["path"]).startswith("/v1/agent/")
-    ]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
     ]
 
 
@@ -1488,9 +1454,13 @@ async def test_cleanup_deregisters_started_lifecycle(
     await sdk.cleanup()
 
     requests = mock_http_transport.get_requests()
-    deregistration = next(request for request in requests if request["path"] == "/v1/agent/deregistration")
-    assert deregistration["body"]["agent_id"] == "agent_security_operations"
-    assert deregistration["body"]["reason"] == "shutdown"
+    deregistration = next(
+        request for request in requests if isinstance(request.get("request"), AgentDeregistrationMessage)
+    )
+    deregistration_request = deregistration["request"]
+    assert isinstance(deregistration_request, AgentDeregistrationMessage)
+    assert deregistration_request.agent_id == "agent_security_operations"
+    assert deregistration_request.reason == "shutdown"
 
 
 @pytest.mark.unit
@@ -1507,18 +1477,13 @@ async def test_cleanup_allows_lifecycle_restart(
     await sdk.start()
     await sdk.cleanup()
 
-    lifecycle_paths = [
-        request["path"]
-        for request in mock_http_transport.get_requests()
-        if str(request["path"]).startswith("/v1/agent/")
-    ]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
     ]
 
 
@@ -1535,18 +1500,15 @@ async def test_startup_heartbeat_failure_deregisters_published_registration(
     with pytest.raises(RuntimeError, match="heartbeat forbidden"):
         await sdk.serve()
 
-    lifecycle_paths = [
-        request["path"]
-        for request in mock_http_transport.get_requests()
-        if str(request["path"]).startswith("/v1/agent/")
-    ]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
     ]
     deregistration = mock_http_transport.get_requests()[-1]
-    assert deregistration["body"]["reason"] == "startup_failed"
+    deregistration_request = deregistration["request"]
+    assert isinstance(deregistration_request, AgentDeregistrationMessage)
+    assert deregistration_request.reason == "startup_failed"
 
 
 @pytest.mark.unit
@@ -2003,105 +1965,6 @@ async def test_sync_tool_can_read_its_call_context(
 
     assert seen["tool_call_id"] == "call-ctx-sync"
     assert seen["attempt"] == 1
-
-
-@pytest.mark.unit
-async def test_run_task_create_body_serializes_tool_schema_with_wire_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The task-create body must be dumped by_alias so the alias-only tool schema
-    field goes out as ``additionalProperties`` (JSON Schema), not the snake-case
-    field name a bridge Parameters(extra=forbid) would reject."""
-    from dualeai.events.http_transport import HTTPTransport
-    from dualeai.models.tool import Parameters as WireParameters
-    from dualeai.models.tool import Tool as WireTool
-
-    transport = HTTPTransport(endpoint="https://api.test.duale.ai", token="dualeai_test_token_padded_1234")
-    captured: dict[str, object] = {}
-
-    async def _spy(*, method: str, path: str, json_data: object, task_id: str, last_event_id: str | None = None):
-        captured["json"] = json_data
-        for _ in ():  # empty — makes _spy an async generator (like the real method) yielding nothing
-            yield
-
-    monkeypatch.setattr(transport, "_stream_request", _spy)
-
-    tool = WireTool(
-        name="reserve",
-        description="Reserve units.",
-        parameters=WireParameters.model_validate(
-            {
-                "type": "object",
-                "properties": {"sku": {"type": "string"}},
-                "required": ["sku"],
-                "additionalProperties": False,
-            }
-        ),
-    )
-    request = BridgeTaskCreateRequest(
-        type="create",
-        action_prompt="do it",
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
-        tools=[tool],
-    )
-    async for _ in transport.run_task("task-alias", request):
-        pass
-
-    import json
-
-    serialized = json.dumps(captured["json"])
-    assert '"additionalProperties"' in serialized  # by_alias form (correct)
-    assert '"additional_properties"' not in serialized  # snake form the bridge would reject
-
-
-@pytest.mark.unit
-async def test_run_task_create_body_carries_policy_format_stream_attachments(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The real transport serializes every field of a typed create request."""
-    from dualeai.events.http_transport import HTTPTransport
-    from dualeai.models.response_format import JsonSchemaResponseFormat
-    from dualeai.models.routing_policy import RoutingPolicy
-    from dualeai.models.skill_enum import SkillEnum
-
-    transport = HTTPTransport(endpoint="https://api.test.duale.ai", token="dualeai_test_token_padded_1234")
-    captured: dict[str, object] = {}
-
-    async def _spy(*, method: str, path: str, json_data: object, task_id: str, last_event_id: str | None = None):
-        captured["json"] = json_data
-        for _ in ():  # empty async generator, like the real method
-            yield
-
-    monkeypatch.setattr(transport, "_stream_request", _spy)
-
-    request = BridgeTaskCreateRequest(
-        type="create",
-        action_prompt="do it",
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
-        routing_policy=RoutingPolicy(target_accuracy=0.9, required_skills=[SkillEnum.analysis]),
-        response_format=JsonSchemaResponseFormat(json_schema={"type": "object"}),
-        response_stream=True,
-        attachments=[
-            Attachment(
-                key="attachment-key",
-                filename="report.pdf",
-                description="Quarterly report",
-            )
-        ],
-    )
-    async for _ in transport.run_task("task-wire-fields", request):
-        pass
-
-    body_raw = captured["json"]
-    assert isinstance(body_raw, dict)
-    body: dict[str, object] = {str(key): value for key, value in body_raw.items()}
-    assert body["type"] == "create"
-    assert body["response_stream"] is True
-    assert body["routing_policy"] == {"target_accuracy": 0.9, "required_skills": ["analysis"]}
-    assert body["response_format"] == {"json_schema": {"type": "object"}}
-    assert body["attachments"] == [
-        {"key": "attachment-key", "filename": "report.pdf", "description": "Quarterly report"}
-    ]
 
 
 @pytest.mark.unit

@@ -13,6 +13,7 @@ import asyncio
 import pytest
 
 from dualeai import DualeAISDK
+from dualeai.models.bridge import BridgeTaskCreateRequest
 from dualeai.models.skill_enum import SkillEnum
 from dualeai.orchestrator import ask
 from dualeai.response import AgentResponse
@@ -38,7 +39,7 @@ class TestUnitAskFunction:
         assert isinstance(response.task, asyncio.Task)
         assert not response.task.done()
 
-        # Verify HTTP request was made (network boundary)
+        # Verify the transport received a Task call.
         assert len(require_mock_http_transport(minimal_mock_sdk).get_requests()) > 0
 
     async def test_ask_validates_empty_action(self, minimal_mock_sdk: DualeAISDK):
@@ -51,37 +52,31 @@ class TestUnitAskFunction:
         with pytest.raises(ValueError, match="Action cannot be empty"):
             await ask(action="   ", sdk=minimal_mock_sdk)
 
-        # Verify HTTP request was not made (validation happened first)
+        # Validation happened before a transport call.
         assert len(require_mock_http_transport(minimal_mock_sdk).get_requests()) == 0
 
-    async def test_ask_sends_action_prompt_in_http_request(self, minimal_mock_sdk: DualeAISDK):
-        """The Task request body carries the action as ``action_prompt``."""
+    async def test_ask_passes_action_to_task_transport(self, minimal_mock_sdk: DualeAISDK):
+        """The Task request passed to the transport carries the action."""
         action = "Process document with OCR"
         await ask(action=action, sdk=minimal_mock_sdk)
 
-        # Verify HTTP request was made
         requests = require_mock_http_transport(minimal_mock_sdk).get_requests()
         assert len(requests) > 0
-
-        # action_prompt is the exact action text in the wire body
-        assert requests[0]["body"]["action_prompt"] == action
+        task_request = requests[0]["request"]
+        assert isinstance(task_request, BridgeTaskCreateRequest)
+        assert task_request.action_prompt == action
 
     async def test_ask_includes_skills_in_request(self, minimal_mock_sdk: DualeAISDK):
-        """Skills are serialized in the HTTP Task request's routing policy."""
+        """The Task request passed to the transport carries the selected skills."""
         skills = [SkillEnum.instruction_following, SkillEnum.analysis]
         await ask(action="Extract and analyze", skills=skills, sdk=minimal_mock_sdk)
 
-        # Verify HTTP request was made
         requests = require_mock_http_transport(minimal_mock_sdk).get_requests()
         assert len(requests) > 0
-
-        # Skills land in routing_policy.required_skills as exact wire values
-        # (no target_accuracy/priority_level/etc — ask() builds a bare
-        # RoutingPolicy(required_skills=skills), so exclude_unset drops the rest).
-        body = requests[0]["body"]
-        assert body["routing_policy"] == {
-            "required_skills": ["instruction_following", "analysis"],
-        }
+        task_request = requests[0]["request"]
+        assert isinstance(task_request, BridgeTaskCreateRequest)
+        assert task_request.routing_policy is not None
+        assert task_request.routing_policy.required_skills == [SkillEnum.instruction_following, SkillEnum.analysis]
 
     async def test_ask_with_streaming_flag(self, minimal_mock_sdk: DualeAISDK):
         """Test ask() with streaming=True sets up streaming."""
@@ -94,7 +89,7 @@ class TestUnitAskFunction:
         # Verify response has streaming enabled
         assert response.streaming is True
 
-        # Verify HTTP request was made
+        # Verify the transport received a Task call.
         assert len(require_mock_http_transport(minimal_mock_sdk).get_requests()) > 0
 
     async def test_ask_exposes_task_runner(self, minimal_mock_sdk: DualeAISDK):
@@ -122,17 +117,17 @@ class TestUnitAskFunction:
             sdk=minimal_mock_sdk,
         )
 
-        # Verify HTTP request was made with the exact skill list in routing_policy
         requests = require_mock_http_transport(minimal_mock_sdk).get_requests()
         assert len(requests) > 0
-        assert requests[0]["body"]["routing_policy"] == {
-            "required_skills": [
-                "instruction_following",
-                "analysis",
-                "reasoning",
-                "general",
-            ],
-        }
+        task_request = requests[0]["request"]
+        assert isinstance(task_request, BridgeTaskCreateRequest)
+        assert task_request.routing_policy is not None
+        assert task_request.routing_policy.required_skills == [
+            SkillEnum.instruction_following,
+            SkillEnum.analysis,
+            SkillEnum.reasoning,
+            SkillEnum.general,
+        ]
 
     async def test_ask_task_id_uniqueness(self, minimal_mock_sdk: DualeAISDK):
         """Test ask() generates unique task IDs for each call."""
@@ -155,5 +150,5 @@ class TestUnitAskFunction:
         # Verify streaming is False
         assert response.streaming is False
 
-        # Verify HTTP request was made
+        # Verify the transport received a Task call.
         assert len(require_mock_http_transport(minimal_mock_sdk).get_requests()) > 0

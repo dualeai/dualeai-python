@@ -41,7 +41,7 @@ from opentelemetry.util.types import AttributeValue
 from structlog.typing import EventDict, WrappedLogger
 
 from dualeai.config import DualeAIConfig
-from dualeai.utils import tenant_id_from_token
+from dualeai.utils import token_fingerprint
 from dualeai.version import get_version
 
 
@@ -175,13 +175,13 @@ class SDKObservability:
         """Initialize no-op or OTLP-backed instruments from SDK configuration."""
         self.config = config
         self.service_name = "dualeai-sdk"
-        # This historical attribute name holds a token fingerprint, not the
-        # configured Library tenant id.
+        # This telemetry field holds a token fingerprint, not the configured
+        # Library tenant ID.
         # config.token is always str here — the field_validator raises if None/missing
         token = config.token
         # DualeAIConfig.validate_token_present_and_format raises if token is None/missing
         assert token is not None, "config.token must be set"
-        self.tenant_id = tenant_id_from_token(token)
+        self.tenant_id = token_fingerprint(token)
         # Simple enabled check: if endpoint and token are provided, enable observability
         self.enabled = bool(config.observability.endpoint and config.observability.token)
 

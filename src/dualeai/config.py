@@ -1,19 +1,23 @@
 """Pydantic settings for the Duale AI SDK.
 
-Task requests authenticate with ``token`` at ``endpoint``. Library operations
-also require ``tenant_id`` because it is part of their URL. Hosted-tool
-lifecycle operations require ``agent_id``; the attachment convenience API can
-instead use an explicit agent id or the sole legacy agent registered locally.
+Task and Agent requests use the Bridge hpke-http/3 endpoint derived from the
+HTTPS Gateway base. Library metadata requests use a separate protected
+endpoint with bearer authorization inside HPKE; ``tenant_id`` is part of their
+URL. Hosted-tool lifecycle operations require ``agent_id``. Attachment uploads
+use the configured Agent ID unless a per-call ID is supplied.
 
 Local validation and environment-loading behavior is covered by
 ``tests/test_config.py`` and ``tests/test_token_removal_validation.py``.
 """
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import find_dotenv
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_HPKE_PSK_MIN_BYTES = 32
 
 
 class ObservabilityConfig(BaseModel):
@@ -44,18 +48,18 @@ class DualeAIConfig(BaseSettings):
     """Configuration loaded from arguments, environment variables, and ``.env``.
 
     Task transport uses HTTP and Server-Sent Events:
-    - POST /v1/tasks/{task_id} → SSE stream (create task, type=create)
-    - POST /v1/tasks/{task_id} → SSE stream (tool results, type=tool_results)
-    - POST /v1/tasks/{task_id} → SSE stream (continue, type=continue)
-    - GET /v1/tasks/{task_id} → SSE stream (reconnect)
+    - POST /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (create task, type=create)
+    - POST /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (tool results, type=tool_results)
+    - POST /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (continue, type=continue)
+    - GET /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (reconnect)
 
     ``tenant_id`` and ``agent_id`` are not interchangeable with the API token:
     Library URL construction needs ``tenant_id`` and hosted-tool lifecycle calls
     need ``agent_id``. Ordinary task requests need only the token and endpoint.
 
     Environment variables:
-    - DUALEAI_TOKEN: API token for HTTP bridge authentication; starts with dualeai_ [required]
-    - DUALEAI_ENDPOINT: Duale AI API endpoint URL [optional]
+    - DUALEAI_TOKEN: API token for protected API calls; starts with dualeai_ [required]
+    - DUALEAI_ENDPOINT: HTTPS Gateway base URL [optional]
     - DUALEAI_TENANT_ID: Library tenant path segment [required for Library operations]
     - DUALEAI_AGENT_ID: Provisioned identity [required for hosted Tools unless passed to the SDK]
     - DUALEAI_REDIS_URL: Redis server URL for caching [optional]
@@ -71,15 +75,14 @@ class DualeAIConfig(BaseSettings):
         use_attribute_docstrings=True,
     )
 
-    # Task API authentication.
+    # Protected API authentication.
     # Default None — pydantic-settings fills from DUALEAI_TOKEN env var.
     # Validator ensures a valid token is present after all sources are loaded.
     token: str | None = Field(
         default=None,
-        min_length=10,
         max_length=256,
         description=(
-            "API token for HTTP bridge authentication; starts with dualeai_. "
+            "API token used as the hpke-http/3 PSK; starts with dualeai_ and has at least 32 UTF-8 bytes. "
             "Provided through the Duale AI workspace access handoff. "
             "Set via DUALEAI_TOKEN environment variable."
         ),
@@ -98,12 +101,14 @@ class DualeAIConfig(BaseSettings):
             raise ValueError(
                 "token must start with 'dualeai_'. Obtain a valid token through your Duale AI workspace access handoff."
             )
+        if len(v.encode("utf-8")) < _HPKE_PSK_MIN_BYTES:
+            raise ValueError("token must contain at least 32 UTF-8 bytes for hpke-http/3")
         return v
 
-    # Duale AI API endpoint
+    # Gateway base for the two protected service endpoints.
     endpoint: str = Field(
         default="https://api.duale.ai",
-        description="Shared API endpoint for task, lifecycle, and Library requests",
+        description="HTTPS Gateway base URL for protected Task, Agent, and Library metadata APIs",
     )
 
     tenant_id: str | None = Field(
@@ -121,16 +126,26 @@ class DualeAIConfig(BaseSettings):
         pattern="^[a-zA-Z][a-zA-Z0-9_-]*$",
         description=(
             "Provisioned agent identifier used by hosted-tool lifecycle calls. "
-            "Attachment uploads do not select it automatically; pass sdk.agent_id explicitly when desired."
+            "Attachment uploads use it unless an agent_id is supplied for that call."
         ),
     )
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, v: str) -> str:
-        """Validate endpoint is valid HTTP(S) URL."""
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("endpoint must be an HTTP or HTTPS URL")
+        """Validate the HTTPS Gateway base URL."""
+        parts = urlsplit(v)
+        if (
+            parts.scheme != "https"
+            or not parts.netloc
+            or parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError("endpoint must be an absolute HTTPS URL without credentials, query, or fragment")
+        if parts.path not in ("", "/"):
+            raise ValueError("endpoint must be an HTTPS Gateway base URL without a path")
         return v.rstrip("/")
 
     # Cache configuration

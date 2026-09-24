@@ -1,14 +1,14 @@
 """Structural protocol for SDK HTTP and SSE communication.
 
-Provides clean dependency injection boundary for testing.
+Provides a dependency injection boundary for testing.
 
 Protocol:
-- HTTPTransportProtocol: HTTP/SSE bridge transport
+- HTTPTransportProtocol: protected Bridge and Library HTTP transport
 
 Production uses HTTPTransport, tests use MockHTTPTransport.
 
 Protocol conformance is exercised through the production and mock transports in
-``tests/test_http_transport_connect.py`` and ``tests/mocks/mock_http.py``.
+``tests/test_http_transport_v3.py`` and ``tests/mocks/mock_http.py``.
 """
 
 from collections.abc import AsyncIterator
@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 class HTTPTransportProtocol(Protocol):
     """Protocol implemented by production and test HTTP/SSE transports.
 
-    Abstracts HTTP bridge operations for clean dependency injection.
+    Abstracts protected Bridge and Library operations for dependency injection.
     Production uses HTTPTransport, tests use MockHTTPTransport.
 
     See: https://peps.python.org/pep-0544/
@@ -62,11 +62,11 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def connect(self) -> None:
-        """Establish HTTP session to bridge endpoint."""
+        """Establish the Bridge and Library protected sessions."""
         ...
 
     async def disconnect(self) -> None:
-        """Close HTTP session and cleanup resources."""
+        """Close both protected service sessions and release resources."""
         ...
 
     async def stop_task(self, task_id: str, request: "TaskStopRequest") -> "TaskStopAccepted":
@@ -84,11 +84,10 @@ class HTTPTransportProtocol(Protocol):
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit a root create or child continuation and stream that task.
 
-        POST /v1/tasks/{task_id}. The typed body's discriminator selects
+        POST /http-bridge/v1/hpke/tasks/{task_id}. The typed body's discriminator selects
         creation or continuation. The transport-level
-        retry loop in ``HTTPTransport._stream_request`` may
-        transparently switch to GET on retry once the bridge has
-        accepted the original POST (see that docstring).
+        retry loop in ``HTTPTransport._stream_request`` switches to GET after
+        a protected SSE response starts.
 
         Args:
             task_id: Client-owned task ID in the URL. Root callers may select
@@ -114,7 +113,7 @@ class HTTPTransportProtocol(Protocol):
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit tool results and resume the same public task stream.
 
-        POST /v1/tasks/{task_id} with type=tool_results. The bridge publishes
+        POST /http-bridge/v1/hpke/tasks/{task_id} with type=tool_results. The bridge publishes
         an internal tool-result continuation beneath the URL task and returns
         that URL task's existing stream. ``last_event_id`` is the opaque SSE
         cursor for the triggering ``tool.use``.
@@ -171,8 +170,8 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentUploadResponse":
         """Request presigned URLs for document upload.
 
-        ``POST /libraries/v1/tenants/{tenant_id}/document-uploads`` over plain
-        HTTPS with ``Authorization: Bearer <api_token>``. The body contains only
+        ``POST /libraries/v1/hpke/tenants/{tenant_id}/document-uploads`` inside HPKE
+        with an encrypted ``Authorization: Bearer <api_token>``. The body contains only
         ``size_bytes``.
 
         Args:
@@ -192,8 +191,8 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentCreateResponse":
         """Create a queued Library document after all parts uploaded.
 
-        ``POST /libraries/v1/tenants/{tenant_id}/{library_id}/documents`` over
-        plain HTTPS with ``Authorization: Bearer <api_token>``. The body binds
+        ``POST /libraries/v1/hpke/tenants/{tenant_id}/{library_id}/documents`` inside
+        HPKE with an encrypted ``Authorization: Bearer <api_token>``. The body binds
         a temporary upload session to a stable Library id.
 
         Args:

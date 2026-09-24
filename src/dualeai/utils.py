@@ -8,19 +8,9 @@ import hashlib
 from dualeai.constants import DisplayLimits
 
 
-def tenant_id_from_token(token: str) -> str:
-    """Return the SHA-256 token fingerprint used as a local namespace.
-
-    The compatibility name predates its current use. The result is not the
-    configured or canonical tenant id. The cache backend and OpenTelemetry
-    resource both use the same fingerprint; rotating the token changes it.
-    """
+def token_fingerprint(token: str) -> str:
+    """Return the SHA-256 token fingerprint used by cache and telemetry."""
     return hashlib.sha256(token.encode()).hexdigest()
-
-
-def get_exception_type_name(exception: BaseException) -> str:
-    """Get exception type name for logging."""
-    return type(exception).__name__
 
 
 def get_type_name(obj: object) -> str:

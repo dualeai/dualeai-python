@@ -134,7 +134,7 @@ async def cache_backend(cache_factory: CacheFactory) -> CacheBackend[CacheableVa
 
 @pytest.fixture
 def unstarted_sdk_factory(config_factory: Callable[..., DualeAIConfig]) -> UnstartedSDKFactory:
-    """Create real SDK instances for synchronous registration tests."""
+    """Create real SDK instances without background tasks."""
 
     def create(*, agent_id: str | None = None) -> DualeAISDK:
         return DualeAISDK(config=config_factory(agent_id=agent_id), auto_start=False)
@@ -194,13 +194,13 @@ def config_factory():
 
     Usage:
         config = config_factory(tenant_id=TestTenantIDs.INTEGRATION)
-        config = config_factory(endpoint="http://custom:8080")
+        config = config_factory(endpoint="https://custom:8080")
     """
 
     def _create_config(**overrides: object) -> DualeAIConfig:
         # Provide default token if not specified
         if "token" not in overrides:
-            overrides["token"] = "dualeai_test_token_12345"
+            overrides["token"] = "dualeai_test_token_12345_padded_to_32bytes"
         return DualeAIConfig.model_validate(overrides)
 
     return _create_config

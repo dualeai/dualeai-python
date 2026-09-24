@@ -14,7 +14,7 @@ import pytest
 
 from dualeai.events.sse_parser import _MAX_SSE_EVENT_BYTES, _compute_checksum, parse_sse_stream
 from dualeai.models.bridge import BridgeTaskCompletedResponse
-from tests.test_sse_parser import MockStreamReader
+from tests.test_sse_parser import CheckedBlockReader
 
 _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "marked_answer.json").read_text())
 _ANSWER: str = _FIXTURE["answer"]
@@ -48,7 +48,7 @@ class TestMarkedAnswerReachesTheCaller:
     @pytest.mark.unit
     async def test_completion_survives_parsing(self) -> None:
         """Byte-for-byte equality, not just visual equality."""
-        events = [event async for event in parse_sse_stream(MockStreamReader(_completed_stream()))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(_completed_stream()))]
 
         assert len(events) == 1
         completion = _completion_of(events[0].data)
@@ -58,7 +58,7 @@ class TestMarkedAnswerReachesTheCaller:
     @pytest.mark.unit
     async def test_the_visible_answer_is_unchanged(self) -> None:
         """The carrier appends; it never edits the answer a human reads."""
-        events = [event async for event in parse_sse_stream(MockStreamReader(_completed_stream()))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(_completed_stream()))]
 
         assert _completion_of(events[0].data).startswith(_ANSWER)
 
@@ -74,5 +74,5 @@ class TestMarkedAnswerReachesTheCaller:
         stream = _completed_stream()
 
         assert len(stream.encode()) < _MAX_SSE_EVENT_BYTES
-        events = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
         assert len(events) == 1

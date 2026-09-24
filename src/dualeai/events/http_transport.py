@@ -1,41 +1,26 @@
-"""aiohttp transport for Task SSE streams and Library JSON requests.
+"""Protected Task, Agent, and Library metadata transport.
 
-Uses aiohttp for async HTTP with custom SSE parser.
-Implements HTTPTransportProtocol for dependency injection.
-
-Task SSE calls use ``HPKEClientSession`` with PSK authentication through the
-``X-HPKE-PSK-ID`` header.
-
-Library calls use a separate TLS-protected ``aiohttp.ClientSession`` with
-``Authorization: Bearer <api_token>``. Presigned object-store uploads also use
-ordinary HTTPS. Keeping the sessions separate prevents HPKE middleware from
-rewriting Library request bodies.
-
-Connection, header, retry, and Library request behavior is covered by
-``tests/test_http_transport_connect.py``,
-``tests/test_http_transport_headers.py``,
-``tests/test_http_transport_resilience.py``, and
-``tests/test_http_transport_library_aioresponses.py``.
+Task and Agent calls use the Bridge hpke-http/3 endpoint. Library metadata
+uses the Library endpoint with bearer credentials inside the protected request.
+Presigned object-store uploads are separate. Transport behavior is covered by
+``tests/test_http_transport_v3.py``.
 """
 
-import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from http import HTTPStatus
 from typing import TypeVar
 from urllib.parse import quote, urlsplit
 
 import aiohttp
-from hpke_http.middleware.aiohttp import DecryptedResponse, HPKEClientSession
+from hpke_http.middleware import Discover
+from hpke_http.middleware.aiohttp import HPKEClientSession, HPKEResponse
+from hpke_http.protocol import ProtocolError, StateError
+from hpke_http.transport import TransportError
 from pydantic import BaseModel, ValidationError
 from structlog import get_logger
-from tenacity import (
-    AsyncRetrying,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential_jitter,
-)
+from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from dualeai._wire import dump_wire_model
 from dualeai.constants import HTTPDefaults
@@ -72,45 +57,31 @@ from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
 from dualeai.observability import inject_trace_context
 
 logger = get_logger(__name__)
-
 _LibraryModelT = TypeVar("_LibraryModelT", bound=BaseModel)
-
-_LIBRARY_GATEWAY_PREFIX = "/libraries"
+_BRIDGE_PATH = "/http-bridge/v1/hpke"
+_LIBRARY_PATH = "/libraries/v1/hpke"
 
 
 def _endpoint_origin(endpoint: str) -> str:
-    """Return ``scheme://host`` of an endpoint, dropping any path prefix.
-
-    aiohttp rejects a path-bearing ``base_url`` without a trailing slash, and
-    host-root-absolute request paths (``/libraries/...``) replace the base path
-    anyway — so the Library session must bind to the origin, not the full
-    (possibly path-prefixed) bridge endpoint.
-    """
+    """Validate and return the HTTPS Gateway base origin."""
     parts = urlsplit(endpoint)
-    if not parts.scheme or not parts.netloc:
-        raise ValueError(f"endpoint must be an absolute http(s) URL with a host, got {endpoint!r}")
-    return f"{parts.scheme}://{parts.netloc}"
-
-
-def _discovery_url(endpoint: str) -> str:
-    """Return the HPKE key-discovery URL, preserving any endpoint path prefix.
-
-    Unlike the Library origin, discovery lives under the bridge prefix (e.g.
-    ``.../http-bridge/.well-known/hpke-keys``), so the path is kept. Any query or
-    fragment is dropped — the discovery path must not be appended after ``?…``/``#…``.
-    """
-    parts = urlsplit(endpoint)
-    if not parts.scheme or not parts.netloc:
-        raise ValueError(f"endpoint must be an absolute http(s) URL with a host, got {endpoint!r}")
-    base = f"{parts.scheme}://{parts.netloc}{parts.path}".rstrip("/")
-    return f"{base}/.well-known/hpke-keys"
+    if (
+        parts.scheme != "https"
+        or not parts.netloc
+        or parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or parts.path not in ("", "/")
+    ):
+        raise ValueError("endpoint must be an HTTPS Gateway base URL")
+    return f"https://{parts.netloc}"
 
 
 def _library_gateway_path(tenant_id: str, *segments: str) -> str:
-    """Build a public Library gateway path with service-local tenant routes."""
-    escaped_segments = [quote(segment.strip("/"), safe="") for segment in segments]
-    suffix = "/".join(["v1", "tenants", quote(tenant_id, safe=""), *escaped_segments])
-    return f"{_LIBRARY_GATEWAY_PREFIX}/{suffix}"
+    """Build the target Library route with escaped path identifiers."""
+    values = ["tenants", tenant_id, *segments]
+    return _LIBRARY_PATH + "/" + "/".join(quote(value, safe="") for value in values)
 
 
 def _resolve_retry_method(
@@ -119,629 +90,381 @@ def _resolve_retry_method(
     *,
     stream_established: bool,
 ) -> tuple[str, Mapping[str, object] | None]:
-    """Choose POST replay or read-only GET for the next stream attempt.
-
-    After the SDK observes a 2xx, the server has accepted the POST, so later
-    attempts use GET. Before an observed 2xx, server receipt is ambiguous and
-    the SDK repeats the original method with the same client-selected task ID.
-    This relies on server-side admission treating that stable ID idempotently.
-    """
+    """Resume an accepted Task with read-only GET; replay its ID before START."""
     if stream_established and method == "POST":
         return "GET", None
     return method, json_data
 
 
 class HTTPTransportError(Exception):
-    """Base error for HTTP transport operations."""
+    """Base error for protected API operations."""
 
     def __init__(self, message: str, *, problem_details: ProblemDetails | None = None) -> None:
         super().__init__(message)
-        # RFC 9457 body parsed from the bridge error response when it carried
-        # one; None for transport/connection failures with no ProblemDetails
-        # body. Callers read error_code, ai_hints, and retry hints from here.
         self.problem_details = problem_details
 
 
 class HTTPTransportConnectionError(HTTPTransportError):
-    """Connection to HTTP bridge failed."""
+    """Network, outer endpoint, or protected finite reply failure."""
 
 
 class HTTPTransportResponseError(HTTPTransportError):
-    """A non-authentication client request was rejected by the platform."""
+    """An authenticated logical client request was rejected."""
 
 
 class HTTPTransportAuthError(HTTPTransportError):
-    """Authentication failed (invalid/expired API key, missing credentials)."""
+    """An authenticated logical request was denied."""
 
 
 class HTTPTransportStreamError(HTTPTransportError):
-    """Error during SSE streaming."""
+    """A protected Task stream failed."""
 
 
-async def _read_problem_details(
-    response: aiohttp.ClientResponse | DecryptedResponse,
-) -> ProblemDetails | None:
-    """Parse an RFC 9457 ProblemDetails body, tolerating non-conforming bodies.
-
-    Reads raw bytes so an ``application/problem+json`` content type (RFC 9457)
-    is accepted alongside ``application/json``. Any parse or schema mismatch
-    yields None — a missing body must never mask the underlying HTTP error.
-    """
+def _problem_details(body: bytes) -> ProblemDetails | None:
+    """Parse a complete, authenticated logical error body when it has the schema."""
     try:
-        raw = await response.read()
-    except Exception:  # noqa: BLE001
-        # Best-effort read: a transport failure (aiohttp.ClientError) OR an
-        # HPKE decrypt failure (hpke_http DecryptionError, not a ClientError)
-        # must yield None, never mask the underlying HTTP status error.
-        return None
-    try:
-        body = json.loads(raw)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(body, dict):
-        return None
-    try:
-        return ProblemDetails.model_validate(body)
-    except ValidationError:
-        return None
+        value = json.loads(body)
+        if isinstance(value, dict):
+            return ProblemDetails.model_validate(value)
+    except (ValueError, TypeError, ValidationError):
+        pass
+    return None
 
 
-async def _raise_for_http_status(response: aiohttp.ClientResponse | DecryptedResponse, *, path: str) -> None:
-    """Map aiohttp response status errors to SDK transport errors.
-
-    On error the RFC 9457 ProblemDetails body, when present, is parsed and
-    attached to the raised error's ``problem_details`` so callers read the
-    typed ``error_code`` and retry hints instead of only an HTTP status line.
-    """
-    if response.status < HTTPStatus.BAD_REQUEST:
+def _check_status(status: int, body: bytes, *, path: str) -> None:
+    """Classify an authenticated logical status and body."""
+    if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
         return
-    # Read the ProblemDetails body BEFORE raising: some transports (and the
-    # aioresponses test mock) close the stream once raise_for_status fires,
-    # leaving the body unreadable afterward. On the error path no caller reads
-    # the body, so consuming it here is safe.
-    problem = await _read_problem_details(response)
-    try:
-        response.raise_for_status()
-    except aiohttp.ClientResponseError as exc:
-        if exc.status in (401, 403):
-            logger.warning(
-                "Authentication failed",
-                path=path,
-                status=exc.status,
-                message=exc.message,
-            )
-            raise HTTPTransportAuthError(f"HTTP {exc.status}: {exc.message}", problem_details=problem) from exc
-        error_type = (
-            HTTPTransportResponseError
-            if exc.status < HTTPStatus.INTERNAL_SERVER_ERROR
-            else HTTPTransportConnectionError
-        )
-        logger.warning(
-            "HTTP request failed",
-            path=path,
-            status=exc.status,
-            message=exc.message,
-        )
-        raise error_type(f"HTTP {exc.status}: {exc.message}", problem_details=problem) from exc
+    if status < HTTPStatus.BAD_REQUEST:
+        raise HTTPTransportConnectionError(f"Unexpected logical HTTP {status}: {path}")
+    problem = _problem_details(body)
+    message = f"HTTP {status}: {path}"
+    if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
+        raise HTTPTransportAuthError(message, problem_details=problem)
+    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
+        raise HTTPTransportResponseError(message, problem_details=problem)
+    raise HTTPTransportConnectionError(message, problem_details=problem)
 
 
-# Exceptions the SSE stream loop retries transparently (with Last-Event-ID).
-RETRYABLE_STREAM_ERRORS: tuple[type[BaseException], ...] = (
-    aiohttp.ClientConnectionError,
-    aiohttp.ServerTimeoutError,
-    # ClientPayloadError covers chunked-transfer cut mid-stream — the dominant
-    # SSE failure mode through cloud LBs and proxies. It is a SIBLING of
-    # ClientConnectionError under ClientError, not a subclass, so it must be
-    # listed explicitly.
-    aiohttp.ClientPayloadError,
-    # ServerDisconnectedError already inherits from ClientConnectionError;
-    # listed explicitly to defend against future aiohttp hierarchy shuffles
-    # and to match the existing parity with ServerTimeoutError above.
-    aiohttp.ServerDisconnectedError,
-    SSEChecksumError,  # Retry on checksum mismatch with Last-Event-ID
-)
+def _retryable_stream_error(error: BaseException, *, stream_established: bool) -> bool:
+    """Resume authenticated streams cut before END and transient network loss."""
+    return (
+        isinstance(error, SSEChecksumError)
+        or (isinstance(error, TransportError) and error.code in {"network_error", "discovery_network"})
+        or (stream_established and isinstance(error, ProtocolError) and error.code == "malformed_envelope")
+    )
 
 
 class HTTPTransport:
-    """HTTP/SSE transport using separate Task and Library sessions.
+    """Protected Bridge and Library sessions on one Gateway base URL."""
 
-    Two sessions, two trust profiles:
-
-    | Session              | Used for                       | Auth                          | Encryption |
-    |----------------------|--------------------------------|-------------------------------|------------|
-    | ``_session``         | Bridge SSE ``/v1/tasks/...``   | PSK via ``X-HPKE-PSK-ID``     | HPKE       |
-    | ``_library_session`` | Library ``/libraries/v1/...``  | ``Authorization: Bearer ...`` | TLS only   |
-
-    Features:
-    - POST /v1/tasks/{task_id} → SSE stream (run task, type=create)
-    - POST /v1/tasks/{child_task_id} → SSE stream (user continuation, type=continue)
-    - POST /v1/tasks/{task_id} → SSE stream (tool results, type=tool_results)
-    - Auto-reconnect with Last-Event-ID; POST→GET switch on retry
-      after the bridge has accepted the original request (see
-      _stream_request docstring for the bridge invariant)
-    - HPKE request/response protection through ``HPKEClientSession`` for Task
-      endpoints only. Library JSON and presigned uploads use ordinary HTTPS.
-
-    Implements HTTPTransportProtocol.
-
-    Note: zstd Content-Encoding is handled automatically by aiohttp 3.11+.
-    Uses compression.zstd (Python 3.14+, PEP 784) or backports.zstd (<3.14).
-    See RFC 8878 for zstd content-encoding specification.
-    """
-
-    # Retry config — see _stream_request docstring for design
-    # rationale. Budget sized so a long-running task can survive
-    # several mid-stream disconnects (each closes the SSE TCP
-    # connection when an upstream proxy or load balancer reconciles
-    # its backend pool). 10 attempts of wait_exponential_jitter(1, 10)
-    # give ~65-69 s of cumulative backoff (9 waits, base sum 65 s + jitter),
-    # enough to cover the typical backend re-registration window.
-    _MAX_RETRIES = 10
-    _RETRY_INITIAL_SECONDS = 1.0
-    _RETRY_MAX_SECONDS = 10.0
-
-    # Timeout config
+    _MAX_RETRIES = 5
     _CONNECT_TIMEOUT_SECONDS = 5.0
     _SOCK_READ_TIMEOUT_SECONDS = 60.0
-    """Detect dead connections (relies on server heartbeats)."""
-    _LIBRARY_TOTAL_TIMEOUT_SECONDS = 60.0
-    """Overall deadline for Library metadata JSON calls. Unlike the SSE bridge
-    stream (total=None, unbounded), these are ordinary request/response calls
-    that must not hang forever on a dribbling upstream."""
+    _FINITE_TIMEOUT_SECONDS = 60.0
 
-    def __init__(
-        self,
-        endpoint: str,
-        token: str,
-        tenant_id: str | None = None,
-    ) -> None:
-        """Initialize HTTP transport.
-
-        Args:
-            endpoint: Bridge API endpoint (e.g., https://api.duale.ai)
-            token: API token for authentication (dualeai_xxx)
-            tenant_id: Tenant path segment for Library management and uploads.
-        """
+    def __init__(self, endpoint: str, token: str, tenant_id: str | None = None) -> None:
         self._endpoint = endpoint.rstrip("/")
+        self._origin = _endpoint_origin(self._endpoint)
         self._token = token
         self._tenant_id = tenant_id
-        # PSK identity is SHA-512 hash of token (hpke-http v1.3.0)
-        # Server resolves this hash to lookup the raw token for HPKE decryption
-        self._psk_id = hashlib.sha512(token.encode()).digest()
-        self._session: HPKEClientSession | None = None
-        # Library calls use HTTPS + Authorization: Bearer on a separate
-        # aiohttp session so HPKE middleware never touches Library bytes.
-        self._library_session: aiohttp.ClientSession | None = None
-        self._connected = False
+        # This public identity is the service's existing token lookup key.
+        self._psk_id = hashlib.sha512(token.encode("utf-8")).digest()
+        self._bridge_session: HPKEClientSession | None = None
+        self._library_session: HPKEClientSession | None = None
 
     @property
     def is_connected(self) -> bool:
-        """Check if HTTP sessions (bridge + library) are active."""
-        return self._session is not None and self._library_session is not None and self._connected
+        return (
+            self._bridge_session is not None
+            and not self._bridge_session.closed
+            and self._library_session is not None
+            and not self._library_session.closed
+        )
 
     @property
     def endpoint(self) -> str:
-        """Get configured endpoint."""
         return self._endpoint
 
+    def _url(self, path: str) -> str:
+        return f"{self._origin}{path}"
+
     async def connect(self) -> None:
-        """Establish HTTP session to bridge endpoint with HPKE encryption."""
-        if self._session is not None:
+        """Create both protected sessions; each discovers its service key per call."""
+        if self.is_connected:
             return
+        if self._bridge_session is not None or self._library_session is not None:
+            await self.disconnect()
 
-        timeout = aiohttp.ClientTimeout(
-            total=None,  # No limit - SSE can run indefinitely
-            connect=self._CONNECT_TIMEOUT_SECONDS,
-            sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
-        )
+        def session(path: str) -> HPKEClientSession:
+            return HPKEClientSession(
+                endpoint=f"{self._endpoint}{path}",
+                # TODO: Reuse discovery per service when hpke-http exposes a
+                # public key cache with a defined rotation policy.
+                key_source=Discover(),
+                psk=self._token.encode("utf-8"),
+                psk_id=self._psk_id,
+                timeout=aiohttp.ClientTimeout(
+                    total=self._FINITE_TIMEOUT_SECONDS,
+                    connect=self._CONNECT_TIMEOUT_SECONDS,
+                    sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
+                ),
+            )
 
-        # HPKEClientSession handles request/response protection transparently.
-        # - Auto-fetches platform public keys from discovery endpoint
-        # - Encrypts request bodies with HPKE
-        # - Uses token as PSK for authenticated encryption
-        # - Compresses with zstd when compress=True
-        # - psk_id sent via X-HPKE-PSK-ID header (hpke-http v1.3.0)
-        #
-        # Task calls use PSK auth and therefore send no Authorization header.
-        # discovery_url explicit: hpke-http defaults to host-level /.well-known/hpke-keys
-        # (per RFC 8615), but the bridge may be behind a path prefix (e.g., /http-bridge).
-        discovery_url = _discovery_url(self._endpoint)
-
-        # No session-level Content-Type: the HPKE middleware rewrites it to
-        # application/octet-stream for encrypted POST bodies (stashing the
-        # original in X-HPKE-Content-Type), and bridge POSTs pass json= so
-        # aiohttp sets application/json per-request anyway. A session default
-        # only mislabels the bodyless GET replay.
-        self._session = HPKEClientSession(
-            base_url=self._endpoint,
-            psk=self._token.encode(),
-            psk_id=self._psk_id,
-            discovery_url=discovery_url,
-            compress=True,
-            timeout=timeout,
-        )
-        await self._session.__aenter__()
-
-        # Library session: HTTPS + Authorization: Bearer. It intentionally does
-        # not share the Task session's HPKE middleware.
-        # Kept on a separate session so the HPKE middleware never wraps
-        # Library bytes, and so Library can use its own JSON+Content-Type
-        # defaults without bleeding into the Bridge SSE pipeline.
-        # Library gateway routes are host-root absolute (``/libraries/v1/...``),
-        # NOT under the bridge path prefix. Use the endpoint's ORIGIN as the base
-        # URL: the ``/http-bridge`` prefix would be dropped by the absolute path
-        # anyway, and aiohttp rejects a path-bearing base_url without a trailing
-        # slash ("base_url must have a trailing '/'"). Origin is host-only, so it
-        # is always valid and yields the correct ``https://host/libraries/...``.
-        library_base_url = _endpoint_origin(self._endpoint)
-        # Library calls are ordinary JSON request/response, not an SSE stream:
-        # give them a bounded total timeout instead of reusing the bridge's
-        # total=None (which would let a slow-loris upstream hang forever).
-        library_timeout = aiohttp.ClientTimeout(
-            total=self._LIBRARY_TOTAL_TIMEOUT_SECONDS,
-            connect=self._CONNECT_TIMEOUT_SECONDS,
-            sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
-        )
-        self._library_session = aiohttp.ClientSession(
-            base_url=library_base_url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self._token}",
-            },
-            timeout=library_timeout,
-        )
-
-        self._connected = True
-
-        logger.debug(
-            "HTTP transport connected (HPKE for bridge, plain HTTPS+Bearer for library)",
-            endpoint=self._endpoint,
-        )
+        bridge = session(_BRIDGE_PATH)
+        library: HPKEClientSession | None = None
+        try:
+            await bridge.__aenter__()
+            library = session(_LIBRARY_PATH)
+            await library.__aenter__()
+        except BaseException:
+            try:
+                if library is not None:
+                    await library.close()
+            finally:
+                await bridge.close()
+            raise
+        self._bridge_session = bridge
+        self._library_session = library
+        logger.debug("Protected HTTP transport initialized", endpoint=self._endpoint)
 
     async def disconnect(self) -> None:
-        """Close HTTP sessions (bridge HPKE + library plain HTTPS) and cleanup."""
-        if self._session is None and self._library_session is None:
-            return
-        self._connected = False
-        if self._library_session is not None:
-            await self._library_session.close()
-            self._library_session = None
-        if self._session is not None:
-            await self._session.__aexit__(None, None, None)
-            self._session = None
-        logger.debug("HTTP transport disconnected")
-
-    async def run_task(
-        self,
-        task_id: str,
-        request: BridgeTaskRequest,
-    ) -> AsyncIterator[BridgeSSEEvent]:
-        """Submit a validated create or continuation request.
-
-        POST /v1/tasks/{task_id}. The body discriminator selects a root create
-        or child continuation. After the SDK observes a successful POST, the
-        retry loop uses GET to resume the same task stream.
-
-        Args:
-            task_id: Client-owned task ID in the URL. The SDK generates a UUID4
-                when the caller does not select a root ID; continuations always
-                use a new SDK-generated UUID4 child ID.
-            request: Fully validated body, including its discriminator.
-
-        Yields:
-            BridgeSSEEvent objects from SSE stream.
-
-        Raises:
-            HTTPTransportAuthError: On authentication failures (401/403).
-            HTTPTransportError: On connection or stream errors.
-        """
-        async for event in self._stream_request(
-            method="POST",
-            path=f"/v1/tasks/{task_id}",
-            # by_alias=True to match every other bridge write path: the embedded
-            # tool schema (Tool.parameters) is alias-only (additionalProperties),
-            # so an unaliased dump emits additional_properties and a bridge
-            # Parameters(extra=forbid) rejects the create.
-            json_data=dump_wire_model(request),
-            task_id=task_id,
-        ):
-            yield event
-
-    async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
-        """Ask the platform to stop a running task.
-
-        POST /v1/tasks/{task_id}/stop. The call returns as soon as the platform
-        accepts the request; the task ends with `task.stopped` on its event
-        stream, carrying the reason supplied here.
-        """
-        self._ensure_connected()
-        assert self._session is not None
-        path = f"/v1/tasks/{task_id}/stop"
+        bridge, library = self._bridge_session, self._library_session
+        self._bridge_session = None
+        self._library_session = None
         try:
-            # The HPKE session returns the response directly, unlike the plain
-            # aiohttp session the Library calls use.
-            response = await self._session.request("POST", path, json=dump_wire_model(request))
-            await _raise_for_http_status(response, path=path)
-            response_body = await response.read()
-        except HTTPTransportError:
-            raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as exc:
-            raise HTTPTransportConnectionError(f"Task stop request failed: {path}") from exc
+            if library is not None:
+                await library.close()
+        finally:
+            if bridge is not None:
+                await bridge.close()
+        logger.debug("Protected HTTP transport disconnected")
 
-        try:
-            return TaskStopAccepted.model_validate_json(response_body)
-        except ValidationError as exc:
-            raise HTTPTransportConnectionError("Task stop response did not match its schema") from exc
-
-    async def submit_tool_results(
-        self,
-        task_id: str,
-        request: BridgeToolResultsRequest,
-        *,
-        last_event_id: str | None = None,
-    ) -> AsyncIterator[BridgeSSEEvent]:
-        """Submit tool execution results and stream continuation events."""
-        async for event in self._stream_request(
-            method="POST",
-            path=f"/v1/tasks/{task_id}",
-            json_data=dump_wire_model(request),
-            task_id=task_id,
-            last_event_id=last_event_id,
-        ):
-            yield event
-
-    async def register_agent_manifest(self, request: AgentRegistrationMessage) -> None:
-        """Register the current SDK tool manifest with the bridge."""
-        await self._post_bridge_accepted("/v1/agent/registration", request)
-
-    async def send_agent_heartbeat(self, request: AgentHeartbeatMessage) -> AgentHeartbeatResponse:
-        """Send one heartbeat and parse bridge clock diagnostics."""
-        self._ensure_connected()
-        assert self._session is not None
-        path = "/v1/agent/heartbeat"
-        response = await self._session.post(path, json=dump_wire_model(request))
-        await _raise_for_http_status(response, path=path)
-        if response.status != HTTPStatus.ACCEPTED:
-            raise HTTPTransportConnectionError(f"Bridge heartbeat response returned HTTP {response.status}")
-        response_body = await response.read()
-        try:
-            return AgentHeartbeatResponse.model_validate_json(response_body)
-        except ValidationError as exc:
-            raise HTTPTransportConnectionError("Heartbeat response did not match schema") from exc
-
-    async def deregister_agent_process(self, request: AgentDeregistrationMessage) -> None:
-        """Deregister the current SDK process lease."""
-        await self._post_bridge_accepted("/v1/agent/deregistration", request)
-
-    async def create_library(self, request: LibraryCreateRequest) -> LibraryWithRevision:
-        """Create or resolve a general Library through the collection route."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        return await self._request_library_model(
-            "POST",
-            _library_gateway_path(tenant_id),
-            LibraryWithRevision,
-            request=request,
-            params=None,
-            schema_error="Library create response did not match schema",
-        )
-
-    async def list_libraries(self) -> LibraryListResponse:
-        """List Libraries accessible to the configured token."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        return await self._request_library_model(
-            "GET",
-            _library_gateway_path(tenant_id),
-            LibraryListResponse,
-            request=None,
-            params=None,
-            schema_error="Library list response did not match schema",
-        )
-
-    async def get_library(self, request: LibraryGetRequest) -> LibraryWithRevision:
-        """Get one Library by stable id."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        return await self._request_library_model(
-            "GET",
-            _library_gateway_path(tenant_id, str(request.library_id)),
-            LibraryWithRevision,
-            request=None,
-            params=None,
-            schema_error="Library get response did not match schema",
-        )
-
-    async def update_library(self, request: LibraryUpdateRequest) -> LibraryWithRevision:
-        """Append a Library path or tags revision."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        return await self._request_library_model(
-            "PATCH",
-            _library_gateway_path(tenant_id, str(request.library_id)),
-            LibraryWithRevision,
-            request=request.patch,
-            params=None,
-            schema_error="Library update response did not match schema",
-        )
-
-    async def delete_library(self, request: LibraryDeleteRequest) -> None:
-        """Send a delete request for one Library."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        await self._request_library_no_content(
-            "DELETE",
-            _library_gateway_path(tenant_id, str(request.library_id)),
-        )
-
-    async def list_library_documents(self, request: LibraryDocumentListRequest) -> LibraryDocumentPage:
-        """List one bounded page of live documents in one Library."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        params = {"limit": str(request.limit)}
-        if request.cursor is not None:
-            params["cursor"] = request.cursor
-        return await self._request_library_model(
-            "GET",
-            _library_gateway_path(tenant_id, str(request.library_id), "documents"),
-            LibraryDocumentPage,
-            request=None,
-            params=params,
-            schema_error="Library document page response did not match schema",
-        )
-
-    async def get_library_document(self, request: LibraryDocumentGetRequest) -> PublicIndexedDocument:
-        """Get one document's current public state."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        return await self._request_library_model(
-            "GET",
-            _library_gateway_path(
-                tenant_id,
-                str(request.library_id),
-                "documents",
-                str(request.document_id),
-            ),
-            PublicIndexedDocument,
-            request=None,
-            params=None,
-            schema_error="Library document get response did not match schema",
-        )
-
-    async def delete_library_document(self, request: LibraryDocumentDeleteRequest) -> None:
-        """Send a delete request for one document."""
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        await self._request_library_no_content(
-            "DELETE",
-            _library_gateway_path(
-                tenant_id,
-                str(request.library_id),
-                "documents",
-                str(request.document_id),
-            ),
-        )
-
-    async def create_document_upload(
-        self,
-        request: LibraryDocumentUploadRequest,
-    ) -> LibraryDocumentUploadResponse:
-        """Request presigned URLs for document upload.
-
-        ``POST /libraries/v1/tenants/{tenant_id}/document-uploads`` over plain
-        HTTPS with ``Authorization: Bearer <api_token>``. The body contains
-        ``size_bytes`` only.
-        """
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        path = _library_gateway_path(tenant_id, "document-uploads")
-        return await self._request_library_model(
-            "POST",
-            path,
-            LibraryDocumentUploadResponse,
-            request=request,
-            params=None,
-            schema_error="Document upload response did not match schema",
-        )
-
-    async def create_library_document(
-        self, request: LibraryDocumentCreateOperationRequest
-    ) -> LibraryDocumentCreateResponse:
-        """Create a queued Library document after all parts uploaded.
-
-        ``POST /libraries/v1/tenants/{tenant_id}/{library_id}/documents`` over
-        plain HTTPS with ``Authorization: Bearer <api_token>``.
-        """
-        self._ensure_connected()
-        tenant_id = self._require_library_tenant_id()
-        path = _library_gateway_path(tenant_id, str(request.library_id), "documents")
-        return await self._request_library_model(
-            "POST",
-            path,
-            LibraryDocumentCreateResponse,
-            request=request.document,
-            params=None,
-            schema_error="Document create response did not match schema",
-        )
-
-    def _ensure_connected(self) -> None:
-        """Raise if not connected."""
+    def _ensure_connected(self, *, library: bool = False) -> HPKEClientSession:
         if not self.is_connected:
             raise HTTPTransportConnectionError("HTTP transport not connected. Call connect() first.")
-
-    async def _post_bridge_accepted(
-        self,
-        path: str,
-        request: AgentRegistrationMessage | AgentDeregistrationMessage,
-    ) -> None:
-        """POST one typed lifecycle message and require an empty HTTP 202 response."""
-        self._ensure_connected()
-        assert self._session is not None
-        response = await self._session.post(path, json=dump_wire_model(request))
-        await _raise_for_http_status(response, path=path)
-        if response.status != HTTPStatus.ACCEPTED:
-            raise HTTPTransportConnectionError(f"Bridge accepted response returned HTTP {response.status}: POST {path}")
-        if await response.read():
-            raise HTTPTransportConnectionError(f"Bridge accepted response contained an unexpected body: POST {path}")
-
-    async def _request_library_model(
-        self,
-        method: str,
-        path: str,
-        response_model: type[_LibraryModelT],
-        *,
-        request: BaseModel | None,
-        params: Mapping[str, str] | None,
-        schema_error: str,
-    ) -> _LibraryModelT:
-        """Send one Library request and validate its response from raw JSON bytes."""
-        assert self._library_session is not None
-        try:
-            if request is None:
-                response_context = self._library_session.request(method, path, params=params)
-            else:
-                response_context = self._library_session.request(
-                    method,
-                    path,
-                    json=dump_wire_model(request),
-                    params=params,
-                )
-            async with response_context as response:
-                await _raise_for_http_status(response, path=path)
-                response_body = await response.read()
-        except HTTPTransportError:
-            raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as exc:
-            raise HTTPTransportConnectionError(f"Library request failed: {method} {path}") from exc
-
-        try:
-            return response_model.model_validate_json(response_body)
-        except ValidationError as exc:
-            raise HTTPTransportConnectionError(schema_error) from exc
-
-    async def _request_library_no_content(self, method: str, path: str) -> None:
-        """Send one Library request whose public contract requires HTTP 204."""
-        assert self._library_session is not None
-        try:
-            async with self._library_session.request(method, path) as response:
-                await _raise_for_http_status(response, path=path)
-                if response.status != HTTPStatus.NO_CONTENT:
-                    raise HTTPTransportConnectionError(
-                        f"Library no-content response returned HTTP {response.status}: {method} {path}"
-                    )
-        except HTTPTransportError:
-            raise
-        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as exc:
-            raise HTTPTransportConnectionError(f"Library request failed: {method} {path}") from exc
+        session = self._library_session if library else self._bridge_session
+        assert session is not None
+        return session
 
     def _require_library_tenant_id(self) -> str:
-        """Return the tenant path segment required by Library routes."""
         if not self._tenant_id:
             raise ConfigurationError(
                 "Library operations require tenant_id in DualeAIConfig or DUALEAI_TENANT_ID",
                 config_key="tenant_id",
             )
         return self._tenant_id
+
+    async def _request_finite(
+        self,
+        method: str,
+        path: str,
+        *,
+        request: BaseModel | None = None,
+        params: Mapping[str, str] | None = None,
+        library: bool = False,
+    ) -> HPKEResponse:
+        """Return a complete authenticated response, including its checked body."""
+        session = self._ensure_connected(library=library)
+        headers: dict[str, str] = {}
+        if library:
+            headers["Authorization"] = f"Bearer {self._token}"
+        inject_trace_context(headers)
+        try:
+            response = await session.request(
+                method,
+                self._url(path),
+                params=params,
+                headers=headers,
+                json=dump_wire_model(request) if request is not None else None,
+            )
+        except (TransportError, ProtocolError, StateError, aiohttp.ClientError, TimeoutError) as error:
+            raise HTTPTransportConnectionError(f"Protected request failed: {method} {path}") from error
+        _check_status(response.status, await response.read(), path=path)
+        return response
+
+    async def _request_model(
+        self,
+        method: str,
+        path: str,
+        response_model: type[_LibraryModelT],
+        *,
+        request: BaseModel | None = None,
+        params: Mapping[str, str] | None = None,
+        library: bool = False,
+        schema_error: str,
+    ) -> _LibraryModelT:
+        response = await self._request_finite(method, path, request=request, params=params, library=library)
+        try:
+            return response_model.model_validate_json(await response.read())
+        except ValidationError as error:
+            raise HTTPTransportConnectionError(schema_error) from error
+
+    def run_task(self, task_id: str, request: BridgeTaskRequest) -> AsyncGenerator[BridgeSSEEvent, None]:
+        return self._stream_request(
+            method="POST",
+            path=f"{_BRIDGE_PATH}/tasks/{quote(task_id, safe='')}",
+            task_id=task_id,
+            json_data=dump_wire_model(request),
+        )
+
+    async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
+        return await self._request_model(
+            "POST",
+            f"{_BRIDGE_PATH}/tasks/{quote(task_id, safe='')}/stop",
+            TaskStopAccepted,
+            request=request,
+            schema_error="Task stop response did not match its schema",
+        )
+
+    def submit_tool_results(
+        self,
+        task_id: str,
+        request: BridgeToolResultsRequest,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncGenerator[BridgeSSEEvent, None]:
+        return self._stream_request(
+            method="POST",
+            path=f"{_BRIDGE_PATH}/tasks/{quote(task_id, safe='')}",
+            task_id=task_id,
+            json_data=dump_wire_model(request),
+            last_event_id=last_event_id,
+        )
+
+    async def _post_bridge_accepted(
+        self, path: str, request: AgentRegistrationMessage | AgentDeregistrationMessage
+    ) -> None:
+        response = await self._request_finite("POST", path, request=request)
+        if response.status != HTTPStatus.ACCEPTED:
+            raise HTTPTransportConnectionError(f"Bridge accepted response returned HTTP {response.status}: POST {path}")
+        if await response.read():
+            raise HTTPTransportConnectionError(f"Bridge accepted response contained an unexpected body: POST {path}")
+
+    async def register_agent_manifest(self, request: AgentRegistrationMessage) -> None:
+        await self._post_bridge_accepted(f"{_BRIDGE_PATH}/agent/registration", request)
+
+    async def send_agent_heartbeat(self, request: AgentHeartbeatMessage) -> AgentHeartbeatResponse:
+        response = await self._request_finite("POST", f"{_BRIDGE_PATH}/agent/heartbeat", request=request)
+        if response.status != HTTPStatus.ACCEPTED:
+            raise HTTPTransportConnectionError(f"Bridge heartbeat response returned HTTP {response.status}")
+        try:
+            return AgentHeartbeatResponse.model_validate_json(await response.read())
+        except ValidationError as error:
+            raise HTTPTransportConnectionError("Heartbeat response did not match schema") from error
+
+    async def deregister_agent_process(self, request: AgentDeregistrationMessage) -> None:
+        await self._post_bridge_accepted(f"{_BRIDGE_PATH}/agent/deregistration", request)
+
+    async def create_library(self, request: LibraryCreateRequest) -> LibraryWithRevision:
+        return await self._request_model(
+            "POST",
+            _library_gateway_path(self._require_library_tenant_id()),
+            LibraryWithRevision,
+            request=request,
+            library=True,
+            schema_error="Library create response did not match schema",
+        )
+
+    async def list_libraries(self) -> LibraryListResponse:
+        return await self._request_model(
+            "GET",
+            _library_gateway_path(self._require_library_tenant_id()),
+            LibraryListResponse,
+            library=True,
+            schema_error="Library list response did not match schema",
+        )
+
+    async def get_library(self, request: LibraryGetRequest) -> LibraryWithRevision:
+        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id))
+        return await self._request_model(
+            "GET",
+            path,
+            LibraryWithRevision,
+            library=True,
+            schema_error="Library get response did not match schema",
+        )
+
+    async def update_library(self, request: LibraryUpdateRequest) -> LibraryWithRevision:
+        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id))
+        return await self._request_model(
+            "PATCH",
+            path,
+            LibraryWithRevision,
+            request=request.patch,
+            library=True,
+            schema_error="Library update response did not match schema",
+        )
+
+    async def _request_no_content(self, method: str, path: str) -> None:
+        response = await self._request_finite(method, path, library=True)
+        if response.status != HTTPStatus.NO_CONTENT:
+            raise HTTPTransportConnectionError(
+                f"Library no-content response returned HTTP {response.status}: {method} {path}"
+            )
+        if await response.read():
+            raise HTTPTransportConnectionError(f"Library no-content response contained a body: {method} {path}")
+
+    async def delete_library(self, request: LibraryDeleteRequest) -> None:
+        await self._request_no_content(
+            "DELETE", _library_gateway_path(self._require_library_tenant_id(), str(request.library_id))
+        )
+
+    async def list_library_documents(self, request: LibraryDocumentListRequest) -> LibraryDocumentPage:
+        params = {"limit": str(request.limit)}
+        if request.cursor is not None:
+            params["cursor"] = request.cursor
+        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id), "documents")
+        return await self._request_model(
+            "GET",
+            path,
+            LibraryDocumentPage,
+            params=params,
+            library=True,
+            schema_error="Library document page response did not match schema",
+        )
+
+    async def get_library_document(self, request: LibraryDocumentGetRequest) -> PublicIndexedDocument:
+        path = _library_gateway_path(
+            self._require_library_tenant_id(), str(request.library_id), "documents", str(request.document_id)
+        )
+        return await self._request_model(
+            "GET",
+            path,
+            PublicIndexedDocument,
+            library=True,
+            schema_error="Library document get response did not match schema",
+        )
+
+    async def delete_library_document(self, request: LibraryDocumentDeleteRequest) -> None:
+        path = _library_gateway_path(
+            self._require_library_tenant_id(), str(request.library_id), "documents", str(request.document_id)
+        )
+        await self._request_no_content("DELETE", path)
+
+    async def create_document_upload(self, request: LibraryDocumentUploadRequest) -> LibraryDocumentUploadResponse:
+        path = _library_gateway_path(self._require_library_tenant_id(), "document-uploads")
+        return await self._request_model(
+            "POST",
+            path,
+            LibraryDocumentUploadResponse,
+            request=request,
+            library=True,
+            schema_error="Document upload response did not match schema",
+        )
+
+    async def create_library_document(
+        self, request: LibraryDocumentCreateOperationRequest
+    ) -> LibraryDocumentCreateResponse:
+        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id), "documents")
+        return await self._request_model(
+            "POST",
+            path,
+            LibraryDocumentCreateResponse,
+            request=request.document,
+            library=True,
+            schema_error="Document create response did not match schema",
+        )
 
     async def _stream_request(
         self,
@@ -750,193 +473,61 @@ class HTTPTransport:
         task_id: str,
         json_data: Mapping[str, object] | None = None,
         last_event_id: str | None = None,
-    ) -> AsyncIterator[BridgeSSEEvent]:
-        """Execute an SSE request with mid-stream-disconnect resilience.
-
-        ## What this defends against
-
-        Long-running tasks routinely outlive the lifetime of the
-        underlying TCP connection between the SDK and the bridge.
-        Cloud load balancers and reverse proxies in front of the
-        bridge often close in-flight connections when their backend
-        target pool reconciles (e.g. after a backend autoscale
-        event). The bridge process serving the request stays alive
-        throughout — only the connection dies. This surfaces to
-        aiohttp as ``ClientPayloadError`` (chunked transfer ended
-        without a final 0-length chunk).
-
-        ## Why retries are safe — and when they aren't
-
-        The server accepts a POST before returning ``200 OK``.
-        Repeating the POST can therefore publish the same logical request more
-        than once. The retry strategy relies on server-side admission treating
-        the stable client-selected Task ID idempotently. Switching to GET after
-        an observed 2xx avoids needless POST replay while the SDK resumes the
-        stream.
-
-        The GET endpoint is expected to be read-only. ``Last-Event-ID`` is an
-        opaque cursor last yielded to the caller; the server resumes after that
-        cursor. Without one, the server may replay the Task stream from its
-        beginning.
-
-        Decision rule, encoded in ``_resolve_retry_method``:
-
-            - A retryable connection failure before the SDK reads a 2xx retries
-              the original method with the same task ID. Server receipt is
-              ambiguous. HTTP error responses do not retry in this transport.
-            - Failure after ``response.raise_for_status()`` returns
-              2xx (chunked transfer cut, server disconnect mid-body)
-              means Bridge has already published; retry switches to GET for
-              replay. The ``stream_established`` flag tracks the observed 2xx.
-
-        Both paths use the same ``Last-Event-ID`` header. On the
-        pre-flight path it stays at the caller-supplied value
-        (``None`` on a fresh call); on the post-flight path it
-        carries the last yielded event id so the bridge replays from
-        the right point.
-
-        ## Retry budget
-
-        ``_MAX_RETRIES = 10`` with
-        ``wait_exponential_jitter(initial=1.0, max=10.0)`` gives a
-        cumulative backoff of roughly 65-69 seconds (9 inter-attempt
-        waits 1+2+4+8+10+10+10+10+10 = 65s, plus up to ~4s jitter) —
-        sized to cover the typical re-registration window of a
-        cloud load balancer adding/removing a backend (a few tens of
-        seconds) with margin. Bounded by attempt count rather than
-        deadline so failure modes are predictable: if the bridge is
-        genuinely down, ten retries surface the failure to the
-        caller without hammering the endpoint for the full task
-        deadline.
-
-        ## Bridge invariant we depend on
-
-        GET ``/v1/tasks/{task_id}`` MUST stay read-only and
-        idempotent. If the bridge's GET handler ever starts
-        accepting new work, the POST→GET method-switching logic below silently
-        breaks. Re-verify that GET only streams an existing Task whenever that
-        endpoint changes.
-
-        Args:
-            method: HTTP method (GET, POST). For POST, the body is
-                sent on the first attempt only; subsequent retries
-                (after the stream was established) switch to GET to
-                avoid republishing.
-            path: Request path.
-            task_id: Task ID for logging.
-            json_data: Optional JSON body (POST). Dropped on GET
-                retries.
-            last_event_id: Caller-supplied initial replay position.
-                Used on the very first attempt; thereafter the
-                function tracks its own ``current_last_event_id`` from
-                the events it yields.
-
-        Yields:
-            ``BridgeSSEEvent`` objects after the exact composite cursor. A
-            successful resume does not yield an event at or before the
-            caller's last acknowledged event index.
-
-        Raises:
-            HTTPTransportAuthError: 401/403 — non-retryable.
-            HTTPTransportResponseError: non-authentication 4xx — non-retryable.
-            HTTPTransportConnectionError: 5xx — non-retryable.
-            HTTPTransportStreamError: malformed SSE payload — unrecoverable.
-            aiohttp.ClientError (subclass): retry budget exhausted.
-        """
-        self._ensure_connected()
-        assert self._session is not None
-
+    ) -> AsyncGenerator[BridgeSSEEvent, None]:
+        """Run or resume the Task stream with the service's stable-ID contract."""
+        session = self._ensure_connected()
         current_last_event_id = last_event_id
-        # Once raise_for_status() returns 2xx, the SDK knows the server accepted
-        # the POST. Later attempts use GET; before this point receipt is
-        # ambiguous and replay relies on the stable Task ID.
         stream_established = False
 
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(self._MAX_RETRIES),
-            wait=wait_exponential_jitter(
-                initial=self._RETRY_INITIAL_SECONDS,
-                max=self._RETRY_MAX_SECONDS,
-            ),
-            retry=retry_if_exception_type(RETRYABLE_STREAM_ERRORS),
-            reraise=True,
-        ):
-            with attempt:
-                # Task calls use PSK auth. HPKEClientSession sends psk_id through
-                # X-HPKE-PSK-ID and does not add an Authorization header.
-                effective_method, effective_body = _resolve_retry_method(
-                    method,
-                    json_data,
-                    stream_established=stream_established,
-                )
-                headers: dict[str, str] = {
-                    "Accept": HTTPDefaults.ACCEPT_SSE,
-                    "Accept-Encoding": HTTPDefaults.ACCEPT_ENCODING,
-                }
-                if current_last_event_id is not None:
-                    headers["Last-Event-ID"] = str(current_last_event_id)
-                # Propagate active W3C trace context for server-side correlation.
-                # This is a no-op when no span is active.
-                inject_trace_context(headers)
+        def retry_after_failure(error: BaseException) -> bool:
+            return _retryable_stream_error(error, stream_established=stream_established)
 
-                response = None
-                try:
-                    # Use json= for automatic serialization by HPKEClientSession
-                    response = await self._session.request(
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self._MAX_RETRIES),
+                wait=wait_exponential_jitter(initial=1.0, max=10.0),
+                retry=retry_if_exception(retry_after_failure),
+                reraise=True,
+            ):
+                with attempt:
+                    effective_method, effective_body = _resolve_retry_method(
+                        method, json_data, stream_established=stream_established
+                    )
+                    headers = {"Accept": HTTPDefaults.ACCEPT_SSE}
+                    if current_last_event_id is not None:
+                        headers["Last-Event-ID"] = current_last_event_id
+                    inject_trace_context(headers)
+                    async with session.stream(
                         effective_method,
-                        path,
+                        self._url(path),
                         headers=headers,
                         json=effective_body,
-                    )
-                    await _raise_for_http_status(response, path=path)
-                    # The observed 2xx proves that Bridge published the POST.
-                    # Later attempts use GET to avoid republishing it.
-                    stream_established = True
-
-                    # Use iter_sse for HPKE-encrypted SSE streams
-                    async for event in parse_sse_stream(self._session.iter_sse(response)):
-                        current_last_event_id = event.id
-                        yield event
-
-                except SSEChecksumError as e:
-                    # Resume after the last event the parser yielded. The failed
-                    # event's opaque cursor cannot be decremented safely: it may
-                    # be the first or a later event in one server batch.
-                    logger.warning(
-                        "SSE checksum mismatch, retrying",
-                        task_id=task_id,
-                        event_id=e.event_id,
-                        event_type=e.event_type,
-                        expected=e.expected,
-                        actual=e.actual,
-                        retry_from=current_last_event_id,
-                        attempt=attempt.retry_state.attempt_number,
-                    )
-                    raise  # Let tenacity retry with updated Last-Event-ID
-
-                except SSEParseError as e:
-                    logger.error(
-                        "SSE parse error",
-                        task_id=task_id,
-                        error=str(e),
-                    )
-                    raise HTTPTransportStreamError(f"SSE parse error: {e}") from e
-
-                except aiohttp.ClientError as e:
-                    logger.warning(
-                        "HTTP connection error, retrying",
-                        task_id=task_id,
-                        method=method,  # original (caller-facing)
-                        effective_method=effective_method,  # post-switch
-                        path=path,
-                        stream_established=stream_established,
-                        last_event_id=current_last_event_id,
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        attempt=attempt.retry_state.attempt_number,
-                    )
-                    raise
-
-                finally:
-                    if response is not None:
-                        response.close()
+                        timeout=aiohttp.ClientTimeout(
+                            total=None,
+                            connect=self._CONNECT_TIMEOUT_SECONDS,
+                            sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
+                        ),
+                    ) as response:
+                        if response.mode == "finite":
+                            body = await response.read()
+                            _check_status(response.status, body, path=path)
+                            raise HTTPTransportStreamError(
+                                f"Task stream returned finite HTTP {response.status}: {path}"
+                            )
+                        if response.mode != "sse" or response.status != HTTPStatus.OK:
+                            raise HTTPTransportStreamError(
+                                f"Task stream returned HTTP {response.status} in mode {response.mode}: {path}"
+                            )
+                        stream_established = True
+                        try:
+                            async for event in parse_sse_stream(response.iter_sse()):
+                                current_last_event_id = event.id
+                                yield event
+                        except SSEChecksumError:
+                            raise
+                        except SSEParseError as error:
+                            raise HTTPTransportStreamError(f"SSE parse error: {error}") from error
+        except (TransportError, ProtocolError, StateError, aiohttp.ClientError, TimeoutError) as error:
+            raise HTTPTransportStreamError(f"Protected Task stream failed: {task_id}") from error
+        except SSEChecksumError as error:
+            raise HTTPTransportStreamError(f"Task stream checksum failed: {task_id}") from error

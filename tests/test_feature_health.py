@@ -6,17 +6,15 @@ The fixture uses the real SDK with its HTTP transport boundary replaced.
 import asyncio
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
 from dualeai import DualeAISDK
 from dualeai.cache import MockCacheBackend
-from dualeai.messages import AgentConfig
 from dualeai.models.bridge import BridgeTaskCompletedResponse
 from dualeai.models.llm_result import LLMResult
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.response import TerminalEvent
 from dualeai.sdk import ComponentHealth
 from tests.conftest import TestTenantIDs
@@ -70,7 +68,7 @@ class TestUnitHealthFeature:
         assert "components" in health
         assert "uptime_seconds" in health
         assert "inflight_tasks" in health
-        assert "registered_agents" in health
+        assert "registered_tools" in health
 
         # minimal_mock_sdk has no failing component — status is deterministic.
         assert health["status"] == "healthy"
@@ -81,7 +79,7 @@ class TestUnitHealthFeature:
         # Verify numeric fields
         assert isinstance(health["uptime_seconds"], int)
         assert isinstance(health["inflight_tasks"], int)
-        assert isinstance(health["registered_agents"], int)
+        assert isinstance(health["registered_tools"], int)
 
     async def test_health_includes_component_status(self, minimal_mock_sdk: DualeAISDK):
         """Test health check includes status for each component."""
@@ -228,25 +226,16 @@ class TestUnitHealthFeature:
                 pass
             sdk._inflight_tasks.clear()
 
-    async def test_health_registered_agents_count(self, minimal_mock_sdk: DualeAISDK):
-        """Test registered_agents reflects actual registered agent count."""
+    def test_health_registered_tools_count(self, minimal_mock_sdk: DualeAISDK) -> None:
+        """The local health snapshot counts Tools registered through the SDK."""
         sdk = minimal_mock_sdk
+        assert sdk.get_health_status()["registered_tools"] == 0
 
-        # Get initial health (no registered agents)
-        health_initial = sdk.get_health_status()
-        assert health_initial["registered_agents"] == 0
+        @sdk.tool(description="Echo a value.", timeout=timedelta(seconds=1))
+        async def echo(value: str) -> str:
+            return value
 
-        # Register some agents
-        async def dummy_func():
-            return SkillEnum.general
-
-        agent_config = AgentConfig(name="test-agent", capabilities=[SkillEnum.general])
-        sdk.register_agent("agent-1", dummy_func, agent_config)
-        sdk.register_agent("agent-2", dummy_func, agent_config)
-
-        # Get health with registered agents
-        health_with_agents = sdk.get_health_status()
-        assert health_with_agents["registered_agents"] == 2
+        assert sdk.get_health_status()["registered_tools"] == 1
 
     async def test_health_scheduler_closed_detection(self, minimal_mock_sdk: DualeAISDK):
         """Test health detects scheduler state."""

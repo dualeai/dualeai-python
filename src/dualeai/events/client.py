@@ -1,9 +1,8 @@
 """Typed HTTP/SSE client used by the public SDK facade.
 
-Despite the compatibility name ``CloudEventsClient``, this class sends HTTP
-request bodies and consumes Server-Sent Events. The transport owns reconnects
-and ``Last-Event-ID`` handling. An injected transport provides the network
-boundary used by tests.
+This client submits typed requests and consumes Server-Sent Events. The
+transport owns protected HTTP calls, reconnects, and ``Last-Event-ID`` handling.
+An injected transport provides the network boundary used by tests.
 
 Client dispatch and error translation are covered by
 ``tests/test_feature_ask.py`` and ``tests/test_libraries_client.py``.
@@ -107,9 +106,8 @@ def _dispatch_stream_event(
 class CloudEventsClient:
     """Lower-level client for Task streams, lifecycle calls, and Libraries.
 
-    Applications normally use ``DualeAISDK`` rather than constructing this
-    compatibility-named class directly. The client sends the configured API
-    token; it does not itself establish authorization or tenant isolation.
+    Applications normally use ``DualeAISDK``. The transport uses the configured
+    API token; this client does not establish authorization or tenant isolation.
     """
 
     def __init__(
@@ -129,11 +127,14 @@ class CloudEventsClient:
         self._connected = False
 
     async def connect(self) -> None:
-        """Connect to HTTP bridge.
+        """Initialize the transport for protected Bridge and Library requests.
+
+        The production transport discovers each service's public key and
+        authenticates when a request starts.
 
         Raises:
-            DualeAIAuthError: If authentication fails (invalid/expired API key)
-            DualeAIConnectionError: If connection fails
+            DualeAIAuthError: If an injected transport rejects authentication.
+            DualeAIConnectionError: If transport initialization fails.
         """
         try:
             # If transport was injected (e.g., MockHTTPTransport for testing), use it
@@ -142,12 +143,12 @@ class CloudEventsClient:
                     await self._transport.connect()
                 self._connected = True
 
-                logger.debug("HTTP transport connected (injected)")
+                logger.debug("Injected HTTP transport initialized")
                 return
 
             # Create HTTPTransport for production
             logger.debug(
-                "Starting HTTP connection",
+                "Initializing protected HTTP transport",
                 endpoint=self.config.endpoint,
             )
 
@@ -165,7 +166,7 @@ class CloudEventsClient:
             self._connected = True
 
             logger.info(
-                "Connected to HTTP bridge",
+                "Protected HTTP transport initialized",
                 endpoint=self.config.endpoint,
             )
 
@@ -182,10 +183,10 @@ class CloudEventsClient:
                 endpoint=self.config.endpoint,
                 error=str(e),
             )
-            raise DualeAIConnectionError(f"Failed to connect to HTTP bridge: {e}") from e
+            raise DualeAIConnectionError(f"Failed to connect to protected services: {e}") from e
         except Exception as e:
             logger.error(
-                "Unexpected error connecting to HTTP bridge",
+                "Unexpected error connecting to protected services",
                 error=str(e),
                 exc_info=True,
             )
@@ -202,11 +203,11 @@ class CloudEventsClient:
         return self._transport
 
     async def disconnect(self) -> None:
-        """Disconnect from HTTP bridge and cleanup resources."""
+        """Disconnect from the protected services and release resources."""
         if self._transport and self._transport.is_connected:
             try:
                 await self._transport.disconnect()
-                logger.info("Disconnected from HTTP bridge")
+                logger.info("Disconnected from protected services")
             except Exception as e:  # noqa: BLE001  # Suppress cleanup errors
                 logger.warning(
                     "Error during HTTP disconnect",
@@ -245,14 +246,20 @@ class CloudEventsClient:
                 fast-callback rule.
 
         Returns:
-            The terminal event — ``BridgeTaskCompletedResponse`` on
-            success, ``BridgeTaskErrorResponse`` on
-            failure/timeout/cancellation.
+            The terminal event: ``BridgeTaskCompletedResponse`` on success,
+            ``BridgeTaskErrorResponse`` on failure, or
+            ``BridgeTaskStoppedResponse`` on a Platform Stop.
 
         Raises:
             DualeAIAuthError: If authentication fails (401/403).
+            BusinessError: If an authenticated client request is rejected.
             DualeAIConnectionError: If not connected, the stream ends
-                without a terminal event, or other transport errors.
+                without a terminal event, or transport/server errors.
+            asyncio.CancelledError: If the local Task runner is cancelled.
+
+        Stop and cancellation behavior is covered by
+        ``tests/test_task_stop.py::test_an_open_stream_ends_on_the_stop_and_raises_with_its_reason`` and
+        ``tests/test_streaming_callbacks.py::TestTaskCancellation::test_task_cancel_propagates_to_bridge_iteration``.
         """
         transport = self._ensure_connected()
         logger.debug(
@@ -282,17 +289,22 @@ class CloudEventsClient:
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Consume one bridge SSE stream through the shared terminal contract."""
         try:
-            async for event in stream:
-                terminal = _dispatch_stream_event(
-                    event.data,
-                    event.id,
-                    delta_callback,
-                    reset_callback,
-                    tool_use_callback,
-                )
-                if terminal is not None:
-                    logger.info("Task terminated", task_id=task_id, outcome=type(terminal).__name__)
-                    return terminal
+            try:
+                async for event in stream:
+                    terminal = _dispatch_stream_event(
+                        event.data,
+                        event.id,
+                        delta_callback,
+                        reset_callback,
+                        tool_use_callback,
+                    )
+                    if terminal is not None:
+                        logger.info("Task terminated", task_id=task_id, outcome=type(terminal).__name__)
+                        return terminal
+            finally:
+                close_stream = getattr(stream, "aclose", None)
+                if close_stream is not None:
+                    await close_stream()
         except HTTPTransportError as error:
             _raise_translated(f"{operation} failed", error)
         raise DualeAIConnectionError(f"{operation} stream for task {task_id} ended without a terminal event")
@@ -373,7 +385,7 @@ class CloudEventsClient:
 
     @property
     def is_connected(self) -> bool:
-        """Check if client is connected to HTTP bridge."""
+        """Check whether the protected transport is connected."""
         return self._connected and self._transport is not None and self._transport.is_connected
 
     async def __aenter__(self) -> Self:

@@ -5,6 +5,8 @@ Tests the parse_sse_stream function including:
 - Checksum mismatch detection (SSEChecksumError)
 """
 
+from zlib import crc32
+
 import pytest
 
 from dualeai.events import sse_parser
@@ -20,24 +22,26 @@ from dualeai.models.bridge import (
 )
 
 
-class MockStreamReader:
-    """Mock aiohttp.StreamReader for testing SSE parser."""
+class CheckedBlockReader:
+    """Feed complete SSE blocks as the checked HPKE reader delivers them."""
 
     def __init__(self, data: str | bytes) -> None:
         if isinstance(data, str):
             data = data.encode("utf-8")
-        self._lines = data.split(b"\n")
+        if not data.endswith(b"\n\n"):
+            raise ValueError("SSE test fixture must end at a block boundary")
+        self._blocks = [block + b"\n\n" for block in data.split(b"\n\n") if block]
         self._index = 0
 
     def __aiter__(self):
         return self
 
     async def __anext__(self) -> bytes:
-        if self._index >= len(self._lines):
+        if self._index >= len(self._blocks):
             raise StopAsyncIteration
-        line = self._lines[self._index]
+        block = self._blocks[self._index]
         self._index += 1
-        return line + b"\n"
+        return block
 
 
 # Valid test payloads matching Pydantic models
@@ -74,10 +78,9 @@ class TestSSEParserChecksum:
 
         The checksum `18fd7226` is `zlib.crc32` over
         `content.delta:{"type":"content.delta","timestamp":"2025-01-01T00:00:00Z","delta":"hello"}`,
-        derived on the bridge side by
-        `test_frozen_checksum_is_crc32_of_the_type_and_data_framing`.
+        calculated independently of the parser.
         """
-        events = [event async for event in parse_sse_stream(MockStreamReader(_FROZEN_EVENT))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(_FROZEN_EVENT))]
 
         assert len(events) == 1
         assert events[0].id == "1:1"
@@ -85,10 +88,21 @@ class TestSSEParserChecksum:
         assert events[0].data.delta == "hello"
 
     @pytest.mark.unit
+    async def test_initial_bom_and_persistent_id_follow_sse_rules(self):
+        first = f"\ufeff: crc={_CONTENT_DELTA_CRC}\nid: 3:1\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
+        second = f": crc={_CONTENT_DELTA_2_CRC}\nevent: content.delta\ndata: {_CONTENT_DELTA_2}\n\n"
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(first + second))]
+        assert [event.id for event in events] == ["3:1", "3:1"]
+        assert [event.data.delta for event in events if isinstance(event.data, BridgeContentDeltaResponse)] == [
+            "hello",
+            "world",
+        ]
+
+    @pytest.mark.unit
     async def test_parse_sse_validates_checksum(self):
         """A wire checksum produced outside the parser accepts the matching event."""
         stream = f": crc={_CONTENT_DELTA_CRC}\nid: 1:1\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
-        events = [e async for e in parse_sse_stream(MockStreamReader(stream))]
+        events = [e async for e in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 1
         assert events[0].id == "1:1"
@@ -99,7 +113,7 @@ class TestSSEParserChecksum:
     async def test_parse_sse_preserves_content_replacement(self):
         stream = f": crc={_CONTENT_RESET_CRC}\nid: 2:1\nevent: content.reset\ndata: {_CONTENT_RESET}\n\n"
 
-        events = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 1
         assert isinstance(events[0].data, BridgeContentResetResponse)
@@ -111,7 +125,7 @@ class TestSSEParserChecksum:
         stream = f": crc=00000000\nid: 42:3\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
 
         with pytest.raises(SSEChecksumError) as exc_info:
-            _events = [e async for e in parse_sse_stream(MockStreamReader(stream))]
+            _events = [e async for e in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert exc_info.value.event_id == "42:3"
         assert exc_info.value.expected == "00000000"
@@ -124,14 +138,14 @@ class TestSSEParserChecksum:
         stream = f": crc={_TASK_COMPLETED_MESSAGE_CRC}\nid: 1:1\ndata: {_TASK_COMPLETED}\n\n"
 
         with pytest.raises(SSEParseError, match="does not match payload type"):
-            _ = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_heartbeat_comments_ignored(self):
         """Test that non-checksum comments (heartbeats) are ignored."""
         # heartbeat comment before checksum
         stream = f": heartbeat\n: crc={_CONTENT_DELTA_CRC}\nid: 1:1\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
-        events = [e async for e in parse_sse_stream(MockStreamReader(stream))]
+        events = [e async for e in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 1
 
@@ -142,7 +156,7 @@ class TestSSEParserChecksum:
             f": crc={_CONTENT_DELTA_CRC}\nid: 1:1\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
             f": crc={_CONTENT_DELTA_2_CRC}\nid: 2:1\nevent: content.delta\ndata: {_CONTENT_DELTA_2}\n\n"
         )
-        events = [e async for e in parse_sse_stream(MockStreamReader(stream))]
+        events = [e async for e in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 2
         assert isinstance(events[0].data, BridgeContentDeltaResponse)
@@ -168,12 +182,20 @@ class TestSSEParserEmptyData:
         stream = (
             f"{ignored_prelude}: crc={_CONTENT_DELTA_CRC}\nid: 1:1\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
         )
-        events = [e async for e in parse_sse_stream(MockStreamReader(stream))]
+        events = [e async for e in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 1
         assert events[0].id == "1:1"
         assert isinstance(events[0].data, BridgeContentDeltaResponse)
         assert events[0].data.delta == "hello"
+
+    @pytest.mark.unit
+    async def test_parse_sse_rejects_whitespace_only_task_payload(self):
+        checksum = crc32(b"content.delta: ") & 0xFFFFFFFF
+        stream = f": crc={checksum:08x}\nid: 1:1\nevent: content.delta\ndata:  \n\n"
+
+        with pytest.raises(SSEParseError, match="Invalid JSON"):
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
 
 class TestSSEParserEdges:
@@ -189,7 +211,7 @@ class TestSSEParserEdges:
         stream = f": crc=38725c16\nid: 1:1\nevent: tool.use\ndata: {payload}\n\n"
 
         with pytest.raises(SSEParseError, match="Invalid SSE event"):
-            _ = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_rejects_added_fields_in_a_known_nested_result(self):
@@ -200,7 +222,7 @@ class TestSSEParserEdges:
         stream = f": crc=7bece536\nid: 2:1\nevent: task.completed\ndata: {payload}\n\n"
 
         with pytest.raises(SSEParseError, match="Invalid SSE event"):
-            _ = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_preserves_problem_details_extensions(self):
@@ -213,7 +235,7 @@ class TestSSEParserEdges:
         )
         stream = f": crc=f3ffddf5\nid: 3:1\nevent: task.error\ndata: {payload}\n\n"
 
-        events = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 1
         assert isinstance(events[0].data, BridgeTaskErrorResponse)
@@ -224,7 +246,7 @@ class TestSSEParserEdges:
         """Malformed JSON in an event's data raises SSEParseError (not a silent skip)."""
         stream = ": crc=b65c98ae\nid: 1:1\nevent: content.delta\ndata: {not valid json\n\n"
         with pytest.raises(SSEParseError):
-            _ = [e async for e in parse_sse_stream(MockStreamReader(stream))]
+            _ = [e async for e in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_rejects_unknown_event_type(self):
@@ -236,14 +258,14 @@ class TestSSEParserEdges:
         )
 
         with pytest.raises(SSEParseError, match="Invalid SSE event"):
-            _ = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_requires_checksum_for_every_payload(self):
         stream = f"id: 1:1\nevent: content.delta\ndata: {_CONTENT_DELTA}\n\n"
 
         with pytest.raises(SSEParseError, match="Missing CRC32 checksum"):
-            _ = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_accepts_event_at_data_byte_limit(self, monkeypatch: pytest.MonkeyPatch):
@@ -256,7 +278,7 @@ class TestSSEParserEdges:
             'data: "timestamp":"2025-01-01T00:00:00Z","delta":"hello"}\n\n'
         )
 
-        events = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
 
         assert len(events) == 1
 
@@ -264,19 +286,7 @@ class TestSSEParserEdges:
     async def test_parse_sse_rejects_oversized_multiline_event(self, monkeypatch: pytest.MonkeyPatch):
         """Complete short lines cannot grow one event beyond the data cap."""
         monkeypatch.setattr(sse_parser, "_MAX_SSE_EVENT_BYTES", 16)
-        stream = ": crc=00000000\ndata: 12345678\ndata: 12345678\n"
+        stream = ": crc=00000000\ndata: 12345678\ndata: 12345678\n\n"
 
         with pytest.raises(SSEParseError, match="SSE event data exceeds 16 bytes"):
-            _ = [event async for event in parse_sse_stream(MockStreamReader(stream))]
-
-    @pytest.mark.unit
-    async def test_parse_sse_rejects_oversized_unterminated_line(self, monkeypatch: pytest.MonkeyPatch):
-        """An attacker cannot grow the pending line buffer without a newline."""
-        monkeypatch.setattr(sse_parser, "_MAX_SSE_EVENT_BYTES", 8)
-
-        async def chunks():
-            yield b"data"
-            yield b": 1234"
-
-        with pytest.raises(SSEParseError, match="SSE line exceeds 8 bytes"):
-            _ = [event async for event in parse_sse_stream(chunks())]
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]

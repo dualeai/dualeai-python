@@ -20,30 +20,19 @@ from dualeai.config import DualeAIConfig
 from dualeai.constants import TimingDefaults
 from dualeai.decorators import (
     activity,
-    agent,
     tool,
 )
 
-# Introspection helpers (get_*_metadata / get_*_registry) are intentionally not
-# re-exported here; they are internal. Import from ``dualeai.decorators`` if needed.
 # Exceptions
 from dualeai.exceptions import (
-    ActivityTimeoutError,
-    AgentRegistrationError,
     BusinessError,
-    CacheConnectionError,
-    CacheError,
-    CacheSerializationError,
     ConfigurationError,
     DualeAIAuthError,
     DualeAIConnectionError,
     DualeAIError,
     LibraryUploadError,
     MessagingError,
-    RoutingError,
     TaskStoppedError,
-    TaskSubmissionError,
-    TaskTimeoutError,
     ValidationError,
 )
 
@@ -108,16 +97,16 @@ class SDKConfigKwargs(TypedDict, total=False):
     """Keyword arguments accepted by :func:`create_sdk`.
 
     Configuration via environment variables:
-    - DUALEAI_TOKEN: API token for HTTP bridge authentication; starts with dualeai_ [required]
-    - DUALEAI_ENDPOINT: HTTP bridge endpoint URL [optional]
+    - DUALEAI_TOKEN: API token for protected requests; starts with dualeai_ [required]
+    - DUALEAI_ENDPOINT: HTTPS Gateway base URL for hpke-http/3 APIs [optional]
     - DUALEAI_TENANT_ID: Tenant path segment [required for Library operations]
     - DUALEAI_AGENT_ID: Provisioned identity [required for hosted Tools unless
-      supplied programmatically; pass ``sdk.agent_id`` explicitly to attachment uploads]
+      supplied programmatically; used by attachment uploads unless overridden per call]
     - DUALEAI_REDIS_URL: Redis server URL for caching [optional]
     """
 
-    token: str  # API token for HTTP bridge; starts with dualeai_
-    endpoint: str  # HTTP bridge endpoint URL
+    token: str  # API token for protected requests; starts with dualeai_
+    endpoint: str  # HTTPS Gateway base URL for protected APIs
     tenant_id: str
     agent_id: str
     redis_url: str
@@ -191,8 +180,6 @@ def create_sdk(**kwargs: Unpack[SDKConfigKwargs]) -> DualeAISDK:
 
 
 __all__ = [
-    "ActivityTimeoutError",
-    "AgentRegistrationError",
     "BridgeContentDeltaResponse",
     "BridgeContentResetResponse",
     "BridgeSSEEvent",
@@ -208,9 +195,6 @@ __all__ = [
     "BusinessError",
     "CacheBackend",
     "CacheConfig",
-    "CacheConnectionError",
-    "CacheError",
-    "CacheSerializationError",
     "ConfigurationError",
     "DualeAIAuthError",
     "DualeAIConfig",
@@ -237,19 +221,15 @@ __all__ = [
     "PublicIndexedDocument",
     "RedisCacheBackend",
     "ResponseFormat",
-    "RoutingError",
     "RoutingPolicy",
     "SQLiteCacheBackend",
     "SkillEnum",
     "TaskStoppedError",
-    "TaskSubmissionError",
-    "TaskTimeoutError",
     "Tool",
     "ToolContext",
     "ValidationError",
     "__version__",
     "activity",
-    "agent",
     "ask",
     "configure_logging",
     "continue_conversation",

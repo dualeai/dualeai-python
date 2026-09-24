@@ -30,8 +30,8 @@ async def test_stop_task_posts_the_reason(minimal_mock_sdk: DualeAISDK) -> None:
 
     assert accepted.task_id == "task-stop-me-123456"
     request = require_mock_http_transport(minimal_mock_sdk).get_requests()[-1]
-    assert request["method"] == "POST"
-    assert request["path"] == "/v1/tasks/task-stop-me-123456/stop"
+    assert request["operation"] == "stop_task"
+    assert request["task_id"] == "task-stop-me-123456"
     assert isinstance(request["request"], TaskStopRequest)
     assert request["request"].reason == "Wrong document supplied"
 
@@ -72,7 +72,7 @@ async def test_response_stop_is_the_same_call_without_the_task_id(minimal_mock_s
 
     assert accepted.task_id == response.task_id
     request = require_mock_http_transport(minimal_mock_sdk).get_requests()[-1]
-    assert request["path"] == f"/v1/tasks/{response.task_id}/stop"
+    assert request["task_id"] == response.task_id
     assert isinstance(request["request"], TaskStopRequest)
     assert request["request"].reason == "Wrong document supplied"
 

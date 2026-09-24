@@ -1,9 +1,9 @@
 """Async facade for Duale AI Tasks, hosted Tools, Libraries, and activities.
 
 Task submissions return :class:`dualeai.response.AgentResponse` objects backed
-by an HTTP/SSE operation. Registered Tools execute in the caller's process when
-they are delivered on a Task stream. Library and attachment operations use the
-same SDK configuration but ordinary HTTP request/response calls.
+by protected Bridge HTTP/SSE calls. Registered Tools execute in the caller's
+process when they are delivered on a Task stream. Library metadata uses
+HPKE requests; presigned S3 parts use their signed HTTPS URLs.
 
 Cached activities use a process-local scheduler and a Redis backend when it is
 available, otherwise SQLite. Invalidation is TTL-, backend-, or caller-driven;
@@ -20,6 +20,10 @@ The local behaviors summarized here are covered across
 ``tests/test_agent_lifecycle.py``, ``tests/test_attachments.py``, and
 ``tests/test_feature_health.py``. Service-side authorization and execution
 outcomes are not enforced by this repository's tests.
+
+The transport boundaries are exercised by
+``tests/test_http_transport_v3.py::test_real_v3_tls_boundary_checks_both_services_and_live_task_block``
+and ``tests/test_attachments_s3.py::test_public_upload_preserves_bytes_and_document_metadata``.
 """
 
 import asyncio
@@ -76,7 +80,6 @@ from dualeai.logging_config import (
     get_task_logger,
     operation_context,
 )
-from dualeai.messages import AgentConfig
 from dualeai.models.agent_id import AgentId
 from dualeai.models.bridge import (
     Attachment,
@@ -109,7 +112,7 @@ from dualeai.tools._json import json_schema_adapter
 from dualeai.tools._util import callable_name
 from dualeai.tools.errors import apply_tool_error, format_registered_tool_error
 from dualeai.tools.serialization import tool_success_output
-from dualeai.utils import tenant_id_from_token
+from dualeai.utils import token_fingerprint
 
 # Type variables and definitions
 T = TypeVar("T")
@@ -219,8 +222,7 @@ class DualeAISDK:
             config: Configuration object. Omission loads ``DUALEAI_*`` settings.
             agent_id: Provisioned identity for hosted-tool lifecycle calls.
                 Overrides ``config.agent_id`` and is exposed as ``sdk.agent_id``;
-                attachment uploads require it explicitly unless exactly one
-                legacy agent is registered.
+                attachment uploads use it when no per-call ID is supplied.
             max_jobs: Default concurrent cached-activity and registered-tool limit.
             job_timeout: Cached-activity timeout in seconds.
             auto_start: Schedule hosted-tool registration and heartbeats when an
@@ -263,8 +265,7 @@ class DualeAISDK:
         configure_logging(level=log_level)
         self._setup_enhanced_logging()
 
-        self.agents: dict[str, tuple[Callable[..., object], AgentConfig]] = {}
-        resolved_agent_id = agent_id or self.config.agent_id
+        resolved_agent_id = agent_id if agent_id is not None else self.config.agent_id
         self.agent_id = _agent_id_adapter.validate_python(resolved_agent_id) if resolved_agent_id is not None else None
         self._tools: dict[str, RegisteredToolCallable] = {}
         # In-flight task runners keyed by task_id. Used by cleanup() for
@@ -368,7 +369,7 @@ class DualeAISDK:
             # config.token is always str — field_validator raises if None/missing
             token = self.config.token
             assert token is not None, "config.token must be set (validated by DualeAIConfig)"
-            tenant_id = tenant_id_from_token(token)
+            tenant_id = token_fingerprint(token)
             cache = await create_cache_backend(
                 tenant_id=tenant_id,
                 redis_url=self.config.redis_url,
@@ -404,16 +405,6 @@ class DualeAISDK:
                 pending_limit=self._backpressure_config.max_pending_activities,
             )
         return self._scheduler
-
-    def register_agent(self, agent_id: str, func: Callable[..., object], agent_config: AgentConfig) -> None:
-        """Record legacy local agent metadata.
-
-        This registry supports compatibility decorators and attachment-agent
-        inference. It is not the hosted Tool manifest published by
-        :meth:`serve`; use :meth:`tool` or ``@dualeai.tool`` for hosted Tools.
-        """
-        self.agents[agent_id] = (func, agent_config)
-        # Hosted-agent lifecycle registration is sent separately by sdk.serve().
 
     def _get_sync_tool_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         """Lazily create the dedicated bounded thread pool for sync-tool offload."""
@@ -1025,39 +1016,6 @@ class DualeAISDK:
         """
         return prepare_attachments(files)
 
-    def _resolve_attachment_agent_id(self, agent_id: str | None) -> str:
-        """Resolve the agent identity used to route attachment uploads.
-
-        Single-agent SDKs (the common shape) need not pass ``agent_id`` — the
-        sole registered agent is used. Multi-agent or zero-agent SDKs must pass
-        it explicitly because the call-scope library path encodes a single
-        ``agent_id`` segment.
-
-        Args:
-            agent_id: Explicit agent identifier, or ``None`` to resolve from
-                the SDK's registry.
-
-        Returns:
-            Resolved agent identifier.
-
-        Raises:
-            ValueError: If ``agent_id`` is ``None`` and the registry does not
-                hold exactly one agent.
-        """
-        if agent_id is not None:
-            return agent_id
-        registered = list(self.agents)
-        if len(registered) == 1:
-            return registered[0]
-        if not registered:
-            raise ValueError(
-                "upload_attachments: agent_id is required — no agents registered on this SDK.",
-            )
-        raise ValueError(
-            "upload_attachments: agent_id is required when multiple agents are registered "
-            f"({len(registered)} agents: {sorted(registered)}).",
-        )
-
     async def upload_attachments(
         self,
         task_id: str,
@@ -1076,18 +1034,17 @@ class DualeAISDK:
             task_id: Client-selected task identifier that will also be supplied
                 as ``request_id`` when the Task is submitted.
             attachments: Values returned by :meth:`prepare_attachments`.
-            agent_id: Agent identifier (keyword-only). Optional when a single
-                agent is registered on this SDK — resolved automatically. Required
-                when zero or multiple agents are registered because the
-                call-scope library path encodes a single agent identifier.
+            agent_id: Agent identifier (keyword-only). Overrides the SDK's
+                configured Agent identity for this upload. Required when the SDK
+                has no configured Agent identity.
 
         Returns:
             Queued Library document receipts keyed by prepared attachment key.
 
         Raises:
-            ValueError: If ``agent_id`` is omitted but cannot be unambiguously
-                resolved, an attachment key is duplicated, or a prepared file
-                is no longer a regular non-empty file of the recorded size.
+            ValueError: If neither an explicit nor a configured Agent ID exists,
+                an attachment key is duplicated, or a prepared file is no longer
+                a regular non-empty file of the recorded size.
             FileNotFoundError: If a prepared file no longer exists.
             LibraryUploadError: If a local read or object-store upload fails.
                 ``completed_receipts`` contains documents already queued by the
@@ -1100,7 +1057,9 @@ class DualeAISDK:
             return {}
 
         _validate_prepared_attachments(attachments)
-        resolved_agent_id = self._resolve_attachment_agent_id(agent_id)
+        resolved_agent_id = agent_id if agent_id is not None else self.agent_id
+        if resolved_agent_id is None:
+            raise ValueError("upload_attachments: agent_id is required when the SDK has no configured Agent ID")
 
         library_path = _call_scope_library_path(
             agent_id=resolved_agent_id,
@@ -1708,7 +1667,6 @@ class DualeAISDK:
             "components": components,
             "uptime_seconds": int(time.time() - self._startup_time),
             "inflight_tasks": len(self._inflight_tasks),
-            "registered_agents": len(self.agents),
             "registered_tools": len(self._tools),
         }
 

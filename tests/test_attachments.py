@@ -22,7 +22,6 @@ Protocol boundary the SDK function takes — not an internal SDK collaborator.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +43,6 @@ from dualeai.attachments import (
 )
 from dualeai.events.client import CloudEventsClient
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
-from dualeai.messages import AgentConfig
 from dualeai.models.bridge import BridgeSSEEvent
 from dualeai.models.library import (
     LibraryCreateRequest,
@@ -233,7 +231,7 @@ class _RecordingLibraryTransport(HTTPTransportProtocol):
             document_id=UUID(_RECORDED_DOCUMENT_ID),
             library_id=request.library_id,
             status="queued",
-            location=(f"/v1/tenants/{_TENANT_ID}/{request.library_id}/documents/{_RECORDED_DOCUMENT_ID}"),
+            location=(f"/v1/hpke/tenants/{_TENANT_ID}/{request.library_id}/documents/{_RECORDED_DOCUMENT_ID}"),
         )
 
 
@@ -686,59 +684,38 @@ async def test_upload_batch_rejects_duplicate_keys_and_changed_files(make_attach
 
 
 # ============================================================================
-# DualeAISDK.upload_attachments — keyword-only agent_id + resolver
+# DualeAISDK.upload_attachments — configured or explicit Agent identity
 # ============================================================================
-
-
-def _noop_agent_func(*_args: object, **_kwargs: object) -> None:
-    """No-op callable used to populate SDK agent registry in tests."""
-    return
 
 
 @pytest.mark.unit
 class TestUploadAttachmentsAgentResolution:
-    """``DualeAISDK.upload_attachments`` resolves agent_id from public calls.
+    """Public uploads route through the configured or per-call Agent ID."""
 
-        Call-scope path contract:
-
-    - ``agent_id`` is keyword-only and optional.
-    - One registered agent → resolved silently.
-    - Zero or multiple registered agents → ``ValueError`` — call site MUST
-      pass an explicit ``agent_id`` because the call-scope library path
-      encodes one identifier.
-
-    These tests exercise the public SDK method and record the transport
-    boundary path. They avoid pinning private resolver helpers.
-    """
-
-    async def test_resolves_single_registered_agent(self, minimal_mock_sdk: DualeAISDK, make_attachment) -> None:
-        """One registered agent → upload path uses that agent id."""
-        minimal_mock_sdk.register_agent("solo-agent", _noop_agent_func, AgentConfig(name="solo-agent"))
+    async def test_uses_configured_agent_id(self, minimal_mock_sdk: DualeAISDK, make_attachment) -> None:
+        """The configured Agent identity selects the Task-scoped Library."""
         att = make_attachment(size=25)
         transport = _RecordingLibraryTransport(
             _upload_response(
                 _UPLOAD_LIBRARY_RESOLUTION_ID,
-                [{"part_number": 1, "upload_url": f"{_S3_BASE}/solo-agent", "offset": 0, "length": 25}],
+                [{"part_number": 1, "upload_url": f"{_S3_BASE}/configured-part", "offset": 0, "length": 25}],
             )
         )
         await _use_attachment_transport(minimal_mock_sdk, transport)
 
         with aioresponses() as mocked:
-            mocked.put(f"{_S3_BASE}/solo-agent", status=200, headers={"ETag": '"etag-solo"'})
+            mocked.put(f"{_S3_BASE}/configured-part", status=200, headers={"ETag": '"etag-configured"'})
 
             receipts = await minimal_mock_sdk.upload_attachments("task-single-agent", [att])
 
-        assert transport.library_paths == ["agent/solo-agent/task/task-single-agent"]
-        assert len(transport.library_create_requests) == 1
-        assert transport.library_create_requests[0].model_dump(mode="json") == {
-            "path": "agent/solo-agent/task/task-single-agent"
-        }
+        assert transport.library_paths == ["agent/agent-test-default/task/task-single-agent"]
         assert list(receipts) == [att.key]
         assert str(receipts[att.key].document_id) == _RECORDED_DOCUMENT_ID
 
-    async def test_explicit_agent_id_wins_over_registry(self, minimal_mock_sdk: DualeAISDK, make_attachment) -> None:
-        """Explicit ``agent_id`` overrides the registered agent."""
-        minimal_mock_sdk.register_agent("default-agent", _noop_agent_func, AgentConfig(name="default-agent"))
+    async def test_explicit_agent_id_overrides_configured_identity(
+        self, minimal_mock_sdk: DualeAISDK, make_attachment
+    ) -> None:
+        """An explicit Agent ID selects the Library for this upload."""
         att = make_attachment(size=30)
         transport = _RecordingLibraryTransport(
             _upload_response(
@@ -755,38 +732,16 @@ class TestUploadAttachmentsAgentResolution:
 
         assert transport.library_paths == ["agent/override-agent/task/task-explicit-agent"]
 
-    async def test_raises_when_no_agents_registered(self, minimal_mock_sdk: DualeAISDK, make_attachment) -> None:
-        """Zero agents + no explicit id → ValueError. No silent fallback."""
+    async def test_requires_agent_id_when_unconfigured(self, unstarted_sdk_factory, make_attachment) -> None:
+        """A nonempty upload needs an Agent ID from the SDK or the call."""
+        sdk = unstarted_sdk_factory()
         att = make_attachment(size=10)
 
-        with pytest.raises(ValueError, match="no agents registered"):
-            await minimal_mock_sdk.upload_attachments("task-missing-agent", [att])
+        with pytest.raises(ValueError, match="agent_id is required"):
+            await sdk.upload_attachments("task-missing-agent", [att])
 
-    async def test_raises_when_multiple_agents_registered(self, minimal_mock_sdk: DualeAISDK, make_attachment) -> None:
-        """Multiple agents + no explicit id → ValueError. Path is single-agent."""
-        minimal_mock_sdk.register_agent("agent-a", _noop_agent_func, AgentConfig(name="agent-a"))
-        minimal_mock_sdk.register_agent("agent-b", _noop_agent_func, AgentConfig(name="agent-b"))
-        att = make_attachment(size=10)
+    async def test_upload_attachments_accepts_empty_attachment_list(self, unstarted_sdk_factory) -> None:
+        """Empty attachments need no identity or network access."""
+        sdk = unstarted_sdk_factory()
 
-        with pytest.raises(ValueError, match="multiple agents are registered"):
-            await minimal_mock_sdk.upload_attachments("task-many-agents", [att])
-
-    def test_upload_attachments_agent_id_is_keyword_only(self) -> None:
-        """``agent_id`` is keyword-only on ``DualeAISDK.upload_attachments``.
-
-        Inspecting the signature documents the contract without a runtime
-        type-check violation. Guards against silent regression to a
-        positional-friendly shape which would break the single-agent
-        ergonomic shortcut.
-        """
-        sig = inspect.signature(DualeAISDK.upload_attachments)
-        agent_param = sig.parameters["agent_id"]
-        assert agent_param.kind is inspect.Parameter.KEYWORD_ONLY
-        assert agent_param.default is None
-
-    async def test_upload_attachments_accepts_empty_attachment_list(self, minimal_mock_sdk: DualeAISDK) -> None:
-        """Empty attachment list short-circuits without network access."""
-        minimal_mock_sdk.register_agent("solo-agent", _noop_agent_func, AgentConfig(name="solo-agent"))
-
-        assert await minimal_mock_sdk.upload_attachments("task-empty", []) == {}
-        assert await minimal_mock_sdk.upload_attachments("task-empty", [], agent_id="solo-agent") == {}
+        assert await sdk.upload_attachments("task-empty", []) == {}

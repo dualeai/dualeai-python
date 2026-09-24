@@ -179,7 +179,7 @@ class MockLibrariesClient(LibrariesClient):
                 document_id=document_id,
                 library_id=library.id,
                 status="queued",
-                location=f"/v1/tenants/{self._tenant_id}/{library.id}/documents/{document_id}",
+                location=f"/v1/hpke/tenants/{self._tenant_id}/{library.id}/documents/{document_id}",
             )
         return receipts
 
@@ -239,10 +239,10 @@ class MockSDK(DualeAISDK):
 
         Library methods use an in-memory tenant and never open a connection.
         """
-        test_token = "dualeai_test_mock_token_12345"
+        test_token = "dualeai_test_mock_token_12345_padded_to_32bytes"
 
         config = DualeAIConfig(
-            endpoint="http://mock-bridge:8080",
+            endpoint="https://mock-bridge:8080",
             token=test_token,
             tenant_id="tenant-test",
             redis_url="redis://localhost:6379",
@@ -255,7 +255,7 @@ class MockSDK(DualeAISDK):
         """Set a mock response for a specific action."""
         self._mock_responses[action] = response
 
-    async def mock_ask(self, action: str, **kwargs: object) -> TestOutput:  # noqa: ARG002  # kwargs needed for API compatibility
+    async def mock_ask(self, action: str) -> TestOutput:
         """Return the response registered for ``action``, or a stable fallback."""
         if action in self._mock_responses:
             return self._mock_responses[action]

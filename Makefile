@@ -44,7 +44,7 @@ test-unit:
 	uv run pytest tests/ -v -n auto -m "unit" --ignore=tests/benchmarks
 
 test-int:
-	uv run pytest tests/test_attachments_s3.py -v -n 0 -m "integration" --no-cov
+	uv run pytest tests/ -v -n 0 -m "integration" --ignore=tests/benchmarks --no-cov
 
 test-bench:
 	uv run pytest tests/benchmarks/ --codspeed -v --no-cov -p no:xdist -o "addopts="

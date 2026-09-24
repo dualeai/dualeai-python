@@ -14,10 +14,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter
 
-from dualeai.constants import ErrorMessages
 from dualeai.messages import ErrorContext
 from dualeai.models.problem_details import ProblemDetails
-from dualeai.utils import get_exception_type_name
 
 if TYPE_CHECKING:
     from dualeai.models.library import LibraryDocumentCreateResponse
@@ -86,9 +84,8 @@ class DualeAIError(Exception):
         #     exc.problem_details.error_category
         #
         # Per-error context (field path, ai_hints) lives on
-        # `exc.problem_details.errors[i]`. Do NOT read the ext fields from
-        # `errors[i]` — they are envelope-only (older SDK docs incorrectly
-        # placed them under `errors[0]`).
+        # `exc.problem_details.errors[i]`. Envelope extension fields are not
+        # fields of `errors[i]`.
         self.problem_details: ProblemDetails | None = None
 
         # Build context with additional fields if provided
@@ -158,176 +155,12 @@ class LibraryUploadError(DualeAIError):
         return enriched
 
 
-class RoutingError(DualeAIError):
-    """Compatibility exception carrying skills associated with a routing failure.
-
-    Current Task terminal errors are exposed as ``DualeAIError`` with
-    ``problem_details`` rather than being remapped to this subclass.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        skills: list[str] | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize RoutingError.
-
-        Args:
-            message: Error message
-            skills: Skills that were required for routing
-            context: Additional context
-        """
-        super().__init__(message, context, required_skills=skills)
-        self.skills = skills
-
-
-class TaskTimeoutError(DualeAIError):
-    """Compatibility exception carrying Task timeout context.
-
-    Current Task terminal errors are exposed as ``DualeAIError`` with their
-    platform ``error_code`` rather than being remapped to this subclass.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        task_id: str | None = None,
-        timeout_seconds: float | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize TaskTimeoutError.
-
-        Args:
-            message: Error message
-            task_id: ID of the task that timed out
-            timeout_seconds: Timeout value in seconds
-            context: Additional context
-        """
-        super().__init__(message, context, task_id=task_id, timeout_seconds=timeout_seconds)
-        self.task_id = task_id
-        self.timeout_seconds = timeout_seconds
-
-
-class ActivityTimeoutError(TaskTimeoutError):
-    """Compatibility timeout type carrying an activity name.
-
-    ``execute_activity`` currently raises the built-in ``TimeoutError``.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        activity_name: str | None = None,
-        timeout_seconds: float | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize ActivityTimeoutError.
-
-        Args:
-            message: Error message
-            activity_name: Name of the activity that timed out
-            timeout_seconds: Timeout value in seconds
-            context: Additional context
-        """
-        super().__init__(message, task_id=None, timeout_seconds=timeout_seconds, context=context)
-        self.activity_name = activity_name
-
-
-class CacheError(DualeAIError):
-    """Base class for package-defined cache exceptions."""
-
-
-class CacheConnectionError(CacheError):
-    """Compatibility cache-connection error with sanitized backend context.
-
-    Current cache backends do not translate their failures to this type.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        backend_type: str | None = None,
-        connection_url: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize CacheConnectionError.
-
-        Args:
-            message: Error message
-            backend_type: Type of cache backend (redis, sqlite)
-            connection_url: Connection URL (sanitized)
-            context: Additional context
-        """
-        # Sanitize URL to remove credentials
-        sanitized_url = None
-        if connection_url:
-            sanitized_url = connection_url.split("@")[-1] if "@" in connection_url else connection_url
-
-        super().__init__(message, context, backend_type=backend_type, connection_url=sanitized_url)
-        self.backend_type = backend_type
-
-
-class CacheSerializationError(CacheError):
-    """Compatibility cache-serialization error carrying key/type context.
-
-    Current cache backends do not translate their failures to this type.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        cache_key: str | None = None,
-        data_type: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize CacheSerializationError.
-
-        Args:
-            message: Error message
-            cache_key: Cache key that failed
-            data_type: Type of data being serialized
-            context: Additional context
-        """
-        super().__init__(message, context, cache_key=cache_key, data_type=data_type)
-        self.cache_key = cache_key
-
-
 class MessagingError(DualeAIError):
     """Base class for package-defined transport and streaming errors."""
 
 
-class StreamingError(MessagingError):
-    """Compatibility type for a stream-quality policy violation.
-
-    Current Task streaming does not calculate a drop percentage or raise this
-    subclass; parser and transport failures propagate through their active
-    error types.
-    """
-
-
-class MessagingConnectionError(MessagingError):
-    """Base connection exception carrying an optional endpoint."""
-
-    def __init__(
-        self,
-        message: str,
-        endpoint: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize MessagingConnectionError.
-
-        Args:
-            message: Error message
-            endpoint: Transport endpoint URL
-            context: Additional context
-        """
-        super().__init__(message, context, endpoint=endpoint)
-        self.endpoint = endpoint
-
-
 class DualeAIConnectionError(MessagingError):
-    """Raised when connection to HTTP bridge or other services fails."""
+    """Raised when transport fails or a service response cannot be used."""
 
 
 class DualeAIAuthError(DualeAIError):
@@ -336,55 +169,6 @@ class DualeAIAuthError(DualeAIError):
     Missing or malformed local configuration fails earlier with Pydantic
     validation (or ``RuntimeError`` when the SDK loads defaults).
     """
-
-
-class TransportUnavailableError(MessagingConnectionError):
-    """Compatibility connection error that normalizes selected low-level messages.
-
-    Current HTTP paths primarily raise ``DualeAIConnectionError`` directly.
-    """
-
-    def __init__(
-        self,
-        original_error: Exception | None = None,
-        endpoint: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize TransportUnavailableError with helpful context.
-
-        Args:
-            original_error: The original transport error
-            endpoint: Transport endpoint that failed
-            context: Additional error context
-        """
-        # Parse the original error to provide helpful guidance
-        error_str = str(original_error) if original_error else "Unknown error"
-
-        # Build user-friendly error message based on common errors
-        if "Connect call failed" in error_str or "Connection refused" in error_str:
-            message = ErrorMessages.CONNECTION_FAILED + " Please try again later."
-        elif error_str and "connection closed" in error_str.lower():
-            message = ErrorMessages.CONNECTION_LOST
-        elif error_str and "empty response from server" in error_str.lower():
-            message = "Service is not responding. The service may be starting up. Please wait and retry."
-        elif "unexpected EOF" in error_str:
-            message = ErrorMessages.CONNECTION_INTERRUPTED
-        else:
-            message = "Unable to communicate with service. Please try again later."
-
-        context_fields = _build_error_context(context)
-        context_fields["metadata"] = {
-            "original_error": error_str,
-            "error_type": get_exception_type_name(original_error) if original_error else "Unknown",
-            "endpoint": endpoint or "unknown",
-        }
-
-        super().__init__(message, endpoint=endpoint, context=context_fields)
-        self.original_error = original_error
-
-
-class DualeAITimeoutError(TaskTimeoutError):
-    """Compatibility alias subclass for an SDK operation timeout."""
 
 
 class TaskStoppedError(DualeAIError):
@@ -414,60 +198,6 @@ class TaskStoppedError(DualeAIError):
         super().__init__(f"Task stopped: {reason}", context_fields)
         self.reason = reason
         self.task_id = task_id
-
-
-class AgentRegistrationError(DualeAIError):
-    """Compatibility error carrying agent-registration context.
-
-    Current hosted-tool lifecycle calls expose authentication, connection, or
-    request errors directly rather than translating them to this subclass.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        agent_id: str | None = None,
-        agent_name: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize AgentRegistrationError.
-
-        Args:
-            message: Error message
-            agent_id: ID of the agent
-            agent_name: Name of the agent
-            context: Additional context
-        """
-        super().__init__(message, context, agent_id=agent_id, agent_name=agent_name)
-        self.agent_id = agent_id
-        self.agent_name = agent_name
-
-
-class TaskSubmissionError(DualeAIError):
-    """Compatibility error carrying Task-submission context.
-
-    Current Task submissions expose transport errors or terminal
-    ``DualeAIError`` values directly rather than using this subclass.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        action: str | None = None,
-        skills: list[str] | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize TaskSubmissionError.
-
-        Args:
-            message: Error message
-            action: Action that was being submitted
-            skills: Skills required for the task
-            context: Additional context
-        """
-        super().__init__(message, context, action=action, required_skills=skills)
-        self.action = action
-        self.skills = skills
 
 
 class ConfigurationError(DualeAIError):

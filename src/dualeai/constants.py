@@ -55,22 +55,6 @@ class HTTPDefaults:
     ACCEPT_SSE = "text/event-stream"
     """Accept header for SSE streams."""
 
-    ACCEPT_ENCODING = "zstd, gzip, deflate"
-    """Accept-Encoding header — RFC 8878 zstd support."""
-
-
-class ErrorMessages:
-    """Common error message templates for consistency."""
-
-    CONNECTION_LOST = "Lost connection to API. This is usually temporary. Please retry your request."
-    """Connection lost error message."""
-
-    CONNECTION_FAILED = "Unable to connect to API. The service may be temporarily unavailable."
-    """Connection failed error message."""
-
-    CONNECTION_INTERRUPTED = "Connection to API was interrupted. Please retry your request."
-    """Connection interrupted error message."""
-
 
 class CacheLimits:
     """Cache system limits and performance thresholds."""

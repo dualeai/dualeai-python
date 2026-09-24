@@ -64,7 +64,6 @@ async def main() -> None:
         receipts = await sdk.upload_attachments(
             task_id=task_id,
             attachments=attachments,
-            agent_id=sdk.agent_id,
         )
         print(f"Uploaded in {time.monotonic() - start:.1f}s")  # noqa: T201
 

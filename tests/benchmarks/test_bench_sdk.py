@@ -115,13 +115,13 @@ class TestConfigValidation:
     def test_config_create_minimal(self, benchmark: BenchmarkFixture) -> None:
         @benchmark
         def _() -> None:
-            DualeAIConfig(token="dualeai_test_token_12345")
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
 
     def test_config_create_full(self, benchmark: BenchmarkFixture) -> None:
         @benchmark
         def _() -> None:
             DualeAIConfig(
-                token="dualeai_test_token_12345",
+                token="dualeai_test_token_12345_padded_to_32bytes",
                 endpoint="https://api.duale.ai",
             )
 
@@ -274,7 +274,6 @@ class TestCacheOperations:
         @benchmark
         def _() -> None:
             CacheConfig(
-                max_entries=50_000,
                 ttl_jitter_factor=0.15,
                 cleanup_interval=timedelta(minutes=5),
             )
