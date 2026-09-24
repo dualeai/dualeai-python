@@ -155,7 +155,7 @@ class HeartbeatStatus(str, Enum):
 
 
 class AgentHeartbeatMessage(BaseModel):
-    """Request body for `POST /v1/agent/heartbeat`. Reports whether one SDK process can continue serving its registered Tools."""
+    """Reports whether one SDK process can continue serving its registered Tools."""
 
     model_config = ConfigDict(extra="forbid", title="AgentHeartbeatMessage", json_schema_extra=None)
     agent_id: Annotated[
@@ -191,7 +191,7 @@ class AgentHeartbeatMessage(BaseModel):
 
 
 class AgentHeartbeatResponse(BaseModel):
-    """Response to an accepted `POST /v1/agent/heartbeat`. Its timestamps let the SDK estimate server-clock offset."""
+    """Timestamps from an accepted heartbeat let the SDK estimate server-clock offset."""
 
     model_config = ConfigDict(extra="forbid", title="AgentHeartbeatResponse", json_schema_extra=None)
     server_received_at: Annotated[
@@ -227,7 +227,7 @@ class RegisteredTool(BaseModel):
 
 
 class AgentRegistrationMessage(BaseModel):
-    """Request body for `POST /v1/agent/registration`. Publishes the complete customer Tool manifest served by one SDK process for its Agent Identity."""
+    """Publishes the complete customer Tool manifest served by one SDK process for its Agent Identity."""
 
     model_config = ConfigDict(extra="forbid", title="AgentRegistrationMessage", json_schema_extra=None)
     agent_id: Annotated[
@@ -396,7 +396,7 @@ class BridgeSSEEvent(BaseModel):
 
 
 class BridgeTaskContinueRequest(BaseModel):
-    """Request body for `POST /v1/tasks/{child_task_id}` with `type` set to `continue`. Continues the accepted `parent_task_id` as a new Task whose client-selected identifier appears in the URL."""
+    """Continues the accepted `parent_task_id` as a new Task with a client-selected child task identifier. The `type` field is `continue`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["continue"], Field(description="Identifies this request as Task continuation.")]
@@ -437,7 +437,7 @@ class Attachment(BaseModel):
 
 
 class BridgeTaskCreateRequest(BaseModel):
-    """Request body for `POST /v1/tasks/{task_id}` with `type` set to `create`. Creates a new Task using the client-selected `task_id` in the URL."""
+    """Creates a new Task with a client-selected task identifier. The `type` field is `create`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["create"], Field(description="Identifies this request as Task creation.")]
@@ -519,7 +519,7 @@ class BridgeToolResultSuccess(BaseModel):
 
 
 class BridgeToolResultsRequest(BaseModel):
-    """Request body for `POST /v1/tasks/{task_id}` with `type` set to `tool_results`. Submits Tool Results and resumes that Task's existing event stream."""
+    """Submits Tool Results and resumes the Task's existing event stream. The `type` field is `tool_results`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["tool_results"], Field(description="Identifies this request as Tool Result submission.")]
