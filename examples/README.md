@@ -6,8 +6,7 @@ non-sensitive inputs because live Tasks, storage, and telemetry can consume serv
 
 ## Get the examples
 
-The PyPI package does not install these source files. To run examples from a repository checkout, clone and install
-that checkout so the examples and SDK match:
+The PyPI package does not install these source files. Clone the repository and install the checkout:
 
 ```bash
 git clone https://github.com/dualeai/dualeai-python.git
@@ -15,36 +14,21 @@ cd dualeai-python
 python -m pip install -e .
 ```
 
-For a particular published release, install it and print its version:
-
-```bash
-python -m pip install dualeai
-python -c "import dualeai; print(dualeai.__version__)"
-```
-
-Download the source archive for the matching `vX.Y.Z` tag from
-[GitHub Releases](https://github.com/dualeai/dualeai-python/releases), then run the examples inside that archive. Do not
-run examples from `main` against an older installed release.
-
-<!-- The source-distribution layout and CI command inventory establish these boundaries; no automated test currently verifies that the wheel omits examples or executes these live examples. -->
+<!-- No automated test verifies the wheel's example-file inventory or executes these examples against the service. -->
 
 ## Configure access
 
-Use Python 3.10 or newer. Set your provisioned token for the current shell:
+Use CPython 3.10 through 3.14 on Linux or macOS. Set your provisioned token for the current shell:
 
 ```bash
-# macOS and Linux
-export DUALEAI_TOKEN=dualeai_your_token_here
-```
-
-```powershell
-# Windows PowerShell
-$env:DUALEAI_TOKEN = "dualeai_your_token_here"
+export DUALEAI_TOKEN=dualeai_your_provisioned_token_here
 ```
 
 Examples that submit Tasks also need access to at least one configured model. Tool-hosting examples need
 `DUALEAI_AGENT_ID`; document examples list their additional requirements below. Set `DUALEAI_ENDPOINT` only when your
-access instructions name a non-default environment.
+access instructions name a non-default HTTPS Gateway base URL.
+
+<!-- Evidence: tests/test_config.py::TestConfigValidation::test_endpoint_format_validation; tests/test_http_transport_v3.py::test_sessions_use_service_protected_endpoints_and_existing_psk_identity. No automated test runs these examples against the service. -->
 
 ## Choose an example
 
@@ -87,7 +71,7 @@ python examples/library_management.py
 `library_management.py` operates an explicit persistent Library and needs no Agent identifier. Neither example claims
 document search, retrieval/RAG, or a particular model's interpretation of embedded content.
 
-<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_resolves_single_registered_agent; tests/test_libraries_client.py::test_upload_targets_explicit_library_and_returns_keyed_receipt; tests/test_libraries_client.py::test_wait_for_document_uses_fixed_interval_and_returns_terminal_state. -->
+<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_libraries_client.py::test_upload_targets_explicit_library_and_returns_keyed_receipt; tests/test_libraries_client.py::test_wait_for_document_uses_fixed_interval_and_returns_terminal_state. -->
 
 ## Tool execution boundary
 

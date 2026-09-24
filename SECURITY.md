@@ -68,8 +68,7 @@ released against the latest `0.x` only. The supported runtimes are CPython 3.10 
 - **Redis cache clearing is scoped to one API-token fingerprint.** `DualeAISDK` hashes its
   API token for the `dualeai:sdk:{token_fingerprint}:` prefix; it does not use the
   configured Library Tenant ID. `clear()` scans and deletes only that prefix, and
-  rotating the API token selects a new namespace. The SDK does not recognize or
-  migrate older key formats.
+  rotating the API token selects a new namespace.
   <!-- Evidence: tests/test_cache.py::TestRedisCacheCommands holds the caller-supplied namespace and Redis command boundary. src/dualeai/cache.py states that no focused automated test covers the SDK's token-to-namespace selection or token-rotation behavior. -->
 - **Redis credentials stay out of initialization logs.** Both `redis://` and
   `rediss://` reach redis-py, while the connection URL and its userinfo do not reach

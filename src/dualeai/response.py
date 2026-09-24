@@ -436,7 +436,6 @@ class AgentResponse(Generic[T]):
     async def llm_metrics(self) -> LLMResult | None:
         """Return the terminal ``LLMResult`` envelope when available.
 
-        The historical method name is broader than the returned model:
         ``LLMResult`` exposes completion, validated data, cache status, and
         Tool calls, but no token, cost, or latency measurements. Terminal
         error/stop events and ordinary stream-runner exceptions return ``None``;

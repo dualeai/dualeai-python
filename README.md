@@ -22,8 +22,16 @@ as customer-hosted Tools. Duale AI runs each Task; your application runs the Too
 
 ## Install
 
-The distribution and import name are both `dualeai`. Package metadata requires Python 3.10 or newer and currently
-declares support for CPython 3.10 through 3.14.
+The distribution and import name are both `dualeai`. The SDK supports CPython 3.10 through 3.14 on Linux and macOS.
+Every Task and Agent request and every Library metadata request goes through a Duale AI HPKE-protected API. Their
+logical request and response contents are encrypted end to end between the SDK and the service over HTTPS. HPKE uses
+each service's public key for encryption; your API token acts as the pre-shared key (PSK) to authenticate token
+possession, as described by [RFC 9180 PSK mode](https://datatracker.ietf.org/doc/html/rfc9180.html#section-5.1.2).
+The SDK does not call the Dashboard raw API. The Library service supplies signed HTTPS URLs for S3 part uploads; the
+SDK sends those parts directly to the supplied URLs, outside HPKE. Optional telemetry and remote Redis use separate
+connections.
+
+<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_checks_both_services_and_live_task_block; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests; tests/test_config.py::TestConfigLoading::test_default_config_values. The SDK follows the presigned upload URL without validating its scheme; no automated SDK test checks the service's HTTPS URL contract. Separate signed S3, telemetry, and Redis egress paths are a source-inspection finding without one cross-destination automated test. No automated test checks a deployed Duale AI endpoint or every advertised Python and OS combination. -->
 
 ```bash
 python -m pip install dualeai
@@ -36,13 +44,7 @@ live request may consume metered or limited service resources, so use synthetic,
 run. Set the token shown during provisioning for your current shell:
 
 ```bash
-# macOS and Linux
-export DUALEAI_TOKEN=dualeai_your_token_here
-```
-
-```powershell
-# Windows PowerShell
-$env:DUALEAI_TOKEN = "dualeai_your_token_here"
+export DUALEAI_TOKEN=dualeai_your_provisioned_token_here
 ```
 
 <!-- Provisioning, model eligibility, and service usage are Platform requirements; no automated SDK test enforces them. -->
@@ -89,18 +91,37 @@ exact values depend on the configured model. `ask()` returns an asynchronous res
 
 | Workflow | Requirement or destination |
 | --- | --- |
-| Task submission | `DUALEAI_ENDPOINT` selects the API endpoint; it defaults to `https://api.duale.ai` |
+| Task, Agent, and Library metadata | `DUALEAI_ENDPOINT` is the HTTPS Gateway base URL; it defaults to `https://api.duale.ai` |
 | Tool publication and execution | `DUALEAI_AGENT_ID` identifies the provisioned Agent |
 | Task attachments | `DUALEAI_TENANT_ID` and one Agent ID; configure `DUALEAI_AGENT_ID` or pass `agent_id=` when uploading |
 | Persistent Libraries | `DUALEAI_TENANT_ID` and applicable Library access |
 | Telemetry export | `DUALEAI_OBSERVABILITY__TOKEN` and, when needed, its separate `DUALEAI_OBSERVABILITY__ENDPOINT` |
 
-Signed document uploads, telemetry export, and optional remote Redis can connect to hosts other than
-`DUALEAI_ENDPOINT`. See the
-[annotated environment example](https://github.com/dualeai/dualeai-python/blob/main/.env.example) for the available
-settings.
+See the [annotated environment example](https://github.com/dualeai/dualeai-python/blob/main/.env.example) for the
+available settings.
 
-<!-- Evidence: tests/test_config.py::TestConfigLoading::test_default_config_values; tests/test_agent_lifecycle.py::test_start_registers_manifest_and_first_heartbeat; tests/test_agent_lifecycle.py::test_submit_tool_results_passes_generated_request_to_transport; tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_resolves_single_registered_agent; tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_explicit_agent_id_wins_over_registry; tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_raises_when_no_agents_registered; tests/test_http_transport_library_aioresponses.py::test_core_library_crud_uses_real_session; tests/test_feature_observability.py::TestUnitObservabilityFeature::test_exporters_receive_per_signal_endpoints. The cross-destination inventory is a source-inspection finding; no single automated test enforces the complete list. -->
+<!-- Evidence: tests/test_config.py::TestConfigLoading::test_default_config_values; tests/test_agent_lifecycle.py::test_start_registers_manifest_and_first_heartbeat; tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_feature_observability.py::TestUnitObservabilityFeature::test_exporters_receive_per_signal_endpoints. No automated test runs these workflows against a deployed Duale AI endpoint. -->
+
+### Protected API routing
+
+`DUALEAI_ENDPOINT` supplies the Gateway base URL. With the default, the SDK makes each service's public-key discovery
+GET and encrypted POST at these fixed `hpke-http/3` endpoints:
+
+| Service | Discovery GET and encrypted POST | Path inside the encrypted request |
+| --- | --- | --- |
+| HTTP Bridge | `/http-bridge/v1/hpke` | `/http-bridge/v1/hpke/tasks/{task_id}` and `/http-bridge/v1/hpke/agent/...` |
+| Library | `/libraries/v1/hpke` | `/libraries/v1/hpke/tenants/{tenant_id}/...` |
+
+Both paths include the service prefix. The complete API token bytes are the PSK; SHA-512 of those bytes is the public
+PSK ID. Each service's discovery response supplies a separate recipient public-key ID. Library bearer authorization
+is a header inside the encrypted logical request.
+
+A Library document-create receipt uses a different path: its `Location` header and body `location` identify the
+document as `/v1/hpke/tenants/{tenant_id}/{library_id}/documents/{document_id}`. That response path is not the
+`/libraries/v1/hpke` network endpoint. The SDK validates a synthetic response body in a local test; no automated
+SDK test checks the header or a deployed service response.
+
+<!-- Evidence: tests/test_http_transport_v3.py::test_sessions_use_service_protected_endpoints_and_existing_psk_identity; tests/test_http_transport_v3.py::test_real_v3_tls_boundary_checks_both_services_and_live_task_block; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests. No automated test checks the deployed Gateway routes or the receipt Location header. -->
 
 ## Document workflows
 
@@ -116,7 +137,7 @@ Task attachments and persistent Libraries are different workflows:
 These SDK operations establish document upload and lifecycle state; they do not by themselves promise retrieval,
 search, RAG, or a particular model's interpretation of document content.
 
-<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_resolves_single_registered_agent; tests/test_agent_lifecycle.py::test_run_task_create_body_carries_policy_format_stream_attachments; tests/test_libraries_client.py::test_public_library_surface_is_exported_and_stable_on_sdk; tests/test_libraries_client.py::test_core_library_crud_crosses_the_real_transport_boundary; tests/test_libraries_client.py::test_core_document_reads_and_delete_crosses_the_real_transport_boundary. No automated test enforces the negative retrieval/search/RAG capability statement. -->
+<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_http_transport_v3.py::test_task_create_fields_reach_the_hpke_session_with_wire_aliases; tests/test_libraries_client.py::test_public_library_surface_is_exported_and_stable_on_sdk; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests. No automated test enforces the negative retrieval/search/RAG capability statement. -->
 
 ## Before production use
 
@@ -133,13 +154,14 @@ search, RAG, or a particular model's interpretation of document content.
 - **Error disclosure:** without an `error_transform`, a Tool exception's class and message are sent in the model-facing
   error result. Keep secrets and personal data out of exception text, and use a failing-closed transform when redaction
   is required.
-- **Failures:** Task and Library service failures surface typed SDK exceptions that preserve structured error details.
-  Handle those separately from local validation and cancellation.
+- **Failures:** Task and Library service failures surface typed SDK exceptions. When an authenticated response includes
+  structured error details, the exception exposes them as `exc.problem_details`. Outer transport failures have no
+  service error details. Handle these failures separately from local validation and cancellation.
 - **Host integration:** creating an SDK replaces process-wide root logging handlers, and cleanup does not restore them.
   Optional OpenTelemetry integrations also affect process-global state. Applications that own either system should
   coordinate initialization and shutdown or reapply their configuration after constructing the SDK.
 
-<!-- Evidence: tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_reset_withdraws_failed_output_from_live_and_replay_views; tests/test_streaming_callbacks.py::TestTaskCancellation::test_task_cancel_propagates_to_bridge_iteration; tests/test_task_stop.py::test_response_stop_is_the_same_call_without_the_task_id; tests/test_feature_ask.py::TestUnitAskFunction::test_ask_returns_agent_response; tests/test_tool_dispatch_invariants.py::TestServeOpensNoTaskStream::test_serve_makes_lifecycle_requests_only; tests/test_agent_lifecycle.py::test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool; tests/test_agent_lifecycle.py::test_registered_tool_retries_until_attempts_exhausted; tests/test_tools_pure.py::test_format_registered_tool_error_prefixes_and_bounds; tests/test_agent_lifecycle.py::test_tool_error_transform_redacts_model_facing_message; tests/test_streaming_callbacks.py::TestErrorCodeDispatch::test_error_code_is_preserved; tests/test_libraries_client.py::test_library_errors_are_translated_with_problem_details. The absence of public lookup/reattach methods, duplicate-cache expiry/restart boundaries, root-handler replacement/non-restoration, and process-global telemetry ownership are source-inspection findings without exact automated tests. Stop settlement timing and cross-process side-effect durability are not established by local SDK tests. -->
+<!-- Evidence: tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_reset_withdraws_failed_output_from_live_and_replay_views; tests/test_streaming_callbacks.py::TestTaskCancellation::test_task_cancel_propagates_to_bridge_iteration; tests/test_task_stop.py::test_response_stop_is_the_same_call_without_the_task_id; tests/test_feature_ask.py::TestUnitAskFunction::test_ask_returns_agent_response; tests/test_tool_dispatch_invariants.py::TestServeOpensNoTaskStream::test_serve_makes_lifecycle_requests_only; tests/test_agent_lifecycle.py::test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool; tests/test_agent_lifecycle.py::test_registered_tool_retries_until_attempts_exhausted; tests/test_tools_pure.py::test_format_registered_tool_error_prefixes_and_bounds; tests/test_agent_lifecycle.py::test_tool_error_transform_redacts_model_facing_message; tests/test_streaming_callbacks.py::TestErrorCodeDispatch::test_error_code_is_preserved; tests/test_libraries_client.py::test_library_errors_are_translated_with_problem_details; tests/test_http_transport_v3.py::test_complete_logical_error_and_unchecked_failures_have_distinct_mapping. The absence of public lookup/reattach methods, duplicate-cache expiry/restart boundaries, root-handler replacement/non-restoration, and process-global telemetry ownership are source-inspection findings without exact automated tests. Stop settlement timing and cross-process side-effect durability are not established by local SDK tests. -->
 
 ## Optional telemetry instrumentation
 

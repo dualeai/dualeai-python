@@ -21,9 +21,8 @@ from dualeai.models.bridge import BridgeToolResultError
 def _bridge_error_message_max_length() -> int:
     """Return the wire-declared max length of a tool error message.
 
-    The size bound lives in the schema (``bridge.json`` BridgeToolResultError
-    ``message.maxLength``), not in code, so the SDK truncates to whatever the
-    contract allows instead of a hand-picked literal.
+    The size bound comes from the generated ``BridgeToolResultError.message``
+    field metadata, so the SDK does not use a hand-picked literal.
     """
     for meta in BridgeToolResultError.model_fields["message"].metadata:
         if isinstance(meta, MaxLen):

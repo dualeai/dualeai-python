@@ -6,7 +6,7 @@
 |------|---------|---------|
 | Static | `make test-static` | Linting (ruff), type checking (ty), dead code (vulture) |
 | Unit | `make test-unit` | Fast, isolated tests with mocked dependencies |
-| Integration | `make test-int` | Multipart upload against the local S3 test server |
+| Integration | `make test-int` | Signed uploads against local S3 and protected HTTP against local TLS |
 | Bench | `make test-bench` | CodSpeed performance benchmarks |
 
 Run static, unit, and integration checks with `make test`.
@@ -18,11 +18,13 @@ tests/
   conftest.py              # Shared fixtures (minimal_mock_sdk, config_factory)
   mocks/                   # Network-boundary mocks (MockHTTPTransport)
   helpers/                 # Assertion utilities
-  fixtures/                # Test data (mock bridge server, controlled timing)
+  fixtures/                # Static test data
   test_*.py                # Unit tests (@pytest.mark.unit)
   benchmarks/              # CodSpeed benchmarks (@pytest.mark.benchmark)
     test_bench_sdk.py      # Config, SSE parsing, cache, utilities
+  test_attachments.py      # Upload unit tests and a local HTTP integration test
   test_attachments_s3.py   # Local S3 integration test (@pytest.mark.integration)
+  test_http_transport_v3.py # Local TLS integration and transport unit tests
 ```
 
 ## Unit Tests
@@ -36,6 +38,7 @@ without SDK state or transport.
 import pytest
 
 from dualeai import DualeAISDK, ask
+from dualeai.models.bridge import BridgeTaskCreateRequest
 from tests.mocks.mock_http import require_mock_http_transport
 
 
@@ -43,8 +46,10 @@ from tests.mocks.mock_http import require_mock_http_transport
 async def test_action_reaches_the_task_request(minimal_mock_sdk: DualeAISDK) -> None:
     await ask(action="Test", sdk=minimal_mock_sdk)
 
-    [request] = require_mock_http_transport(minimal_mock_sdk).get_requests()
-    assert request["body"]["action_prompt"] == "Test"
+    [call] = require_mock_http_transport(minimal_mock_sdk).get_requests()
+    request = call["request"]
+    assert isinstance(request, BridgeTaskCreateRequest)
+    assert request.action_prompt == "Test"
 ```
 
 ## Benchmarks
@@ -58,5 +63,11 @@ make test-bench  # Runs via --codspeed, serial execution, no coverage
 
 ## Integration Tests
 
-The integration suite uploads single-part and multipart files through presigned
-URLs against a local S3 test server. It does not contact external services.
+The integration suite checks signed uploads against local S3, bounded part
+scheduling against a loopback object store, and protected Bridge and Library
+calls against a local TLS endpoint. The enforcing tests are
+`test_public_upload_preserves_bytes_and_document_metadata`,
+`test_public_upload_preserves_true_multipart_bytes_and_opaque_etags`,
+`test_many_parts_keep_pending_upload_tasks_bounded`, and
+`test_real_v3_tls_boundary_checks_both_services_and_live_task_block`. These
+tests do not contact external services.
