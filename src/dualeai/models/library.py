@@ -256,7 +256,7 @@ class LibraryDocumentCreateResponse(BaseModel):
         Field(description="Initial ingestion status. It is always queued for a newly added document."),
     ]
     location: Annotated[
-        Annotated[StrictStr, Field(min_length=1, pattern="^/v1/tenants/[^/]+/[^/]+/documents/[^/]+$")],
+        Annotated[StrictStr, Field(min_length=1)],
         Field(
             description="Path to read the document and poll its ingestion status. It matches the Location response header."
         ),
