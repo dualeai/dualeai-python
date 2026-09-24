@@ -603,6 +603,46 @@ async def test_upload_batch_bounds_real_object_store_requests(aiohttp_server, ma
     assert list(receipts) == [attachment.key for attachment in attachments]
 
 
+@pytest.mark.integration
+async def test_many_parts_keep_pending_upload_tasks_bounded(aiohttp_server, make_attachment) -> None:
+    """One large upload schedules a fixed number of part workers."""
+    part_count = 80
+    probe = _ObjectStoreProbe(started_target=8, block_successes=True)
+    application = web.Application()
+    application.router.add_put("/{name}", probe.put)
+    server = await aiohttp_server(application)
+    attachment = make_attachment(name="many-parts.bin", size=part_count)
+    transport = _RecordingLibraryTransport(
+        _upload_response(
+            _UPLOAD_SORT_ID,
+            [
+                {
+                    "part_number": index + 1,
+                    "upload_url": str(server.make_url(f"/part-{index + 1}")),
+                    "offset": index,
+                    "length": 1,
+                }
+                for index in range(part_count)
+            ],
+        )
+    )
+
+    async with aiohttp.ClientSession() as s3_session:
+        baseline_tasks = len(asyncio.all_tasks())
+        upload = asyncio.create_task(_upload_single(transport, s3_session, attachment, _RECORDED_LIBRARY_ID))
+        try:
+            await asyncio.wait_for(probe.started.wait(), timeout=2)
+            pending_task_growth = len(asyncio.all_tasks()) - baseline_tasks
+            assert probe.max_active == 8
+        finally:
+            probe.release.set()
+        await asyncio.wait_for(upload, timeout=5)
+
+    assert pending_task_growth < 40
+    [create] = transport.document_create_calls
+    assert [part.part_number for part in create.document.parts] == list(range(1, part_count + 1))
+
+
 @pytest.mark.unit
 async def test_upload_batch_cancels_a_blocked_object_store_request(aiohttp_server, make_attachment) -> None:
     probe = _ObjectStoreProbe(started_target=2, failure_name="failed.bin", block_successes=True)

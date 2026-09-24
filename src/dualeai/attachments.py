@@ -265,6 +265,22 @@ async def _upload_part(
     raise RuntimeError("S3 upload retry loop exited without a result")
 
 
+async def _upload_part_worker(
+    work: Iterator[LibraryDocumentUploadPart],
+    s3_session: aiohttp.ClientSession,
+    attachment: PreparedAttachment,
+    semaphore: asyncio.Semaphore,
+) -> list[LibraryDocumentCreatePartRef]:
+    """Upload parts from a shared iterator without scheduling one task per part."""
+    completed: list[LibraryDocumentCreatePartRef] = []
+    while True:
+        try:
+            part = next(work)
+        except StopIteration:
+            return completed
+        completed.append(await _upload_part(s3_session, attachment, part, semaphore))
+
+
 def _call_scope_library_path(agent_id: str, task_id: str) -> str:
     """Build the call-scope Library path for flat attachment-helper routing.
 
@@ -292,8 +308,8 @@ async def upload_attachment_to_library(
     4. Create a queued Library document from the upload id, metadata, digest,
        size, and returned part ETags.
 
-    File I/O is non-blocking and bounded: peak memory per concurrent slot is
-    ``_STREAM_CHUNK_SIZE`` (64 KB).
+    File reads use ``_STREAM_CHUNK_SIZE`` (64 KiB) chunks. The batch-wide
+    semaphore limits concurrent presigned PUTs.
 
     Args:
         transport: Transport implementing the required Library calls.
@@ -310,19 +326,22 @@ async def upload_attachment_to_library(
             complete. The exception identifies the attachment and, for part
             failures, the part number.
     """
-    # 1. Request presigned URLs (size-only payload — caller identity is in JWT).
+    # 1. Request presigned URLs through protected Library metadata (size-only payload).
     upload_request = LibraryDocumentUploadRequest(size_bytes=attachment.size)
     response = await transport.create_document_upload(upload_request)
 
     # Compute content sha256 in parallel with part uploads. This adds one
     # bounded streaming pass without buffering the full file.
     sha_task = asyncio.create_task(_compute_content_sha256(attachment.path))
-    parts_task = asyncio.create_task(
-        _gather_related([_upload_part(s3_session, attachment, part, part_semaphore) for part in response.parts])
-    )
+    part_work = iter(response.parts)
+    workers = [
+        _upload_part_worker(part_work, s3_session, attachment, part_semaphore)
+        for _ in range(min(_MAX_CONCURRENT_UPLOADS, len(response.parts)))
+    ]
+    parts_task = asyncio.create_task(_gather_related(workers))
 
     try:
-        content_sha256, completed_parts = await asyncio.gather(sha_task, parts_task)
+        content_sha256, worker_results = await asyncio.gather(sha_task, parts_task)
     except BaseException as error:
         # A file-read or part failure stops the sibling work. Draining both
         # tasks lets aiofiles and aiohttp release their resources first.
@@ -336,6 +355,7 @@ async def upload_attachment_to_library(
             attachment_key=attachment.key,
         ) from error
 
+    completed_parts = [part for worker_parts in worker_results for part in worker_parts]
     # Sort into a local: pydantic's generated `__init__` still admits a mapping
     # for a nested-model field (validation rejects one under `strict=True`), and
     # solving `sorted` against that wider target widens the key parameter.
