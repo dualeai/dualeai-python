@@ -870,7 +870,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = "~=0.20" },
     { name = "dualeai", extras = ["telemetry"], marker = "extra == 'dev'" },
     { name = "freezegun", marker = "extra == 'dev'", specifier = "~=1.5" },
-    { name = "hpke-http", extras = ["aiohttp"], specifier = "~=3.0" },
+    { name = "hpke-http", extras = ["aiohttp"], specifier = "~=4.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = "~=6.151" },
     { name = "moto", extras = ["s3", "server"], marker = "extra == 'dev'", specifier = "~=5.1" },
     { name = "opentelemetry-api", specifier = "~=1.44" },
@@ -1202,17 +1202,17 @@ wheels = [
 
 [[package]]
 name = "hpke-http"
-version = "3.0.0"
+version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/8f/9b83414ab1ea0da30c5f912574f1acbaa6233237b88b29ee4f9af82819b8/hpke_http-3.0.0.tar.gz", hash = "sha256:78844a0843b460a23d84a1972b9c15f20df6acccb20aa7ec1f378e2972f2e253", size = 106477, upload-time = "2026-09-24T18:59:00.35Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6f/cf/0ec909ae9645a3664297f5ccc1d80e5bb9f144ea63b8d7f119a2e0604b87/hpke_http-4.0.0.tar.gz", hash = "sha256:75c78e45c82de6ef3e34c774149518ee456830653f993b8ab8187e8c88e5d9cf", size = 114675, upload-time = "2026-09-25T06:32:09.722Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/be/c0578f19d17a82a6c920539205aead7477b9a721d690c5717ac6022b1762/hpke_http-3.0.0-cp310-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:d739741016eaa36a3959ee6921f30f3dbfe039bf747395b5f65c164db12d69fe", size = 975924, upload-time = "2026-09-24T18:58:55.576Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/0f/7bd857be94aadfb7651f02afc1202126e01dc51be573f500dda1421a8577/hpke_http-3.0.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:abf9ca4801a39c17f73a061f88314c82e1848f7687ed0eca2b173f36c0c9de35", size = 567332, upload-time = "2026-09-24T18:58:57.44Z" },
-    { url = "https://files.pythonhosted.org/packages/e4/99/2da2a9f9775da5aefe46cdd8b03469b7169ce56526c6684cbbfa1590ddc1/hpke_http-3.0.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:33d27a15572704e64718f85cd54f264fab70cf048f85a1a1858ac17fd3ae1e78", size = 573841, upload-time = "2026-09-24T18:58:58.995Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/5c/22be367f36a05b7b07e821757acb0062e9b77fa5b39aa182f6f5e6be189f/hpke_http-4.0.0-cp310-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:1e6a8bb845d333bee210e617328e9ca40487555329de93d5ecfb5f3d0020e0c5", size = 983009, upload-time = "2026-09-25T06:32:04.774Z" },
+    { url = "https://files.pythonhosted.org/packages/da/fa/17c615db62a68b4f13fbfa4e7089f08b1dff6952a3997c671b3bfdd96f43/hpke_http-4.0.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:6d0626e5616b69e6f819d40a487e9a73aa2026eeec2638c187edeac8808d6c27", size = 568364, upload-time = "2026-09-25T06:32:06.351Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/0a/80a800bbd94afe0e91e02c99a324600af9318e8f4959f3b6730876dd9426/hpke_http-4.0.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:b9311ae7bf1a27d5a3fee7064e2b7f7223f6d2db158706653afdfcccbd487aa2", size = 589603, upload-time = "2026-09-25T06:32:07.933Z" },
 ]
 
 [package.optional-dependencies]

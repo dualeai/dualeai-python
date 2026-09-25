@@ -9,13 +9,13 @@ Presigned object-store uploads are separate. Transport behavior is covered by
 import hashlib
 import json
 from collections.abc import AsyncGenerator, Mapping
+from contextlib import AsyncExitStack
 from http import HTTPStatus
 from typing import TypeVar
 from urllib.parse import quote, urlsplit
 
 import aiohttp
-from hpke_http.middleware import Discover
-from hpke_http.middleware.aiohttp import HPKEClientSession, HPKEResponse
+from hpke_http.middleware.aiohttp import DiscoveredEndpoint, HPKEClientSession, HPKEResponse
 from hpke_http.protocol import ProtocolError, StateError
 from hpke_http.transport import TransportError
 from pydantic import BaseModel, ValidationError
@@ -147,16 +147,19 @@ def _check_status(status: int, body: bytes, *, path: str) -> None:
 
 
 def _retryable_stream_error(error: BaseException, *, stream_established: bool) -> bool:
-    """Resume authenticated streams cut before END and transient network loss."""
+    """Retry pre-start discovery faults and interrupted Task streams."""
     return (
         isinstance(error, SSEChecksumError)
-        or (isinstance(error, TransportError) and error.code in {"network_error", "discovery_network"})
+        or (
+            isinstance(error, TransportError)
+            and error.code in {"network_error", "discovery_network", "discovery_expired"}
+        )
         or (stream_established and isinstance(error, ProtocolError) and error.code == "malformed_envelope")
     )
 
 
 class HTTPTransport:
-    """Protected Bridge and Library sessions on one Gateway base URL."""
+    """Protected Bridge and Library sessions with per-service discovery leases."""
 
     _MAX_RETRIES = 5
     _CONNECT_TIMEOUT_SECONDS = 5.0
@@ -172,6 +175,7 @@ class HTTPTransport:
         self._psk_id = hashlib.sha512(token.encode("utf-8")).digest()
         self._bridge_session: HPKEClientSession | None = None
         self._library_session: HPKEClientSession | None = None
+        self._resources: AsyncExitStack | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -190,54 +194,43 @@ class HTTPTransport:
         return f"{self._origin}{path}"
 
     async def connect(self) -> None:
-        """Create both protected sessions; each discovers its service key per call."""
+        """Create one shared discovery source and protected client per service."""
         if self.is_connected:
             return
-        if self._bridge_session is not None or self._library_session is not None:
+        if self._resources is not None:
             await self.disconnect()
 
-        def session(path: str) -> HPKEClientSession:
-            return HPKEClientSession(
-                endpoint=f"{self._endpoint}{path}",
-                # TODO: Reuse discovery per service when hpke-http exposes a
-                # public key cache with a defined rotation policy.
-                key_source=Discover(),
-                psk=self._token.encode("utf-8"),
-                psk_id=self._psk_id,
-                timeout=aiohttp.ClientTimeout(
-                    total=self._FINITE_TIMEOUT_SECONDS,
-                    connect=self._CONNECT_TIMEOUT_SECONDS,
-                    sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
-                ),
-            )
+        # Closing the stack releases each client before its key source and HTTP pool.
+        resources = AsyncExitStack()
+        timeout = aiohttp.ClientTimeout(
+            total=self._FINITE_TIMEOUT_SECONDS,
+            connect=self._CONNECT_TIMEOUT_SECONDS,
+            sock_read=self._SOCK_READ_TIMEOUT_SECONDS,
+        )
+        psk = self._token.encode("utf-8")
 
-        bridge = session(_BRIDGE_PATH)
-        library: HPKEClientSession | None = None
+        async def session(path: str) -> HPKEClientSession:
+            source = await resources.enter_async_context(DiscoveredEndpoint(f"{self._endpoint}{path}", timeout=timeout))
+            return await resources.enter_async_context(HPKEClientSession(source, psk, self._psk_id))
+
         try:
-            await bridge.__aenter__()
-            library = session(_LIBRARY_PATH)
-            await library.__aenter__()
+            bridge = await session(_BRIDGE_PATH)
+            library = await session(_LIBRARY_PATH)
         except BaseException:
-            try:
-                if library is not None:
-                    await library.close()
-            finally:
-                await bridge.close()
+            await resources.aclose()
             raise
+        self._resources = resources
         self._bridge_session = bridge
         self._library_session = library
         logger.debug("Protected HTTP transport initialized", endpoint=self._endpoint)
 
     async def disconnect(self) -> None:
-        bridge, library = self._bridge_session, self._library_session
+        resources = self._resources
         self._bridge_session = None
         self._library_session = None
-        try:
-            if library is not None:
-                await library.close()
-        finally:
-            if bridge is not None:
-                await bridge.close()
+        self._resources = None
+        if resources is not None:
+            await resources.aclose()
         logger.debug("Protected HTTP transport disconnected")
 
     def _ensure_connected(self, *, library: bool = False) -> HPKEClientSession:

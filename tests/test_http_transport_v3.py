@@ -5,7 +5,6 @@ import hashlib
 import json
 import ssl
 from collections.abc import AsyncIterator, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -17,7 +16,7 @@ import pytest
 import trustme
 from aiohttp import web
 from hpke_http.middleware._discovery import KEY_MEDIA_TYPE, encode_key_record
-from hpke_http.middleware.aiohttp import HPKEClientSession, HPKEResponse
+from hpke_http.middleware.aiohttp import DiscoveredEndpoint, HPKEResponse
 from hpke_http.protocol import Header, ProtocolError, Response, Server, generate_key_pair
 from hpke_http.transport import RESPONSE_MEDIA_TYPE, TransportError
 from opentelemetry.sdk.trace import TracerProvider
@@ -139,9 +138,6 @@ class _FiniteSession:
             raise result
         return result
 
-    async def close(self) -> None:
-        self.closed = True
-
 
 async def _with_session(
     responses: Sequence[HPKEResponse | BaseException], *, library: bool = True
@@ -152,38 +148,6 @@ async def _with_session(
     transport.__dict__["_bridge_session"] = other if library else session
     transport.__dict__["_library_session"] = session if library else other
     return transport, session
-
-
-@pytest.mark.unit
-async def test_sessions_use_service_protected_endpoints_and_existing_psk_identity(monkeypatch) -> None:
-    captured: list[dict[str, object]] = []
-
-    class _CaptureSession:
-        def __init__(self, **kwargs: object) -> None:
-            self.closed = False
-            captured.append(kwargs)
-            sessions.append(self)
-
-        async def __aenter__(self):
-            return self
-
-        async def close(self) -> None:
-            self.closed = True
-
-    sessions: list[_CaptureSession] = []
-    monkeypatch.setattr(transport_module, "HPKEClientSession", _CaptureSession)
-    transport = HTTPTransport("https://api.example.test", _TOKEN, _TENANT)
-    await transport.connect()
-    assert transport.is_connected
-    assert [item["endpoint"] for item in captured] == [
-        "https://api.example.test/http-bridge/v1/hpke",
-        "https://api.example.test/libraries/v1/hpke",
-    ]
-    assert all(item["psk"] == _TOKEN.encode() for item in captured)
-    assert all(item["psk_id"] == hashlib.sha512(_TOKEN.encode()).digest() for item in captured)
-    await transport.disconnect()
-    assert not transport.is_connected
-    assert all(session.closed for session in sessions)
 
 
 @pytest.mark.unit
@@ -293,7 +257,6 @@ async def test_public_library_routes_and_bearer_stay_in_protected_logical_reques
         "size_bytes": 10,
         "parts": [{"part_number": 1, "etag": '"etag-1"'}],
     }
-    assert session.closed
 
 
 @pytest.mark.unit
@@ -672,11 +635,12 @@ async def test_task_resumes_after_nonterminal_event_and_closes_each_stream(monke
 
 
 @pytest.mark.unit
-async def test_task_replays_pre_start_post_but_never_retries_tampering(monkeypatch) -> None:
+@pytest.mark.parametrize("discovery_error", ["discovery_network", "discovery_expired"])
+async def test_task_replays_pre_start_post_but_never_retries_tampering(monkeypatch, discovery_error: str) -> None:
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     transport, session = _with_stream_session(
         [
-            TransportError("discovery_network", "synthetic key GET failure"),
+            TransportError(discovery_error, "synthetic pre-start discovery failure"),
             _StreamReply([_completed_block()]),
         ]
     )
@@ -770,10 +734,10 @@ async def test_closing_task_iterator_closes_protected_stream(submit_results: boo
 
 
 @pytest.mark.integration
-async def test_real_v3_tls_boundary_checks_both_services_and_live_task_block(  # noqa: PLR0915  # One TLS fixture and one complete exchange.
+async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR0915  # One TLS fixture and complete service exchanges.
     monkeypatch,
 ) -> None:
-    """Real v3 adapter checks both service endpoints, inner auth, and live SSE."""
+    """Real adapter reuses each service key while preserving inner auth and live SSE."""
     keypair = generate_key_pair()
     recipient_id = b"synthetic-key-1"
     server = Server(keypair.private_key, recipient_id)
@@ -793,7 +757,9 @@ async def test_real_v3_tls_boundary_checks_both_services_and_live_task_block(  #
         calls.append((request.method, request.path))
         outer_headers.append(dict(request.headers))
         if request.method == "GET":
-            return web.Response(body=encode_key_record(recipient_id, server.public_key), content_type=KEY_MEDIA_TYPE)
+            return web.Response(
+                body=encode_key_record(recipient_id, server.public_key, 60), content_type=KEY_MEDIA_TYPE
+            )
         raw = await request.read()
         start_length = server.stream_start_length(raw)
         assert start_length is not None
@@ -819,6 +785,12 @@ async def test_real_v3_tls_boundary_checks_both_services_and_live_task_block(  #
                     body = json.dumps({"libraries": []}).encode()
                     envelope = response_right.protect_response(
                         Response(200, (Header("content-type", "application/json"),), body)
+                    )
+                    return web.Response(body=envelope, content_type=RESPONSE_MEDIA_TYPE)
+                if logical.path.endswith("/stop"):
+                    body = json.dumps({"task_id": "task-stop-me-123456", "accepted_at": _DATE}).encode()
+                    envelope = response_right.protect_response(
+                        Response(202, (Header("content-type", "application/json"),), body)
                     )
                     return web.Response(body=envelope, content_type=RESPONSE_MEDIA_TYPE)
                 sealer, first = response_right.into_sealer(200, (Header("content-type", "text/event-stream"),))
@@ -847,17 +819,21 @@ async def test_real_v3_tls_boundary_checks_both_services_and_live_task_block(  #
     site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_ssl)
     await site.start()
     port = runner.addresses[0][1]
-    real_session = HPKEClientSession
-    monkeypatch.setattr(
-        transport_module,
-        "HPKEClientSession",
-        lambda **kwargs: real_session(connector=aiohttp.TCPConnector(ssl=client_ssl), **kwargs),
-    )
+    real_source = DiscoveredEndpoint
+    connectors: list[aiohttp.TCPConnector] = []
+
+    def local_source(endpoint: str, *, timeout: aiohttp.ClientTimeout) -> DiscoveredEndpoint:
+        connector = aiohttp.TCPConnector(ssl=client_ssl)
+        connectors.append(connector)
+        return real_source(endpoint, connector=connector, timeout=timeout)
+
+    monkeypatch.setattr(transport_module, "DiscoveredEndpoint", local_source)
     sdk = DualeAISDK(
         config=DualeAIConfig(endpoint=f"https://localhost:{port}", token=_TOKEN, tenant_id=_TENANT),
         auto_start=False,
     )
     try:
+        assert (await sdk.libraries.list()).libraries == []
         assert (await sdk.libraries.list()).libraries == []
         tracer = TracerProvider().get_tracer("sdk-tls-test")
         with tracer.start_as_current_span("task") as span:
@@ -868,26 +844,35 @@ async def test_real_v3_tls_boundary_checks_both_services_and_live_task_block(  #
         assert not stream_done.is_set()  # Live DATA was available before END/outer EOF.
         release_stream.set()
         await asyncio.wait_for(stream_done.wait(), timeout=5)
+        assert (await sdk.stop_task("task-stop-me-123456", "Synthetic stop")).task_id == "task-stop-me-123456"
     finally:
         release_stream.set()
-        with suppress(Exception):
+        try:
             await sdk.cleanup()
-        await runner.cleanup()
-        server.close()
+        finally:
+            await runner.cleanup()
+            server.close()
+    assert len(connectors) == 2
+    assert all(connector.closed for connector in connectors)
     assert calls == [
         ("GET", "/libraries/v1/hpke"),
         ("POST", "/libraries/v1/hpke"),
+        ("POST", "/libraries/v1/hpke"),
         ("GET", "/http-bridge/v1/hpke"),
+        ("POST", "/http-bridge/v1/hpke"),
         ("POST", "/http-bridge/v1/hpke"),
     ]
     assert [item[:2] for item in observed] == [
         ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}"),
+        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}"),
         ("POST", "/http-bridge/v1/hpke/tasks/task-1"),
+        ("POST", "/http-bridge/v1/hpke/tasks/task-stop-me-123456/stop"),
     ]
     assert observed[0][2]["authorization"] == f"Bearer {_TOKEN}"
-    assert "authorization" not in observed[1][2]
-    assert observed[1][2]["accept"] == "text/event-stream"
-    assert observed[1][2]["traceparent"].split("-")[1] == f"{trace_id:032x}"
-    assert json.loads(observed[1][3])["action_prompt"] == "Synthetic action"
-    assert all("Authorization" not in headers for headers in outer_headers)
+    assert observed[1][2]["authorization"] == f"Bearer {_TOKEN}"
+    assert "authorization" not in observed[2][2]
+    assert observed[2][2]["accept"] == "text/event-stream"
+    assert observed[2][2]["traceparent"].split("-")[1] == f"{trace_id:032x}"
+    assert json.loads(observed[2][3])["action_prompt"] == "Synthetic action"
+    assert all("authorization" not in {name.lower() for name in headers} for headers in outer_headers)
     assert all("traceparent" not in {name.lower() for name in headers} for headers in outer_headers)
