@@ -110,7 +110,7 @@ class AgentDeregistrationMessage(BaseModel):
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity for this lifecycle request. It must match the identity bound to the SDK token."
+            description="Agent Identity for this lifecycle request. It must match the agent resolved from the API token on HPKE or the agent authorized for the RAW route."
         ),
     ]
     process_id: Annotated[
@@ -161,7 +161,7 @@ class AgentHeartbeatMessage(BaseModel):
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity for this lifecycle request. It must match the identity bound to the SDK token."
+            description="Agent Identity for this lifecycle request. It must match the agent resolved from the API token on HPKE or the agent authorized for the RAW route."
         ),
     ]
     process_id: Annotated[
@@ -233,7 +233,7 @@ class AgentRegistrationMessage(BaseModel):
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity for this lifecycle request. It must match the identity bound to the SDK token."
+            description="Agent Identity for this lifecycle request. It must match the agent resolved from the API token on HPKE or the agent authorized for the RAW route."
         ),
     ]
     process_id: Annotated[

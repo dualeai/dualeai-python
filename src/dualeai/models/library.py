@@ -258,7 +258,7 @@ class LibraryDocumentCreateResponse(BaseModel):
     location: Annotated[
         Annotated[StrictStr, Field(min_length=1)],
         Field(
-            description="Path to read the document and poll its ingestion status. It matches the Location response header."
+            description="Relative URI reference to read the document and poll its ingestion status. Resolve it against the create or restore request URL. It matches the Location response header."
         ),
     ]
 
