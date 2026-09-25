@@ -22,7 +22,7 @@ The local behaviors summarized here are covered across
 outcomes are not enforced by this repository's tests.
 
 The transport boundaries are exercised by
-``tests/test_http_transport_v3.py::test_real_v3_tls_boundary_checks_both_services_and_live_task_block``
+``tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service``
 and ``tests/test_attachments_s3.py::test_public_upload_preserves_bytes_and_document_metadata``.
 """
 

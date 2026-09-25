@@ -31,7 +31,7 @@ The SDK does not call the Dashboard raw API. The Library service supplies signed
 SDK sends those parts directly to the supplied URLs, outside HPKE. Optional telemetry and remote Redis use separate
 connections.
 
-<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_checks_both_services_and_live_task_block; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests; tests/test_config.py::TestConfigLoading::test_default_config_values. The SDK follows the presigned upload URL without validating its scheme; no automated SDK test checks the service's HTTPS URL contract. Separate signed S3, telemetry, and Redis egress paths are a source-inspection finding without one cross-destination automated test. No automated test checks a deployed Duale AI endpoint or every advertised Python and OS combination. -->
+<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests; tests/test_config.py::TestConfigLoading::test_default_config_values. The SDK follows the presigned upload URL without validating its scheme; no automated SDK test checks the service's HTTPS URL contract. Separate signed S3, telemetry, and Redis egress paths are a source-inspection finding without one cross-destination automated test. No automated test checks a deployed Duale AI endpoint or every advertised Python and OS combination. -->
 
 ```bash
 python -m pip install dualeai
@@ -104,13 +104,18 @@ available settings.
 
 ### Protected API routing
 
-`DUALEAI_ENDPOINT` supplies the Gateway base URL. With the default, the SDK makes each service's public-key discovery
-GET and encrypted POST at these fixed `hpke-http/3` endpoints:
+`DUALEAI_ENDPOINT` supplies the Gateway base URL. With the default, the SDK sends each service's public-key discovery
+GET and encrypted POST to these fixed endpoints. The encrypted requests use the `hpke-http/3` wire protocol:
 
 | Service | Discovery GET and encrypted POST | Path inside the encrypted request |
 | --- | --- | --- |
 | HTTP Bridge | `/http-bridge/v1/hpke` | `/http-bridge/v1/hpke/tasks/{task_id}` and `/http-bridge/v1/hpke/agent/...` |
 | Library | `/libraries/v1/hpke` | `/libraries/v1/hpke/tenants/{tenant_id}/...` |
+
+Each service's discovery endpoint must return an HHKD v2 public-key record with a positive reuse lifetime. The SDK
+shares that key across protected calls to the same service during its lifetime, so the first call uses a discovery GET
+and an encrypted POST, while later calls use only encrypted POSTs. A call that needs a key after the lifetime ends
+fetches a new one.
 
 Both paths include the service prefix. The complete API token bytes are the PSK; SHA-512 of those bytes is the public
 PSK ID. Each service's discovery response supplies a separate recipient public-key ID. Library bearer authorization
@@ -121,7 +126,7 @@ document as `/v1/hpke/tenants/{tenant_id}/{library_id}/documents/{document_id}`.
 `/libraries/v1/hpke` network endpoint. The SDK validates a synthetic response body in a local test; no automated
 SDK test checks the header or a deployed service response.
 
-<!-- Evidence: tests/test_http_transport_v3.py::test_sessions_use_service_protected_endpoints_and_existing_psk_identity; tests/test_http_transport_v3.py::test_real_v3_tls_boundary_checks_both_services_and_live_task_block; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests. No automated test checks the deployed Gateway routes or the receipt Location header. -->
+<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests. The local TLS test checks one discovery GET and two protected POSTs per service during the lease. No automated SDK test forces lease expiry or checks the deployed Gateway routes or the receipt Location header. -->
 
 ## Document workflows
 

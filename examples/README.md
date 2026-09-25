@@ -28,7 +28,7 @@ Examples that submit Tasks also need access to at least one configured model. To
 `DUALEAI_AGENT_ID`; document examples list their additional requirements below. Set `DUALEAI_ENDPOINT` only when your
 access instructions name a non-default HTTPS Gateway base URL.
 
-<!-- Evidence: tests/test_config.py::TestConfigValidation::test_endpoint_format_validation; tests/test_http_transport_v3.py::test_sessions_use_service_protected_endpoints_and_existing_psk_identity. No automated test runs these examples against the service. -->
+<!-- Evidence: tests/test_config.py::TestConfigValidation::test_endpoint_format_validation; tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service. No automated test runs these examples against the service. -->
 
 ## Choose an example
 

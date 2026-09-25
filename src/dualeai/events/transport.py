@@ -84,10 +84,9 @@ class HTTPTransportProtocol(Protocol):
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit a root create or child continuation and stream that task.
 
-        POST /http-bridge/v1/hpke/tasks/{task_id}. The typed body's discriminator selects
-        creation or continuation. The transport-level
-        retry loop in ``HTTPTransport._stream_request`` switches to GET after
-        a protected SSE response starts.
+        Logical POST /http-bridge/v1/hpke/tasks/{task_id} inside HPKE. The typed
+        body's discriminator selects creation or continuation. After a protected
+        SSE response starts, the retry loop uses logical GET on the same path.
 
         Args:
             task_id: Client-owned task ID in the URL. Root callers may select
@@ -113,10 +112,11 @@ class HTTPTransportProtocol(Protocol):
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit tool results and resume the same public task stream.
 
-        POST /http-bridge/v1/hpke/tasks/{task_id} with type=tool_results. The bridge publishes
-        an internal tool-result continuation beneath the URL task and returns
-        that URL task's existing stream. ``last_event_id`` is the opaque SSE
-        cursor for the triggering ``tool.use``.
+        Logical POST /http-bridge/v1/hpke/tasks/{task_id} inside HPKE with
+        type=tool_results. The bridge publishes an internal tool-result
+        continuation beneath the URL task and returns that task's existing
+        stream. ``last_event_id`` is the opaque SSE cursor for the triggering
+        ``tool.use``.
         """
         ...
 

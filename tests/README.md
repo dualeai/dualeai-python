@@ -69,5 +69,5 @@ calls against a local TLS endpoint. The enforcing tests are
 `test_public_upload_preserves_bytes_and_document_metadata`,
 `test_public_upload_preserves_true_multipart_bytes_and_opaque_etags`,
 `test_many_parts_keep_pending_upload_tasks_bounded`, and
-`test_real_v3_tls_boundary_checks_both_services_and_live_task_block`. These
+`test_real_v3_tls_boundary_reuses_discovery_per_service`. These
 tests do not contact external services.
