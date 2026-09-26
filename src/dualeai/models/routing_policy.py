@@ -7,7 +7,7 @@ from typing import Annotated, Union
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictFloat, StrictInt
 from pydantic.json_schema import SkipJsonSchema
 
-from dualeai.models import skill_enum as skill_enum_module
+from dualeai.models import capability as capability_module
 
 __all__: list[str] = ["RoutingPolicy"]
 
@@ -32,14 +32,14 @@ class RoutingPolicy(BaseModel):
                     "cost_sensitivity": 0.2,
                     "speed_preference": 0.7,
                     "priority_level": 5,
-                    "required_skills": ["code", "analysis"],
+                    "required_capabilities": ["code", "analysis"],
                 },
                 {
                     "target_accuracy": 0.95,
                     "cost_sensitivity": 0.9,
                     "priority_level": 0,
-                    "required_skills": ["reasoning", "analysis"],
-                    "preferred_skills": ["agentic", "long_context"],
+                    "required_capabilities": ["reasoning", "analysis"],
+                    "preferred_capabilities": ["agentic", "long_context"],
                 },
             ]
         },
@@ -115,19 +115,19 @@ class RoutingPolicy(BaseModel):
             json_schema_extra={"default": 0},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
-    required_skills: Annotated[
-        Union[Annotated[list[skill_enum_module.SkillEnum], Field(strict=True)], SkipJsonSchema[None]],
+    required_capabilities: Annotated[
+        Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Skills the selected model should possess. Routing prefers models with evidence for every listed skill and falls back to the best available route when the full request cannot be satisfied.",
+            description="Work capacities the task requires of whoever executes it. Routing prefers routes with evidence for every listed capability and falls back to the best available route when the full request cannot be satisfied.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
-    preferred_skills: Annotated[
-        Union[Annotated[list[skill_enum_module.SkillEnum], Field(strict=True)], SkipJsonSchema[None]],
+    preferred_capabilities: Annotated[
+        Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Skills that improve model preference but do not exclude other available routes.",
+            description="Work capacities that improve route preference but do not exclude other available routes.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)

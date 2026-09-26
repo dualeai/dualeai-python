@@ -8,11 +8,11 @@ from pydantic import GetJsonSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
-__all__: list[str] = ["SkillEnum"]
+__all__: list[str] = ["Capability"]
 
 
-class SkillEnum(str, Enum):
-    """Enumeration of available skills for routing policy"""
+class Capability(str, Enum):
+    """Work capacity a task requires of whoever executes it, used to rank eligible routes"""
 
     general = "general"
     reasoning = "reasoning"
@@ -33,8 +33,8 @@ class SkillEnum(str, Enum):
         json_schema = handler.resolve_ref_schema(handler(core_schema))
         json_schema.update(
             {
-                "title": "SkillEnum",
-                "description": "Enumeration of available skills for routing policy",
+                "title": "Capability",
+                "description": "Work capacity a task requires of whoever executes it, used to rank eligible routes",
                 "examples": [
                     "code",
                     "analysis",

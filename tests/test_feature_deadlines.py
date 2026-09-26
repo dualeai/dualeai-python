@@ -15,7 +15,7 @@ import pytest
 from dualeai import DualeAISDK
 from dualeai.constants import TimingDefaults
 from dualeai.models.bridge import BridgeTaskContinueRequest, BridgeTaskCreateRequest
-from dualeai.models.skill_enum import SkillEnum
+from dualeai.models.capability import Capability
 from dualeai.orchestrator import ask, continue_conversation
 from tests.mocks.mock_http import require_mock_http_transport
 
@@ -40,7 +40,9 @@ class TestUnitDeadlineHandling:
         deadline: datetime,
     ) -> None:
         """Preserve every supported deadline shape at the transport boundary."""
-        await ask(action="Task with deadline", skills=[SkillEnum.analysis], deadline=deadline, sdk=minimal_mock_sdk)
+        await ask(
+            action="Task with deadline", capabilities=[Capability.analysis], deadline=deadline, sdk=minimal_mock_sdk
+        )
 
         [record] = require_mock_http_transport(minimal_mock_sdk).get_requests()
         request = record["request"]
@@ -85,7 +87,7 @@ class TestUnitDeadlineHandling:
         # Submit first task
         await ask(
             action="Task 1",
-            skills=[],
+            capabilities=[],
             deadline=deadline1,
             sdk=sdk,
         )
@@ -93,7 +95,7 @@ class TestUnitDeadlineHandling:
         # Submit second task with different deadline
         await ask(
             action="Task 2",
-            skills=[],
+            capabilities=[],
             deadline=deadline2,
             sdk=sdk,
         )
@@ -112,7 +114,7 @@ class TestUnitDeadlineHandling:
 
         await ask(
             action="Task without explicit deadline",
-            skills=[],
+            capabilities=[],
             deadline=None,
             sdk=sdk,
         )

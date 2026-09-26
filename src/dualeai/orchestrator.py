@@ -2,7 +2,7 @@
 
 Thin convenience wrappers around ``DualeAISDK.submit_task`` and
 ``AgentResponse.next``. Both return ``AgentResponse`` directly; the
-orchestrator forwards arguments and applies skill→task_type derivation.
+orchestrator forwards arguments and applies capability→task_type derivation.
 
 Forwarding behavior is covered by ``tests/test_feature_ask.py`` and
 ``tests/test_feature_multiturn.py``.
@@ -11,9 +11,9 @@ Forwarding behavior is covered by ``tests/test_feature_ask.py`` and
 from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar, overload
 
+from dualeai.models.capability import Capability
 from dualeai.models.response_format import ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.response import AgentResponse
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ async def continue_conversation(
 @overload
 async def ask(
     action: str,
-    skills: list[SkillEnum] | None,
+    capabilities: list[Capability] | None,
     res: type[T],
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
@@ -78,7 +78,7 @@ async def ask(
 @overload
 async def ask(
     action: str,
-    skills: list[SkillEnum] | None = None,
+    capabilities: list[Capability] | None = None,
     *,
     res: type[T],
     response_format: ResponseFormat | None = None,
@@ -94,7 +94,7 @@ async def ask(
 @overload
 async def ask(
     action: str,
-    skills: list[SkillEnum] | None = None,
+    capabilities: list[Capability] | None = None,
     res: None = None,
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
@@ -109,7 +109,7 @@ async def ask(
 
 async def ask(
     action: str,
-    skills: list[SkillEnum] | None = None,
+    capabilities: list[Capability] | None = None,
     res: type[T] | None = None,
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
@@ -129,15 +129,15 @@ async def ask(
 
     Args:
         action: Non-empty instruction for the Task.
-        skills: Optional routing skills. When ``routing`` is absent they become
-            ``required_skills``; they also select an observability ``task_type``.
+        capabilities: Optional routing capabilities. When ``routing`` is absent they become
+            ``required_capabilities``; they also select an observability ``task_type``.
         res: Optional Python/Pydantic type for local result validation. When no
             explicit ``response_format`` is supplied, its JSON Schema is sent in
             the request.
         response_format: Explicit wire response format; takes precedence over
             schema derivation from ``res``.
         routing: Explicit routing policy. When present it takes precedence over
-            the policy otherwise derived from ``skills``.
+            the policy otherwise derived from ``capabilities``.
         streaming: Request content delta/reset events for ``response.stream()``.
         deadline: Optional timezone-aware absolute deadline. Omission uses the
             SDK's default Task timeout.
@@ -175,19 +175,19 @@ async def ask(
             content.append(event.delta)
         story = await response.model()
     """
-    # Skill→task_type derivation: observability metric only.
+    # Capability→task_type derivation: observability metric only.
     task_type = "completion"
-    if skills:
-        if SkillEnum.code in skills:
+    if capabilities:
+        if Capability.code in capabilities:
             task_type = "generation"
-        elif SkillEnum.analysis in skills:
+        elif Capability.analysis in capabilities:
             task_type = "analysis"
-        elif SkillEnum.reasoning in skills:
+        elif Capability.reasoning in capabilities:
             task_type = "reasoning"
 
     return await sdk.submit_task(
         action=action,
-        skills=skills or [],
+        capabilities=capabilities or [],
         routing_policy=routing,
         response_type=res,
         response_format=response_format,

@@ -14,7 +14,7 @@ import pytest
 from dualeai import DualeAISDK
 from dualeai.decorators import activity, tool
 from dualeai.models.bridge import RegisteredTool
-from dualeai.models.skill_enum import SkillEnum
+from dualeai.models.capability import Capability
 from dualeai.sdk import JsonValue
 from tests.conftest import UnstartedSDKFactory
 
@@ -106,7 +106,7 @@ class TestActivityDecorator:
 
         execute_mock = AsyncMock(return_value="sdk_result")
         with patch.object(test_sdk, "execute_activity", new=execute_mock):
-            result = await delegated_activity(SkillEnum.general, 42)
+            result = await delegated_activity(Capability.general, 42)
 
         # Verify SDK method was called with correct parameters
         execute_mock.assert_called_once()
@@ -116,7 +116,7 @@ class TestActivityDecorator:
         assert func.__name__ == "delegated_activity"
         assert cache_ttl == timedelta(minutes=15)
         assert max_retries == 2
-        assert arg1 == SkillEnum.general
+        assert arg1 == Capability.general
         assert arg2 == 42
 
         assert result == "sdk_result"
@@ -126,7 +126,7 @@ class TestActivityDecorator:
 
         # This tests the callable(cache_ttl) branch in the decorator
         async def async_mock_func():
-            return SkillEnum.general
+            return Capability.general
 
         async_mock_func.__name__ = "test_func"
 

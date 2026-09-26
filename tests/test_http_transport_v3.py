@@ -46,6 +46,7 @@ from dualeai.models.bridge import (
     BridgeToolResultSuccess,
     HeartbeatStatus,
 )
+from dualeai.models.capability import Capability
 from dualeai.models.library import (
     LibraryCreateRequest,
     LibraryDeleteRequest,
@@ -62,7 +63,6 @@ from dualeai.models.library import (
 )
 from dualeai.models.response_format import JsonSchemaResponseFormat, PredefinedResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.models.task_stop import TaskStopRequest
 from dualeai.models.tool import Parameters, Tool
 
@@ -499,7 +499,7 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
         action_prompt="do it",
         deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
         tools=[tool],
-        routing_policy=RoutingPolicy(target_accuracy=0.9, required_skills=[SkillEnum.analysis]),
+        routing_policy=RoutingPolicy(target_accuracy=0.9, required_capabilities=[Capability.analysis]),
         response_format=JsonSchemaResponseFormat(json_schema={"type": "object"}),
         response_stream=True,
         attachments=[Attachment(key="attachment-key", filename="report.pdf", description="Quarterly report")],
@@ -513,7 +513,7 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
     body = call.body
     assert isinstance(body, dict)
     assert body["response_stream"] is True
-    assert body["routing_policy"] == {"target_accuracy": 0.9, "required_skills": ["analysis"]}
+    assert body["routing_policy"] == {"target_accuracy": 0.9, "required_capabilities": ["analysis"]}
     assert body["response_format"] == {"json_schema": {"type": "object"}}
     assert body["attachments"] == [
         {"key": "attachment-key", "filename": "report.pdf", "description": "Quarterly report"}
@@ -838,7 +838,7 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
         tracer = TracerProvider().get_tracer("sdk-tls-test")
         with tracer.start_as_current_span("task") as span:
             trace_id = span.get_span_context().trace_id
-            task = await sdk.submit_task("Synthetic action", skills=[], request_id="task-1")
+            task = await sdk.submit_task("Synthetic action", capabilities=[], request_id="task-1")
             terminal = await asyncio.wait_for(task.task, timeout=5)
         assert terminal.type == "task.completed"
         assert not stream_done.is_set()  # Live DATA was available before END/outer EOF.

@@ -95,12 +95,12 @@ from dualeai.models.bridge import (
     BridgeToolUseResponse,
     RegisteredTool,
 )
+from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.models.library import LibraryCreateRequest, LibraryDocumentCreateResponse
 from dualeai.models.reserved_tool_names import ReservedToolName
 from dualeai.models.response_format import JsonSchemaResponseFormat, ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
 from dualeai.models.tool import Tool
 from dualeai.observability import OTELStructlogProcessor, SDKObservability
@@ -1097,7 +1097,7 @@ class DualeAISDK:
     async def submit_task(
         self,
         action: str,
-        skills: list[SkillEnum],
+        capabilities: list[Capability],
         routing_policy: RoutingPolicy | None = None,
         response_type: type[T] | None = None,
         response_schema: dict[str, JsonValue | None] | None = None,
@@ -1118,10 +1118,10 @@ class DualeAISDK:
 
         Args:
             action: Non-empty Task instruction.
-            skills: Skills used to derive ``required_skills`` when
+            capabilities: Capabilities used to derive ``required_capabilities`` when
                 ``routing_policy`` is omitted.
             routing_policy: Explicit routing policy. Takes precedence over the
-                policy derived from ``skills``.
+                policy derived from ``capabilities``.
             response_type: Optional type for local ``AgentResponse.model()``
                 validation and, unless overridden, request-schema derivation.
             response_schema: Optional JSON Schema used when deriving a response
@@ -1155,7 +1155,7 @@ class DualeAISDK:
         async def operation() -> AgentResponse[T]:
             return await self._submit_task_internal(
                 action,
-                skills,
+                capabilities,
                 routing_policy,
                 response_type,
                 response_schema,
@@ -1175,7 +1175,7 @@ class DualeAISDK:
             trace_attributes={
                 # Never log prompt/action CONTENT (PII). Metadata only.
                 "action_length": len(action),
-                "skills_count": len(skills),
+                "capabilities_count": len(capabilities),
                 "streaming_enabled": streaming,
                 "has_routing_policy": routing_policy is not None,
                 "response_type": response_type.__name__ if response_type else None,
@@ -1531,7 +1531,7 @@ class DualeAISDK:
     async def _submit_task_internal(
         self,
         action: str,
-        skills: list[SkillEnum],
+        capabilities: list[Capability],
         routing_policy: RoutingPolicy | None = None,
         response_type: type[T] | None = None,
         response_schema: dict[str, JsonValue | None] | None = None,
@@ -1543,7 +1543,9 @@ class DualeAISDK:
         attachments: list[PreparedAttachment] | None = None,
     ) -> "AgentResponse[T]":
         """Internal task submission: spawn task, return AgentResponse."""
-        routing_policy_obj = routing_policy or (RoutingPolicy(required_skills=skills) if skills else None)
+        routing_policy_obj = routing_policy or (
+            RoutingPolicy(required_capabilities=capabilities) if capabilities else None
+        )
         task_id_preview = request_id or str(uuid4())
 
         deadline, task_logger = self._prepare_task_submission(
@@ -1553,11 +1555,11 @@ class DualeAISDK:
             streaming=streaming,
         )
 
-        task_logger = task_logger.bind(skills=[skill.value for skill in skills])
+        task_logger = task_logger.bind(capabilities=[capability.value for capability in capabilities])
         if routing_policy_obj:
             task_logger = task_logger.bind(
-                has_required_skills=bool(routing_policy_obj.required_skills),
-                has_preferred_skills=bool(routing_policy_obj.preferred_skills),
+                has_required_capabilities=bool(routing_policy_obj.required_capabilities),
+                has_preferred_capabilities=bool(routing_policy_obj.preferred_capabilities),
             )
 
         task_logger.info("Task submission details", action_length=len(action))

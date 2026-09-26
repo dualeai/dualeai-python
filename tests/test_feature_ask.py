@@ -14,7 +14,7 @@ import pytest
 
 from dualeai import DualeAISDK
 from dualeai.models.bridge import BridgeTaskCreateRequest
-from dualeai.models.skill_enum import SkillEnum
+from dualeai.models.capability import Capability
 from dualeai.orchestrator import ask
 from dualeai.response import AgentResponse
 from tests.mocks.mock_http import require_mock_http_transport
@@ -66,17 +66,20 @@ class TestUnitAskFunction:
         assert isinstance(task_request, BridgeTaskCreateRequest)
         assert task_request.action_prompt == action
 
-    async def test_ask_includes_skills_in_request(self, minimal_mock_sdk: DualeAISDK):
-        """The Task request passed to the transport carries the selected skills."""
-        skills = [SkillEnum.instruction_following, SkillEnum.analysis]
-        await ask(action="Extract and analyze", skills=skills, sdk=minimal_mock_sdk)
+    async def test_ask_includes_capabilities_in_request(self, minimal_mock_sdk: DualeAISDK):
+        """The Task request passed to the transport carries the selected capabilities."""
+        capabilities = [Capability.instruction_following, Capability.analysis]
+        await ask(action="Extract and analyze", capabilities=capabilities, sdk=minimal_mock_sdk)
 
         requests = require_mock_http_transport(minimal_mock_sdk).get_requests()
         assert len(requests) > 0
         task_request = requests[0]["request"]
         assert isinstance(task_request, BridgeTaskCreateRequest)
         assert task_request.routing_policy is not None
-        assert task_request.routing_policy.required_skills == [SkillEnum.instruction_following, SkillEnum.analysis]
+        assert task_request.routing_policy.required_capabilities == [
+            Capability.instruction_following,
+            Capability.analysis,
+        ]
 
     async def test_ask_with_streaming_flag(self, minimal_mock_sdk: DualeAISDK):
         """Test ask() with streaming=True sets up streaming."""
@@ -102,18 +105,18 @@ class TestUnitAskFunction:
         assert isinstance(response.task, asyncio.Task)
         assert not response.task.done()
 
-    async def test_ask_with_multiple_skills(self, minimal_mock_sdk: DualeAISDK):
-        """Test ask() with multiple skills includes all in payload."""
-        skills = [
-            SkillEnum.instruction_following,
-            SkillEnum.analysis,
-            SkillEnum.reasoning,
-            SkillEnum.general,
+    async def test_ask_with_multiple_capabilities(self, minimal_mock_sdk: DualeAISDK):
+        """Test ask() with multiple capabilities includes all in payload."""
+        capabilities = [
+            Capability.instruction_following,
+            Capability.analysis,
+            Capability.reasoning,
+            Capability.general,
         ]
 
         await ask(
-            action="Complex multi-skill task",
-            skills=skills,
+            action="Complex multi-capability task",
+            capabilities=capabilities,
             sdk=minimal_mock_sdk,
         )
 
@@ -122,11 +125,11 @@ class TestUnitAskFunction:
         task_request = requests[0]["request"]
         assert isinstance(task_request, BridgeTaskCreateRequest)
         assert task_request.routing_policy is not None
-        assert task_request.routing_policy.required_skills == [
-            SkillEnum.instruction_following,
-            SkillEnum.analysis,
-            SkillEnum.reasoning,
-            SkillEnum.general,
+        assert task_request.routing_policy.required_capabilities == [
+            Capability.instruction_following,
+            Capability.analysis,
+            Capability.reasoning,
+            Capability.general,
         ]
 
     async def test_ask_task_id_uniqueness(self, minimal_mock_sdk: DualeAISDK):

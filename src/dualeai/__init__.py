@@ -57,6 +57,7 @@ from dualeai.models.bridge import (
     BridgeToolResultSuccess,
     BridgeToolUseResponse,
 )
+from dualeai.models.capability import Capability
 from dualeai.models.library import (
     LibraryCreateRequest,
     LibraryDeleteRequest,
@@ -75,7 +76,6 @@ from dualeai.models.library import (
 )
 from dualeai.models.response_format import ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.models.tool import Tool
 
 # Orchestration
@@ -195,6 +195,7 @@ __all__ = [
     "BusinessError",
     "CacheBackend",
     "CacheConfig",
+    "Capability",
     "ConfigurationError",
     "DualeAIAuthError",
     "DualeAIConfig",
@@ -223,7 +224,6 @@ __all__ = [
     "ResponseFormat",
     "RoutingPolicy",
     "SQLiteCacheBackend",
-    "SkillEnum",
     "TaskStoppedError",
     "Tool",
     "ToolContext",
