@@ -1318,7 +1318,7 @@ class DualeAISDK:
 
         return delta_queue, deltas, on_delta, on_reset, partial(self._schedule_tool_use, task_id)
 
-    async def _run_task_with_circuit_breaker(  # noqa: PLR0912 - explicit terminal outcome classification
+    async def _run_task_with_circuit_breaker(  # noqa: PLR0912, PLR0915 - explicit terminal and local outcome classification
         self,
         *,
         admission: asyncio.Future[None],
@@ -1328,10 +1328,22 @@ class DualeAISDK:
         reset_callback: Callable[[BridgeContentResetResponse], None] | None,
         tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None] | None,
     ) -> TerminalEvent:
-        """Run one terminal bridge task under the SDK-local breaker."""
+        """Run one terminal bridge task under the SDK-local breaker.
+
+        An admitted run without a terminal records a local ``task_stream``
+        failure or cancellation, leaving Task result counters unchanged.
+        The breaker tracks dependency health separately: a stream failure can
+        count there, while a non-retryable Task error increments ``tasks_failed``
+        without counting against the breaker.
+
+        ``test_local_failure_does_not_count_a_remote_failure`` and
+        ``test_stream_failure_survives_metric_views_as_a_local_outcome`` enforce
+        the separation between local observation and remote result accounting.
+        """
         controller = self._backpressure_controller
 
         admitted = False
+        cancelled = False
         terminal: TerminalEvent | None = None
         spawn_time = time.time()
         task_type = "continuation" if request.type == "continue" else "completion"
@@ -1371,6 +1383,7 @@ class DualeAISDK:
                     attempt.ignore()
                 return terminal
         except BaseException as exc:
+            cancelled = isinstance(exc, asyncio.CancelledError)
             if not admission.done():
                 admission.set_exception(exc)
             raise
@@ -1378,7 +1391,11 @@ class DualeAISDK:
             self._inflight_tasks.pop(task_id, None)
             if admitted:
                 duration = time.time() - spawn_time
-                if terminal is None or isinstance(terminal, BridgeTaskErrorResponse):
+                if terminal is None:
+                    self._observability.record_operation(
+                        "task_stream", "cancelled" if cancelled else "failed", duration=duration
+                    )
+                elif isinstance(terminal, BridgeTaskErrorResponse):
                     controller.record_failure()
                     self._observability.task_failed(duration=duration, task_type=task_type)
                 elif not isinstance(terminal, BridgeTaskStoppedResponse):

@@ -8,14 +8,16 @@ carrying ``str(exc)`` — then export it off-box. These tests drive the two span
 that wrap customer code and assert the exported span hides the exception body
 while keeping a type-only error signal.
 
-Isolation: the SDK's ``tracer`` is redirected to an in-memory exporter, so the
-asserted spans are captured locally and bypass whatever global OpenTelemetry
-provider construction may have installed.
+Isolation: ``span_exporter`` supplies an in-memory tracer provider before SDK
+construction, restores provider lookups and closes its provider at teardown.
 """
 
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
+from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -24,26 +26,37 @@ from opentelemetry.trace import StatusCode
 from dualeai import DualeAIConfig, DualeAISDK, tool
 from dualeai.cache import MockCacheBackend
 from dualeai.models.bridge import BridgeToolUseResponse
+from dualeai.observability import SDKObservability
 from tests.mocks.mock_http import MockHTTPTransport
 
 
-def _enabled_sdk_with_inmem_spans(
-    transport: MockHTTPTransport | None = None,
-) -> tuple[DualeAISDK, InMemorySpanExporter]:
-    """An observability-enabled SDK whose spans land in an in-memory exporter."""
+@pytest.fixture
+def span_exporter() -> Iterator[InMemorySpanExporter]:
+    """Capture real spans without global providers or unrelated metric exports."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    meter_provider = NoOpMeterProvider()
+    with (
+        patch("dualeai.observability.trace.get_tracer_provider", return_value=provider),
+        patch("dualeai.observability.metrics.get_meter_provider", return_value=meter_provider),
+        patch("dualeai.observability.metrics.get_meter", side_effect=meter_provider.get_meter),
+        patch.object(SDKObservability, "_setup_auto_instrumentation"),
+    ):
+        try:
+            yield exporter
+        finally:
+            provider.shutdown()
+
+
+def _enabled_sdk(transport: MockHTTPTransport | None = None) -> DualeAISDK:
+    """Create the SDK after the test's local providers are available."""
     config = DualeAIConfig.model_validate(
         {"token": "dualeai_test_token_12345_padded_to_32bytes", "agent_id": "agent-test-rc3"}
     )
     config.observability.endpoint = "http://localhost:4318"
     config.observability.token = "test-token"
-    sdk = DualeAISDK(config=config, transport=transport, auto_start=False)
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    # Redirect this SDK's tracer to the in-memory exporter; the asserted spans
-    # bypass any global provider (constructing an enabled SDK may install one).
-    sdk._observability.tracer = provider.get_tracer("dualeai.sdk")
-    return sdk, exporter
+    return DualeAISDK(config=config, transport=transport, auto_start=False)
 
 
 def _one_span(exporter: InMemorySpanExporter, name: str) -> ReadableSpan:
@@ -63,8 +76,10 @@ def _assert_exception_body_not_exported(span: ReadableSpan, secret: str) -> None
 
 @pytest.mark.unit
 class TestCustomerToolExceptionNotExported:
-    async def test_execute_tool_span_omits_customer_exception(self, mock_http_transport: MockHTTPTransport) -> None:
-        sdk, exporter = _enabled_sdk_with_inmem_spans(transport=mock_http_transport)
+    async def test_execute_tool_span_omits_customer_exception(
+        self, mock_http_transport: MockHTTPTransport, span_exporter: InMemorySpanExporter
+    ) -> None:
+        sdk = _enabled_sdk(transport=mock_http_transport)
         await sdk._ensure_events_client()
         secret = "postgresql://pricing:s3cr3t-rc3-tool@db.internal/prices"
 
@@ -86,7 +101,7 @@ class TestCustomerToolExceptionNotExported:
             # _execute_tool_use swallows the exception into a BridgeToolResultError.
             await sdk._execute_tool_use("task-rc3", tool_use)
 
-            span = _one_span(exporter, "dualeai.sdk.execute_tool leaky_tool")
+            span = _one_span(span_exporter, "dualeai.sdk.execute_tool leaky_tool")
             _assert_exception_body_not_exported(span, secret)
             # Failure is still visible as a signal — type only, no message.
             assert span.status.status_code is StatusCode.ERROR
@@ -94,8 +109,8 @@ class TestCustomerToolExceptionNotExported:
         finally:
             await sdk.cleanup()
 
-    async def test_activity_execution_span_omits_customer_exception(self) -> None:
-        sdk, exporter = _enabled_sdk_with_inmem_spans()
+    async def test_activity_execution_span_omits_customer_exception(self, span_exporter: InMemorySpanExporter) -> None:
+        sdk = _enabled_sdk()
         sdk.cache = MockCacheBackend(tenant_id="rc3")
         secret = "postgresql://pricing:s3cr3t-rc3-activity@db.internal/prices"
 
@@ -106,7 +121,7 @@ class TestCustomerToolExceptionNotExported:
             with pytest.raises(RuntimeError):
                 await sdk.execute_activity(leaky_activity, cache_ttl=timedelta(minutes=1), max_retries=0)
 
-            span = _one_span(exporter, "dualeai.sdk.activity_execution")
+            span = _one_span(span_exporter, "dualeai.sdk.activity_execution")
             _assert_exception_body_not_exported(span, secret)
             assert span.status.status_code is StatusCode.ERROR
             assert span.status.description == "RuntimeError"

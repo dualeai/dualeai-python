@@ -65,9 +65,10 @@ def _exception_from_terminal(terminal: BridgeTaskErrorResponse, task_id: str) ->
     ``RESOURCE_NOT_FOUND``, ``TOOL_VALIDATION_FAILED``,
     ``LOOP_DETECTED``, ``INTERNAL_ROUTING``) and callers branch on it
     directly. Additional envelope fields (``retryable``,
-    ``retry_after_seconds``, ``owner_action_required``, ``error_category``,
-    ``ai_hints``) live on ``exc.problem_details`` so retry logic reads them
-    without an SDK-side mapping table.
+    ``retry_after_seconds``, ``owner_action_required``, ``error_category``) live
+    on ``exc.problem_details`` so retry logic reads them without an SDK-side
+    mapping table. When ``errors`` is present, each item can carry ``ai_hints``
+    at ``exc.problem_details.errors[i].ai_hints``.
 
     Example:
         try:
@@ -154,7 +155,7 @@ class AgentResponse(Generic[T]):
             )
             raise
         except Exception as task_err:
-            logger.error("Task failed", task_id=self.task_id, error=str(task_err))
+            logger.error("Task stream failed", task_id=self.task_id, error=str(task_err))
             raise
 
     def _unwrap_llm_result(self, result: LLMResult, *, warn_on_empty: bool = False) -> object:
@@ -299,10 +300,15 @@ class AgentResponse(Generic[T]):
                 raised instance carries the canonical RFC 9457 ProblemDetails on
                 ``exc.problem_details`` (with ``error_code``, ``detail``, and
                 extension fields ``retryable``, ``retry_after_seconds``,
-                ``owner_action_required``, ``error_category``, ``ai_hints``).
-                Callers
-                branch on ``exc.problem_details.error_code`` directly — there is
+                ``owner_action_required``, ``error_category``). When ``errors``
+                is present, each item can carry ``ai_hints`` at
+                ``exc.problem_details.errors[i].ai_hints``. Callers branch on
+                ``exc.problem_details.error_code`` directly — there is
                 no SDK-side re-mapping table.
+            DualeAIConnectionError: If Task observation fails after applicable
+                recovery attempts. This does not prove a failed remote Task.
+                The default HTTP transport supplies diagnostics in ``exc.context``;
+                ``exc.problem_details`` can be absent for a local failure.
             ValidationError: If the result does not match ``expected_type``.
                 Its context, and debug-level validation logs, can contain
                 rejected result fragments; treat both as potentially sensitive.

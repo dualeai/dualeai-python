@@ -7,8 +7,8 @@ import pytest
 
 from dualeai import DualeAISDK
 from dualeai.backpressure import BackpressureConfig, BackpressureController
-from dualeai.events.http_transport import HTTPTransportConnectionError
-from dualeai.exceptions import DualeAIConnectionError, DualeAIError
+from dualeai.events.http_transport import HTTPTransportAuthError, HTTPTransportConnectionError
+from dualeai.exceptions import DualeAIAuthError, DualeAIConnectionError, DualeAIError
 from dualeai.models.bridge import BridgeSSEEvent, BridgeTaskCreateRequest, BridgeTaskErrorResponse
 from dualeai.models.problem_details import ErrorCategory, ProblemDetails
 from dualeai.orchestrator import ask
@@ -19,6 +19,7 @@ def _task_error(
     event_id: int,
     *,
     retryable: bool,
+    status: int = 400,
     error_code: str = "TEST_TASK_ERROR",
     error_category: ErrorCategory | None = None,
 ) -> BridgeSSEEvent:
@@ -30,7 +31,7 @@ def _task_error(
             timestamp=now,
             data=ProblemDetails(
                 title="Task failed",
-                status=503 if retryable else 400,
+                status=status,
                 detail="terminal test error",
                 error_code=error_code,
                 retryable=retryable,
@@ -54,33 +55,80 @@ def _use_threshold(sdk: DualeAISDK, failures: int) -> None:
 class TestTaskCircuitBreaker:
     """Run the real SDK while mocking only its HTTP transport."""
 
+    @pytest.mark.parametrize("failure", ["connection", "auth", "cancel"])
+    async def test_local_failure_does_not_count_a_remote_failure(
+        self,
+        minimal_mock_sdk: DualeAISDK,
+        mock_transport: MockHTTPTransport,
+        failure: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        operations: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            minimal_mock_sdk.observability,
+            "record_operation",
+            lambda operation, status, **_kwargs: operations.append((operation, status)),
+        )
+        if failure == "connection":
+            mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
+        elif failure == "auth":
+            mock_transport.fail_next_task(HTTPTransportAuthError("denied"))
+        response = await ask(action="synthetic", request_id="local-failure", sdk=minimal_mock_sdk)
+        if failure == "cancel":
+            response.task.cancel()
+        expected = {"connection": DualeAIConnectionError, "auth": DualeAIAuthError, "cancel": asyncio.CancelledError}
+        with pytest.raises(expected[failure]):
+            await response.model()
+        metrics = minimal_mock_sdk.backpressure_controller.metrics
+        assert metrics.tasks_failed == 0
+        assert metrics.tasks_completed == 0
+        assert ("task_stream", "cancelled" if failure == "cancel" else "failed") in operations
+
+    async def test_lost_stream_logs_the_local_failure(
+        self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
+        response = await ask(action="synthetic", request_id="lost-stream-log", sdk=minimal_mock_sdk)
+        for _ in range(2):
+            with pytest.raises(DualeAIConnectionError):
+                await response.model()
+        entries = [record.msg for record in caplog.records if record.name == "dualeai.response"]
+        assert entries
+        assert all(isinstance(entry, dict) and entry["event"] == "Task stream failed" for entry in entries)
+        assert len(mock_transport.get_requests_for_task("lost-stream-log")) == 1
+
+    @pytest.mark.parametrize("status", [503, 418])
     async def test_retryable_terminal_errors_open_before_next_http_call(
         self,
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
+        status: int,
     ) -> None:
         _use_threshold(minimal_mock_sdk, failures=2)
         for event_id in (1, 2):
             task_id = f"retryable-{event_id}"
-            mock_transport.inject_event(task_id, _task_error(event_id, retryable=True))
+            mock_transport.inject_event(task_id, _task_error(event_id, retryable=True, status=status))
             response = await ask(action="retryable", request_id=task_id, sdk=minimal_mock_sdk)
             with pytest.raises(DualeAIError):
                 await response.model()
 
         request_count = len(mock_transport.get_requests())
+        assert minimal_mock_sdk.backpressure_controller.metrics.tasks_failed == 2
         with pytest.raises(RuntimeError, match="task dependency is unavailable"):
             await ask(action="rejected", request_id="retryable-3", sdk=minimal_mock_sdk)
         assert len(mock_transport.get_requests()) == request_count
 
+    @pytest.mark.parametrize("status", [400, 503])
     async def test_non_retryable_terminal_error_does_not_open(
         self,
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
+        status: int,
     ) -> None:
         _use_threshold(minimal_mock_sdk, failures=1)
         mock_transport.inject_event(
             "business-error",
-            _task_error(1, retryable=False, error_code="CONTENT_FILTERED"),
+            _task_error(1, retryable=False, status=status, error_code="CONTENT_FILTERED"),
         )
         response = await ask(action="business", request_id="business-error", sdk=minimal_mock_sdk)
         with pytest.raises(DualeAIError) as exc_info:
@@ -92,6 +140,8 @@ class TestTaskCircuitBreaker:
         mock_transport.inject_event("healthy", mock_transport.create_task_completed_event())
         healthy = await ask(action="healthy", request_id="healthy", sdk=minimal_mock_sdk)
         assert await healthy.model() == "Task completed"
+        assert minimal_mock_sdk.backpressure_controller.metrics.tasks_failed == 1
+        assert minimal_mock_sdk.backpressure_controller.metrics.tasks_completed == 1
 
     @pytest.mark.parametrize(
         ("error_code", "error_category"),

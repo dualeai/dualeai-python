@@ -1,28 +1,26 @@
-"""Observability integration tests.
+"""Observability unit tests through SDK operations.
 
-Right-layer testing: spies are wired on the SDK's observability
-instance and the test drives REAL production code paths
-(``ask`` / ``execute_activity`` / ``get_health_status``). The
-spies fire only because production code reaches them — not because
-the test invokes them directly.
-
-Anti-pattern explicitly avoided here: ``patch(method); call method;
-assert method.called``. That tautology proves only that
-``unittest.mock`` works.
+In-memory instruments and dependency spies expose telemetry produced by
+``ask``, ``execute_activity``, and ``get_health_status``.
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, Sum
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import ProxyTracerProvider
 
 from dualeai import DualeAIConfig, DualeAISDK
 from dualeai.cache import MockCacheBackend
-from dualeai.exceptions import DualeAIError
+from dualeai.events.http_transport import HTTPTransportConnectionError
+from dualeai.exceptions import DualeAIConnectionError, DualeAIError
 from dualeai.observability import SDKObservability
 from dualeai.orchestrator import ask
 from tests.helpers.lifecycle import inject_llm_completion
@@ -32,6 +30,74 @@ from tests.mocks.mock_http import MockHTTPTransport
 @pytest.mark.unit
 class TestUnitObservabilityFeature:
     """Observability features exercised through real SDK code paths."""
+
+    @pytest.fixture
+    def isolated_otel_providers(self) -> Iterator[InMemoryMetricReader]:
+        """Own the SDK-created providers without installing them process-wide."""
+        tracers: list[TracerProvider] = []
+        meters: list[MeterProvider] = []
+        reader = InMemoryMetricReader()
+
+        def get_meter(name: str):
+            return meters[0].get_meter(name)
+
+        with (
+            patch(
+                "dualeai.observability.trace.get_tracer_provider",
+                side_effect=lambda: tracers[0] if tracers else ProxyTracerProvider(),
+            ),
+            patch("dualeai.observability.trace.set_tracer_provider", side_effect=tracers.append),
+            patch(
+                "dualeai.observability.metrics.get_meter_provider",
+                side_effect=lambda: meters[0] if meters else None,
+            ),
+            patch("dualeai.observability.metrics.set_meter_provider", side_effect=meters.append),
+            patch("dualeai.observability.metrics.get_meter", side_effect=get_meter),
+            patch("dualeai.observability.OTLPSpanExporter", return_value=InMemorySpanExporter()),
+            patch("dualeai.observability.OTLPMetricExporter"),
+            patch("dualeai.observability.PeriodicExportingMetricReader", return_value=reader),
+            patch.object(SDKObservability, "_setup_auto_instrumentation"),
+        ):
+            try:
+                yield reader
+            finally:
+                for provider in [*tracers, *meters]:
+                    provider.shutdown()
+
+    async def test_stream_failure_survives_metric_views_as_a_local_outcome(
+        self,
+        minimal_mock_sdk: DualeAISDK,
+        mock_transport: MockHTTPTransport,
+        observability_config_factory,
+        isolated_otel_providers: InMemoryMetricReader,
+    ) -> None:
+        """Read the real instruments after the SDK's production attribute filter."""
+        previous = minimal_mock_sdk.observability
+        minimal_mock_sdk._observability = SDKObservability(observability_config_factory())
+        try:
+            mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
+            lost = await ask(action="synthetic", request_id="metric-lost", sdk=minimal_mock_sdk)
+            with pytest.raises(DualeAIConnectionError):
+                await lost.model()
+            mock_transport.inject_event("metric-done", mock_transport.create_task_completed_event())
+            done = await ask(action="synthetic", request_id="metric-done", sdk=minimal_mock_sdk)
+            assert await done.model() == "Task completed"
+            exported = isolated_otel_providers.get_metrics_data()
+            assert exported is not None
+            outcomes = {
+                (point.attributes["operation"], point.attributes["status"]): point.value
+                for resource in exported.resource_metrics
+                for scope in resource.scope_metrics
+                for metric in scope.metrics
+                if metric.name == "dualeai.sdk.operations" and isinstance(metric.data, Sum)
+                for point in metric.data.data_points
+                if point.attributes is not None
+            }
+            assert outcomes[("task_stream", "failed")] == 1
+            assert outcomes[("task_completion", "success")] == 1
+            assert ("task_completion", "failed") not in outcomes
+        finally:
+            minimal_mock_sdk._observability = previous
 
     @pytest.fixture
     def observability_config_factory(self):
@@ -47,6 +113,7 @@ class TestUnitObservabilityFeature:
 
         return _create
 
+    @pytest.mark.usefixtures("isolated_otel_providers")
     def test_exporters_receive_per_signal_endpoints(
         self, observability_config_factory: Callable[..., DualeAIConfig]
     ) -> None:
@@ -69,19 +136,13 @@ class TestUnitObservabilityFeature:
         with (
             patch("dualeai.observability.OTLPSpanExporter", side_effect=_capture("traces")),
             patch("dualeai.observability.OTLPMetricExporter", side_effect=_capture("metrics")),
-            # Force the "no provider installed yet" state so exporter creation
-            # runs regardless of what earlier tests set globally, and swallow
-            # the set_* calls so this test leaves no global provider behind.
-            patch("dualeai.observability.trace.get_tracer_provider", return_value=ProxyTracerProvider()),
-            patch("dualeai.observability.trace.set_tracer_provider"),
-            patch("dualeai.observability.metrics.get_meter_provider", return_value=object()),
-            patch("dualeai.observability.metrics.set_meter_provider"),
         ):
             SDKObservability(config=observability_config_factory())
 
         assert captured["traces"] == "http://localhost:4318/v1/traces"
         assert captured["metrics"] == "http://localhost:4318/v1/metrics"
 
+    @pytest.mark.usefixtures("isolated_otel_providers")
     async def test_tracing_injects_context(self, observability_config_factory: Callable[..., DualeAIConfig]) -> None:
         """``trace_operation`` opens a recording span with valid context."""
         sdk = DualeAISDK(config=observability_config_factory(), auto_start=False)
@@ -117,6 +178,7 @@ class TestUnitObservabilityFeature:
         finally:
             await sdk.cleanup()
 
+    @pytest.mark.usefixtures("isolated_otel_providers")
     async def test_observability_configuration_from_config(
         self, observability_config_factory: Callable[..., DualeAIConfig]
     ) -> None:
@@ -135,6 +197,7 @@ class TestUnitObservabilityFeature:
         finally:
             await sdk.cleanup()
 
+    @pytest.mark.usefixtures("isolated_otel_providers")
     async def test_observability_context_propagation(
         self, observability_config_factory: Callable[..., DualeAIConfig]
     ) -> None:
@@ -170,6 +233,7 @@ class TestUnitObservabilityFeature:
         finally:
             await sdk.cleanup()
 
+    @pytest.mark.usefixtures("isolated_otel_providers")
     async def test_observability_safe_when_errors_occur(
         self, observability_config_factory: Callable[..., DualeAIConfig]
     ) -> None:
