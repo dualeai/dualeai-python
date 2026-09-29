@@ -5,7 +5,9 @@ Thin convenience wrappers around ``DualeAISDK.submit_task`` and
 orchestrator forwards arguments and applies capability→task_type derivation.
 
 Forwarding behavior is covered by ``tests/test_feature_ask.py`` and
-``tests/test_feature_multiturn.py``.
+``tests/test_feature_multiturn.py``. ``tests/test_continuation_contract.py``
+covers child request fields; no dedicated automated test covers the helper's
+result-type default.
 """
 
 from datetime import datetime
@@ -30,20 +32,23 @@ async def continue_conversation(
     deadline: datetime | None = None,
     response_format: ResponseFormat | None = None,
 ) -> AgentResponse[T]:
-    """Continue a successful response with a new message.
+    """Continue a completed response with a new message.
 
     The response owns both its public parent ID and its SDK instance. The
     returned response carries the client-generated child ID. Waiting and sibling
     behavior match :meth:`AgentResponse.next`.
 
     Args:
-        response: Parent response, which must finish successfully first.
+        response: Parent response, which must reach a completed outcome first.
+            This helper does not validate the parent result.
         message: User message for the child Task.
         deadline: Optional timezone-aware child deadline.
         response_format: Explicit wire response format for the child.
 
     Returns:
-        A non-streaming child response using the parent's expected result type.
+        A non-streaming child response without local result validation. The
+        parent's expected result type is not inherited despite the generic
+        return annotation. Use ``response.next(res=YourModel)`` to select one.
 
     Raises:
         DualeAIError: If the parent ended with ``task.error``.

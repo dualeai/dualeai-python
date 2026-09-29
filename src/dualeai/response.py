@@ -10,7 +10,9 @@ that the Task has stopped.
 
 Terminal, streaming, continuation, and stop behavior is covered by
 ``tests/test_feature_results.py``, ``tests/test_streaming_callbacks.py``,
-``tests/test_feature_multiturn.py``, and ``tests/test_task_stop.py``.
+``tests/test_feature_multiturn.py``, and ``tests/test_task_stop.py``. No dedicated
+automated test covers continuation model defaults, parent result validation, or
+stream-runner failures during streaming.
 """
 
 import asyncio
@@ -376,8 +378,10 @@ class AgentResponse(Generic[T]):
         without yielding. Terminal ``task.error`` and ``task.stopped`` events
         end iteration; this method does not translate them into
         ``DualeAIError`` or ``TaskStoppedError``. Call :meth:`model` for the
-        authoritative terminal result. Exceptions raised by the local stream
-        runner itself still propagate.
+        authoritative terminal result, including stream-runner exceptions and
+        cancellation. With ``streaming=True``, a failed or cancelled runner
+        ends iteration without propagating its exception; with
+        ``streaming=False``, awaiting that runner propagates it.
         """
         if not self.streaming:
             await self.task
@@ -454,9 +458,10 @@ class AgentResponse(Generic[T]):
     ) -> "AgentResponse[T]":
         """Submit a next message as a child of this Task.
 
-        Waits for this response to finish successfully before the SDK creates
-        and submits a distinct child task. A parent error or cancellation is
-        propagated without submitting a child.
+        Waits for a completed terminal event before the SDK creates and submits
+        a distinct child task. It does not validate the parent result; call
+        :meth:`model` first if your application requires that check. A parent
+        error, stopped event, or cancellation propagates without a child.
 
         The request sends this response's ``task_id`` as ``parent_task_id`` and
         creates a new, non-streaming child with its own UUID4 identifier. It
@@ -466,9 +471,10 @@ class AgentResponse(Generic[T]):
 
         Args:
             message: New user turn for the child task.
-            res: Optional result type for local validation. When
-                ``response_format`` is absent, the SDK also derives its JSON
-                Schema for the request.
+            res: Optional child result type for local validation. Omission does
+                not inherit the parent's type. When ``response_format`` is
+                absent, the SDK also derives the type's JSON Schema for the
+                request.
             deadline: Timezone-aware child deadline. Omission uses the SDK's
                 default Task timeout.
             response_format: Explicit wire response format. It takes precedence
