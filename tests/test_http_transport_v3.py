@@ -28,16 +28,18 @@ from yarl import URL
 
 import dualeai.events.http_transport as transport_module
 from dualeai import DualeAISDK
-from dualeai._platform_token import PlatformToken, derive_psk
+from dualeai._platform_token import PlatformToken, PlatformTokenIssueError, derive_psk
 from dualeai.config import DualeAIConfig
 from dualeai.events.client import CloudEventsClient
 from dualeai.events.http_transport import (
     HTTPTransport,
     HTTPTransportAuthError,
     HTTPTransportConnectionError,
+    HTTPTransportError,
     HTTPTransportResponseError,
     HTTPTransportStreamError,
 )
+from dualeai.exceptions import BusinessError, DualeAIAuthError, DualeAIConnectionError
 from dualeai.models.bridge import (
     AgentDeregistrationMessage,
     AgentHeartbeatMessage,
@@ -506,7 +508,12 @@ class _StreamReply:
         self.closed = False
 
     async def read(self) -> bytes:
-        return b"".join(block for block in self.blocks if isinstance(block, bytes))
+        chunks = []
+        for block in self.blocks:
+            if isinstance(block, BaseException):
+                raise block
+            chunks.append(block)
+        return b"".join(chunks)
 
     async def iter_sse(self) -> AsyncIterator[bytes]:
         for block in self.blocks:
@@ -774,7 +781,7 @@ async def test_public_terminal_consumer_closes_live_iterator() -> None:
     result = await client._consume_terminal_stream(
         task_id="task-1",
         stream=stream(),
-        operation="Task run",
+        operation="task_run",
         delta_callback=None,
         reset_callback=None,
         tool_use_callback=None,
@@ -804,6 +811,568 @@ async def test_closing_task_iterator_closes_protected_stream(submit_results: boo
     await stream.aclose()
 
     assert reply.closed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["outer_status", "discovery_status", "logical"])
+@pytest.mark.parametrize(
+    ("status", "retry"), [(499, False), (500, True), (501, True), (503, True), (599, True), (600, False)]
+)
+async def test_task_retries_actual_http_5xx(monkeypatch, source: str, status: int, retry: bool) -> None:
+    """The 5xx rule uses the received status, even without a problem body."""
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    rejected = (
+        _StreamReply([b"unstructured error"], status=status, mode="finite")
+        if source == "logical"
+        else TransportError(source, "synthetic rejection", status_code=status)
+    )
+    transport, session = await _with_stream_session([rejected, _StreamReply([_completed_block()])])
+    try:
+        if retry:
+            assert [event.data.type async for event in transport.run_task("task-status", _task_request())] == [
+                "task.completed"
+            ]
+        else:
+            with pytest.raises(HTTPTransportError):
+                _ = [event async for event in transport.run_task("task-status", _task_request())]
+        assert [call.method for call in session.calls] == (["POST", "POST"] if retry else ["POST"])
+        assert all(call.body == session.calls[0].body for call in session.calls)
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "body_status", "flag", "retry"),
+    [
+        (418, 418, True, True),
+        (418, 418, False, False),
+        (418, 418, None, False),
+        (401, 401, True, True),
+        (403, 403, True, True),
+        (503, 400, False, True),
+        (400, 503, False, False),
+        (503, 503, None, True),
+    ],
+)
+async def test_task_retry_flag_and_http_status_are_independent(monkeypatch, status, body_status, flag, retry) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    problem = {
+        "title": "Task request failed",
+        "status": body_status,
+        "detail": "synthetic",
+        "error_code": "PUBLISH_FAILED",
+    }
+    if flag is not None:
+        problem["retryable"] = flag
+    rejected = _StreamReply([json.dumps(problem).encode()], status=status, mode="finite")
+    transport, session = await _with_stream_session(
+        [
+            _StreamReply([_delta_block("7:1", "first"), TransportError("network_error", "cut")]),
+            rejected,
+            _StreamReply([_completed_block("7:2")]),
+        ]
+    )
+    client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
+    await client.connect()
+    try:
+        if retry:
+            assert (await client.run_task(task_id="task-flag", request=_task_request())).type == "task.completed"
+        else:
+            with pytest.raises(BusinessError) as error:
+                await client.run_task(task_id="task-flag", request=_task_request())
+            assert error.value.problem_details is not None
+            assert error.value.problem_details.status == body_status
+            assert error.value.context.metadata is not None
+            assert error.value.context.metadata["http_status"] == status
+        assert [call.method for call in session.calls] == (["POST", "GET", "GET"] if retry else ["POST", "GET"])
+        assert all(call.body is None and call.headers["Last-Event-ID"] == "7:1" for call in session.calls[1:])
+        assert isinstance(transport._tokens, _HeldToken)
+        assert transport._tokens.refusals == 0
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("cause", "retry"),
+    [
+        (aiohttp.ClientConnectionError("cut"), True),
+        (aiohttp.ClientPayloadError("cut body"), True),
+        (ConnectionResetError("reset"), True),
+        (asyncio.TimeoutError(), True),
+        (ssl.SSLEOFError("TLS connection cut"), True),
+        (ssl.SSLCertVerificationError("untrusted"), False),
+        (aiohttp.ServerFingerprintMismatch(b"expected", b"actual", "example.test", 443), False),
+        (ssl.SSLError("wrong protocol"), False),
+        (TypeError("programming fault"), False),
+    ],
+)
+async def test_task_classifies_network_wrappers_by_cause(monkeypatch, cause: Exception, retry: bool) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    failure = TransportError("network_error", "wrapped")
+    failure.__cause__ = cause
+    transport, session = await _with_stream_session([failure, _StreamReply([_completed_block()])])
+    try:
+        if retry:
+            assert [event.data.type async for event in transport.run_task("task-types", _task_request())] == [
+                "task.completed"
+            ]
+        else:
+            with pytest.raises(HTTPTransportStreamError) as error:
+                _ = [event async for event in transport.run_task("task-types", _task_request())]
+            assert error.value.__cause__ is failure
+        assert len(session.calls) == (2 if retry else 1)
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("succeeds", [False, True])
+async def test_task_asyncio_timeout_recovers_or_reports_final_context(monkeypatch, succeeds: bool) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    first = _StreamReply([_delta_block("11:1", "first"), asyncio.TimeoutError()])
+    tail = [_StreamReply([_completed_block("11:2")])] if succeeds else [asyncio.TimeoutError() for _ in range(4)]
+    transport, session = await _with_stream_session([first, *tail])
+    client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
+    await client.connect()
+    try:
+        if succeeds:
+            assert (await client.run_task(task_id="task-timeout", request=_task_request())).type == "task.completed"
+        else:
+            with pytest.raises(DualeAIConnectionError) as error:
+                await client.run_task(task_id="task-timeout", request=_task_request())
+            assert error.value.context.operation == "task_run"
+            assert error.value.context.task_id == "task-timeout"
+            assert error.value.context.retry_attempt == 4
+            assert error.value.context.metadata is not None
+            assert error.value.context.metadata["last_event_id"] == "11:1"
+            assert error.value.context.metadata["logical_method"] == "GET"
+        assert [call.method for call in session.calls] == ["POST", *(["GET"] * (1 if succeeds else 4))]
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("has_delta", [False, True])
+async def test_task_checked_eof_resumes_without_repeating_post(monkeypatch, has_delta: bool) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    first = _StreamReply([_delta_block("4:1", "first")] if has_delta else [])
+    transport, session = await _with_stream_session([first, _StreamReply([_completed_block("4:2")])])
+    try:
+        events = [event async for event in transport.run_task("task-eof", _task_request())]
+        assert [event.data.type for event in events] == (["content.delta"] if has_delta else []) + ["task.completed"]
+        assert [call.method for call in session.calls] == ["POST", "GET"]
+        assert session.calls[1].body is None
+        assert session.calls[1].headers.get("Last-Event-ID") == ("4:1" if has_delta else None)
+        assert first.closed
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["task_run", "task_continue", "tool_results"])
+async def test_task_error_context_identifies_the_operation(operation: str) -> None:
+    problem = {"title": "Denied", "status": 403, "detail": "synthetic", "error_code": "DENIED", "retryable": False}
+    transport, session = await _with_stream_session(
+        [_StreamReply([json.dumps(problem).encode()], status=403, mode="finite")]
+    )
+    client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
+    await client.connect()
+    try:
+        with pytest.raises(DualeAIAuthError) as raised:
+            if operation == "tool_results":
+                await client.submit_tool_results(
+                    task_id="task-context",
+                    request=BridgeToolResultsRequest(
+                        type="tool_results",
+                        tool_results=[BridgeToolResultSuccess(type="success", tool_call_id="call-1", output="done")],
+                    ),
+                    last_event_id="1:2",
+                )
+            else:
+                request = (
+                    _task_request()
+                    if operation == "task_run"
+                    else BridgeTaskContinueRequest(
+                        type="continue",
+                        parent_task_id="parent-task-123",
+                        message="continue",
+                        deadline=_task_request().deadline,
+                    )
+                )
+                await client.run_task(task_id="task-context", request=request)
+        context = raised.value.context
+        assert context.operation == operation
+        assert context.task_id == "task-context"
+        assert context.retry_attempt == 0
+        assert context.error_code == "DENIED"
+        assert context.metadata is not None
+        assert context.metadata["http_status"] == 403
+        assert context.metadata["logical_method"] == "POST"
+        assert context.metadata.get("last_event_id") == ("1:2" if operation == "tool_results" else None)
+        assert raised.value.problem_details is not None
+        assert raised.value.problem_details.retryable is False
+        assert len(session.calls) == 1
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("established", [False, True])
+async def test_tool_result_retry_uses_its_own_start_not_inherited_cursor(monkeypatch, established: bool) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    if established:
+        failure = TransportError("network_error", "response body interrupted")
+        failure.__cause__ = aiohttp.ClientPayloadError("response body interrupted")
+        first = _StreamReply([failure])
+    else:
+        first = TransportError("outer_status", "unavailable", status_code=503)
+    transport, session = await _with_stream_session([first, _StreamReply([_completed_block("8:2")])])
+    results = BridgeToolResultsRequest(
+        type="tool_results",
+        tool_results=[BridgeToolResultSuccess(type="success", tool_call_id="call-123", output={"ok": True})],
+    )
+    try:
+        assert [
+            event.data.type async for event in transport.submit_tool_results("task-tool", results, last_event_id="8:1")
+        ] == ["task.completed"]
+        assert [call.method for call in session.calls] == ["POST", "GET" if established else "POST"]
+        assert all(call.headers["Last-Event-ID"] == "8:1" for call in session.calls)
+        assert session.calls[1].body == (None if established else session.calls[0].body)
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fifth_succeeds", [False, True])
+async def test_task_mixed_budget_counts_renewal_without_an_http_request(monkeypatch, fifth_succeeds: bool) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    first = _StreamReply([_delta_block("9:1", "first"), TransportError("network_error", "cut")])
+    problem = {"title": "Busy", "detail": "synthetic", "status": 418, "retryable": True, "error_code": "BUSY"}
+    final = _StreamReply([_completed_block("9:2")]) if fifth_succeeds else asyncio.TimeoutError()
+    transport, session = await _with_stream_session(
+        [
+            first,
+            TransportError("outer_status", "unavailable", status_code=503),
+            _StreamReply([json.dumps(problem).encode()], status=418, mode="finite"),
+            final,
+            _StreamReply([_completed_block("9:2")]),
+        ]
+    )
+    acquisitions = 0
+
+    async def renew() -> PlatformToken:
+        nonlocal acquisitions
+        acquisitions += 1
+        if acquisitions == 2:
+            raise PlatformTokenIssueError(503, None)
+        return _STUB_TOKEN
+
+    monkeypatch.setattr(transport._tokens, "get", renew)
+    try:
+        if fifth_succeeds:
+            assert [event.id async for event in transport.run_task("task-budget", _task_request())] == ["9:1", "9:2"]
+        else:
+            with pytest.raises(HTTPTransportStreamError):
+                _ = [event async for event in transport.run_task("task-budget", _task_request())]
+        assert acquisitions == 5
+        assert [call.method for call in session.calls] == ["POST", "GET", "GET", "GET"]
+        assert all(call.headers["Last-Event-ID"] == "9:1" and call.body is None for call in session.calls[1:])
+        assert first.closed
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fault", ["outer_status", "discovery_status", "logical", "eof"])
+async def test_task_exhaustion_reports_the_last_failure(monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    problem = {"title": "Busy", "status": 503, "detail": "synthetic", "error_code": "BUSY", "retryable": False}
+    failures = [
+        _StreamReply([])
+        if fault == "eof"
+        else _StreamReply([json.dumps(problem).encode()], status=503, mode="finite")
+        if fault == "logical"
+        else TransportError(fault, "unavailable", status_code=503)
+        for _ in range(4)
+    ]
+    first = _StreamReply([_delta_block("12:1", "first"), TransportError("network_error", "lost")])
+    transport, session = await _with_stream_session([first, *failures, _StreamReply([_completed_block("12:2")])])
+    client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
+    await client.connect()
+    try:
+        with pytest.raises(DualeAIConnectionError) as raised:
+            await client.run_task(task_id="task-exhausted", request=_task_request())
+        context = raised.value.context
+        assert context.operation == "task_run"
+        assert context.task_id == "task-exhausted"
+        assert context.retry_attempt == 4
+        assert context.error_code == {"logical": "BUSY", "eof": "stream_incomplete"}.get(fault, fault)
+        assert context.metadata == {
+            "logical_method": "GET",
+            "last_event_id": "12:1",
+            **({} if fault == "eof" else {"http_status": 503}),
+        }
+        assert raised.value.__cause__ is not None
+        assert (raised.value.problem_details is not None) == (fault == "logical")
+        assert [call.method for call in session.calls] == ["POST", "GET", "GET", "GET", "GET"]
+        assert first.closed
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("failure", "retry"),
+    [
+        (asyncio.TimeoutError(), True),
+        (aiohttp.ClientConnectionError("lost"), True),
+        (ValueError("malformed token response"), False),
+        (aiohttp.ServerFingerprintMismatch(b"expected", b"actual", "example.test", 443), False),
+    ],
+)
+async def test_task_renewal_classifies_its_original_cause(monkeypatch, failure: Exception, retry: bool) -> None:
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    transport, session = await _with_stream_session(
+        [
+            _StreamReply([_delta_block("6:1", "first"), TransportError("network_error", "lost")]),
+            _StreamReply([_completed_block("6:2")]),
+        ]
+    )
+    acquisitions = 0
+
+    async def renew() -> PlatformToken:
+        nonlocal acquisitions
+        acquisitions += 1
+        if acquisitions == 2:
+            raise failure
+        return _STUB_TOKEN
+
+    monkeypatch.setattr(transport._tokens, "get", renew)
+    try:
+        if retry:
+            assert [event.id async for event in transport.run_task("task-renew", _task_request())] == ["6:1", "6:2"]
+        else:
+            with pytest.raises(HTTPTransportConnectionError) as raised:
+                _ = [event async for event in transport.run_task("task-renew", _task_request())]
+            assert raised.value.__cause__ is failure
+            assert raised.value.context is not None
+            assert raised.value.context.retry_attempt == 1
+        assert acquisitions == (3 if retry else 2)
+        assert [call.method for call in session.calls] == (["POST", "GET"] if retry else ["POST"])
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("terminal", ["task.completed", "task.error", "task.stopped"])
+async def test_task_terminal_does_not_read_or_retry_past_the_result(terminal: str) -> None:
+    payload = {
+        "type": terminal,
+        "timestamp": "2026-09-24T00:00:00Z",
+        **(
+            {"result": {"completion": "done", "cache_hit": False}}
+            if terminal == "task.completed"
+            else {"reason": "requested"}
+            if terminal == "task.stopped"
+            else {
+                "data": {
+                    "title": "Failed",
+                    "status": 503,
+                    "detail": "synthetic",
+                    "error_code": "FAILED",
+                    "retryable": True,
+                }
+            }
+        ),
+    }
+    data = json.dumps(payload)
+    checksum = crc32(f"{terminal}:{data}".encode()) & 0xFFFFFFFF
+    block = f": crc={checksum:08x}\nid: 13:1\nevent: {terminal}\ndata: {data}\n\n".encode()
+    reply = _StreamReply([block, AssertionError("read past terminal")])
+    transport, session = await _with_stream_session([reply])
+    try:
+        assert [event.data.type async for event in transport.run_task("task-terminal", _task_request())] == [terminal]
+        assert reply.closed
+        assert len(session.calls) == 1
+    finally:
+        await transport.disconnect()
+
+
+@pytest.mark.unit
+async def test_task_cancellation_during_backoff_closes_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeping = asyncio.Event()
+
+    async def sleep(_delay: float) -> None:
+        sleeping.set()
+        await asyncio.Future()
+
+    retrying = transport_module.AsyncRetrying
+    monkeypatch.setattr(transport_module, "AsyncRetrying", lambda **kwargs: retrying(sleep=sleep, **kwargs))
+    reply = _StreamReply([_delta_block("14:1", "first"), TransportError("network_error", "lost")])
+    transport, session = await _with_stream_session([reply])
+    stream = transport.run_task("task-cancel", _task_request())
+    try:
+        assert (await anext(stream)).id == "14:1"
+        waiting = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(sleeping.wait(), timeout=1)
+        assert reply.closed
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert len(session.calls) == 1
+    finally:
+        await stream.aclose()
+        await transport.disconnect()
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "outer_initial",
+        "outer_resume",
+        "logical_503",
+        "logical_retryable",
+        "discovery_503",
+        "eof_empty",
+        "eof_delta",
+        "finite_integrity",
+    ],
+)
+async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercises the native HPKE adapter
+    monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """The native adapter maps actual wire failures into bounded task recovery."""
+    pair = generate_key_pair()
+    recipient = b"recovery-key"
+    server = Server(pair.private_key, recipient)
+    ca = trustme.CA()
+    server_ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ca.issue_cert("localhost").configure_cert(server_ssl)
+    client_ssl = ssl.create_default_context()
+    ca.configure_trust(client_ssl)
+    monkeypatch.setattr(transport_module, "make_connector", lambda: aiohttp.TCPConnector(ssl=client_ssl))
+    monkeypatch.setattr(transport_module, "PlatformTokenProvider", lambda *_args: _HeldToken())
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    calls: list[tuple[str, str, dict[str, str], bytes]] = []
+    discoveries = 0
+
+    async def endpoint(request: web.Request) -> web.Response:  # noqa: PLR0912 - explicit wire fault cases
+        nonlocal discoveries
+        if request.method == "GET":
+            discoveries += 1
+            if fault == "discovery_503" and discoveries == 1:
+                return web.Response(status=503)
+            return web.Response(body=encode_key_record(recipient, server.public_key, 60), content_type=KEY_MEDIA_TYPE)
+        raw = await request.read()
+        length = server.stream_start_length(raw)
+        assert length is not None
+        opened = server.preparse_stream(raw[:length]).authenticate(_STUB_TOKEN.psk).admit(accepted=True)
+        try:
+            offset, body = length, bytearray()
+            while offset < len(raw):
+                consumed, record = opened.feed(raw, offset)
+                assert consumed > 0
+                offset += consumed
+                if record is not None and record[0] == "data":
+                    body.extend(record[1])
+            right = opened.finish_eof()
+            try:
+                head = opened.head
+                calls.append((head.method.value, head.path, {h.name: h.value for h in head.headers}, bytes(body)))
+                step = len(calls)
+                if (fault == "outer_initial" and step == 1) or (fault == "outer_resume" and step == 2):
+                    return web.Response(status=503)
+                if step == 1 and fault in {"logical_503", "logical_retryable", "finite_integrity"}:
+                    status = 418 if fault == "logical_retryable" else 503
+                    problem = json.dumps(
+                        {
+                            "title": "Busy",
+                            "status": status,
+                            "detail": "synthetic",
+                            "error_code": "BUSY",
+                            "retryable": True,
+                        }
+                    ).encode()
+                    envelope = right.protect_response(Response(status, (), problem))
+                    if fault == "finite_integrity":
+                        envelope = envelope[:-1] + bytes([envelope[-1] ^ 1])
+                    return web.Response(body=envelope, content_type=RESPONSE_MEDIA_TYPE)
+                sealer, start = right.into_sealer(200, (Header("content-type", "text/event-stream"),))
+                try:
+                    wire = bytearray(start)
+                    if step == 1 and fault in {"outer_resume", "eof_empty", "eof_delta"}:
+                        if fault != "eof_empty":
+                            wire.extend(sealer.seal_sse_block(_delta_block("3:1", "first")))
+                    else:
+                        wire.extend(sealer.seal_sse_block(_completed_block("3:2")))
+                    if not (fault == "outer_resume" and step == 1):
+                        wire.extend(sealer.finish())
+                    return web.Response(body=bytes(wire), content_type=RESPONSE_MEDIA_TYPE)
+                finally:
+                    sealer.close()
+            finally:
+                right.close()
+        finally:
+            opened.close()
+
+    peer_errors: list[Exception] = []
+
+    async def checked_endpoint(request: web.Request) -> web.Response:
+        try:
+            return await endpoint(request)
+        except Exception as error:
+            # aiohttp turns handler exceptions into 500s that the SDK can recover.
+            peer_errors.append(error)
+            raise
+
+    app = web.Application()
+    app.router.add_route("*", "/http-bridge/v1/hpke", checked_endpoint)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_ssl)
+    await site.start()
+    config = DualeAIConfig(endpoint=f"https://localhost:{runner.addresses[0][1]}", token=_TOKEN)
+    client = CloudEventsClient(config)
+    delivered: list[str] = []
+    try:
+        await client.connect()
+        if fault == "finite_integrity":
+            with pytest.raises(DualeAIConnectionError) as error:
+                await client.run_task(task_id="task-native", request=_task_request())
+            assert error.value.context.error_code == "authentication_failed"
+            assert error.value.problem_details is None
+            assert error.value.context.retry_attempt == 0
+        else:
+            result = await client.run_task(
+                task_id="task-native",
+                request=_task_request(),
+                delta_callback=lambda delta: delivered.append(delta.delta),
+            )
+            assert result.type == "task.completed"
+            assert result.result.completion == "done"
+    finally:
+        await client.disconnect()
+        await runner.cleanup()
+        server.close()
+    assert not peer_errors, f"Local HPKE peer failed: {peer_errors!r}"
+    expected = {
+        "outer_resume": ["POST", "GET", "GET"],
+        "eof_delta": ["POST", "GET"],
+        "eof_empty": ["POST", "GET"],
+        "discovery_503": ["POST"],
+        "finite_integrity": ["POST"],
+    }.get(fault, ["POST", "POST"])
+    assert [call[0] for call in calls] == expected
+    assert discoveries == (2 if fault == "discovery_503" else 1)
+    assert all(call[1] == "/v1/hpke/tasks/task-native" for call in calls)
+    for method, _path, headers, body in calls[1:]:
+        assert body == (b"" if method == "GET" else calls[0][3])
+        assert headers.get("last-event-id") == ("3:1" if fault in {"outer_resume", "eof_delta"} else None)
+    assert delivered == (["first"] if fault in {"outer_resume", "eof_delta"} else [])
 
 
 @pytest.mark.integration

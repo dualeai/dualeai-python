@@ -8,6 +8,7 @@ Presigned object-store uploads are separate. Transport behavior is covered by
 
 import asyncio
 import json
+import ssl
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
@@ -30,12 +31,16 @@ from dualeai.constants import HTTPDefaults
 from dualeai.events.sse_parser import SSEChecksumError, SSEParseError, parse_sse_stream
 from dualeai.events.transport import BridgeTaskRequest
 from dualeai.exceptions import ConfigurationError
+from dualeai.messages import ErrorContext
 from dualeai.models.bridge import (
     AgentDeregistrationMessage,
     AgentHeartbeatMessage,
     AgentHeartbeatResponse,
     AgentRegistrationMessage,
     BridgeSSEEvent,
+    BridgeTaskCompletedResponse,
+    BridgeTaskErrorResponse,
+    BridgeTaskStoppedResponse,
     BridgeToolResultsRequest,
 )
 from dualeai.models.library import (
@@ -111,18 +116,46 @@ def _resolve_retry_method(
     *,
     stream_established: bool,
 ) -> tuple[str, Mapping[str, object] | None]:
-    """Resume an accepted Task with read-only GET; replay its ID before START."""
+    """Resume with GET after this operation's authenticated SSE 200 START.
+
+    An inherited Tool cursor does not establish the Tool Results POST; before
+    its own START, retry the original method and body with the same Task ID.
+    `test_tool_result_retry_uses_its_own_start_not_inherited_cursor` covers this.
+    """
     if stream_established and method == "POST":
         return "GET", None
     return method, json_data
 
 
 class HTTPTransportError(Exception):
-    """Base error for protected API operations."""
+    """Base error for protected API operations.
 
-    def __init__(self, message: str, *, problem_details: ProblemDetails | None = None) -> None:
+    `status_code` is the received HTTP status, independent of the optional
+    authenticated `problem_details.status`. `code` can describe a local or HPKE
+    failure even when no ProblemDetails body exists.
+
+    On final stream failure, `_stream_request` attaches `context` with the Task
+    ID, a zero-based `retry_attempt` (0 through 4), and the known HTTP status,
+    selected logical method, and last checked event ID in `metadata`. Selection
+    does not prove that the request was sent: credential renewal can fail first.
+    The client supplies `context.operation` during translation. Other operations
+    can leave `context` unset. `test_task_exhaustion_reports_the_last_failure`
+    checks the final stream diagnostics.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        problem_details: ProblemDetails | None = None,
+        status_code: int | None = None,
+        code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.problem_details = problem_details
+        self.status_code = status_code
+        self.code = code
+        self.context: ErrorContext | None = None
 
 
 class HTTPTransportConnectionError(HTTPTransportError):
@@ -157,14 +190,14 @@ def _check_status(status: int, body: bytes, *, path: str) -> None:
     if HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
         return
     if status < HTTPStatus.BAD_REQUEST:
-        raise HTTPTransportConnectionError(f"Unexpected logical HTTP {status}: {path}")
+        raise HTTPTransportConnectionError(f"Unexpected logical HTTP {status}: {path}", status_code=status)
     problem = _problem_details(body)
     message = f"HTTP {status}: {path}"
     if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
-        raise HTTPTransportAuthError(message, problem_details=problem)
+        raise HTTPTransportAuthError(message, problem_details=problem, status_code=status)
     if status < HTTPStatus.INTERNAL_SERVER_ERROR:
-        raise HTTPTransportResponseError(message, problem_details=problem)
-    raise HTTPTransportConnectionError(message, problem_details=problem)
+        raise HTTPTransportResponseError(message, problem_details=problem, status_code=status)
+    raise HTTPTransportConnectionError(message, problem_details=problem, status_code=status)
 
 
 def _is_expired_lease(error: BaseException) -> bool:
@@ -179,12 +212,52 @@ def _is_expired_lease(error: BaseException) -> bool:
     return isinstance(error, TransportError) and error.code == "discovery_expired"
 
 
+def _transient_network_error(error: BaseException | None) -> bool:
+    """Separate connection loss from permanent TLS failures in network wrappers."""
+    if isinstance(error, (aiohttp.ClientConnectorCertificateError, aiohttp.ServerFingerprintMismatch)):
+        return False
+    if isinstance(error, aiohttp.ClientConnectorSSLError):
+        error = error.os_error
+    if isinstance(error, ssl.SSLError):
+        return isinstance(error, (ssl.SSLEOFError, ssl.SSLZeroReturnError))
+    return isinstance(
+        error,
+        (
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            ConnectionError,
+            # Python 3.10 has distinct timeout classes; 3.11 aliases them.
+            # Covered by test_task_asyncio_timeout_recovers_or_reports_final_context.
+            asyncio.TimeoutError,
+            TimeoutError,
+        ),
+    )
+
+
 def _retryable_stream_error(error: BaseException, *, stream_established: bool) -> bool:
-    """Retry pre-start discovery faults and interrupted Task streams."""
+    """Select HTTP 5xx, explicit retry hints, and typed interruptions for retry.
+
+    `HTTPTransport._stream_request` owns the shared attempt budget.
+    `test_task_retry_flag_and_http_status_are_independent` checks that a problem
+    body's status or false hint cannot override the received HTTP 5xx status.
+    """
+    if isinstance(error, (HTTPTransportError, TransportError)):
+        if error.status_code in range(HTTPStatus.INTERNAL_SERVER_ERROR, 600):
+            return True
+        if isinstance(error, HTTPTransportError):
+            if error.problem_details is not None and error.problem_details.retryable is True:
+                return True
+            if error.code == "stream_incomplete":
+                return True
+            return _transient_network_error(error.__cause__)
+        if error.code in {"network_error", "discovery_network"}:
+            # HPKEClientSession._open_stream can raise network_error without a
+            # cause when the request ends before its protected END.
+            return error.__cause__ is None or _transient_network_error(error.__cause__)
     return (
         isinstance(error, SSEChecksumError)
         or _is_expired_lease(error)
-        or (isinstance(error, TransportError) and error.code in {"network_error", "discovery_network"})
+        or _transient_network_error(error)
         or (stream_established and isinstance(error, ProtocolError) and error.code == "malformed_envelope")
     )
 
@@ -196,8 +269,8 @@ def _is_refused_credential(error: BaseException) -> bool:
     identifier it cannot resolve — revoked, or expired earlier than its stamped
     instant — ends the exchange at the outer HTTP layer with 400, so the client
     never sees a decrypted body to read a reason from. That status is the whole
-    signal, and `TransportError.status_code` is set only for an invalid outer
-    status.
+    signal. For `TransportError.code == "outer_status"`, `status_code` identifies
+    that outer response; discovery failures can also carry a status.
 
     IT IS NOT A CERTAIN SIGNAL, AND CANNOT BE MADE ONE. `hpke_http`'s FastAPI
     middleware answers a malformed envelope, an over-limit body and a recipient
@@ -228,7 +301,7 @@ def make_connector() -> aiohttp.TCPConnector:
 class HTTPTransport:
     """Protected Bridge and Library sessions with per-service discovery leases."""
 
-    _MAX_RETRIES = 5
+    _MAX_RETRIES = 5  # Total attempts, including the initial attempt; see _stream_request.
     _CONNECT_TIMEOUT = timedelta(seconds=5)
     _SOCK_READ_TIMEOUT = timedelta(minutes=1)
     _FINITE_TIMEOUT = timedelta(minutes=1)
@@ -394,9 +467,11 @@ class HTTPTransport:
                 if error.status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN)
                 else HTTPTransportConnectionError
             )
-            raise error_type(str(error), problem_details=error.problem_details) from error
-        except (aiohttp.ClientError, TimeoutError, ValueError) as error:
-            raise HTTPTransportConnectionError("Platform token issuance failed") from error
+            raise error_type(
+                str(error), problem_details=error.problem_details, status_code=error.status, code="platform_token_error"
+            ) from error
+        except (aiohttp.ClientError, ConnectionError, asyncio.TimeoutError, TimeoutError, ValueError) as error:
+            raise HTTPTransportConnectionError("Platform token issuance failed", code="platform_token_error") from error
 
     async def _close_idle_tunnels(self) -> None:
         """Close replaced clients after their last request or stream releases them.
@@ -748,9 +823,26 @@ class HTTPTransport:
         json_data: Mapping[str, object] | None = None,
         last_event_id: str | None = None,
     ) -> AsyncGenerator[BridgeSSEEvent, None]:
-        """Run or resume the Task stream with the service's stable-ID contract."""
+        """Run or resume the Task stream with the service's stable-ID contract.
+
+        Each invocation shares five total attempts across recoverable failures,
+        including credential renewal failures before a Task request is sent.
+        Progress does not reset the budget, and the count does not bound elapsed
+        time. Initial connection bootstrap is outside this loop.
+
+        `_resolve_retry_method` switches from replaying the same POST to GET
+        after this operation's authenticated SSE 200 START. Reconnect with the
+        last checked event ID when available. EOF without a Task terminal is
+        recoverable; completed, error, and stopped terminals end consumption.
+
+        `test_task_mixed_budget_counts_renewal_without_an_http_request` checks
+        the shared budget; `test_task_terminal_does_not_read_or_retry_past_the_result`
+        checks that a terminal ends recovery even when its problem is retryable.
+        """
         current_last_event_id = last_event_id
         stream_established = False
+        attempt_number = 1
+        effective_method = method
 
         def retry_after_failure(error: BaseException) -> bool:
             return _retryable_stream_error(error, stream_established=stream_established)
@@ -763,6 +855,7 @@ class HTTPTransport:
                 reraise=True,
             ):
                 with attempt:
+                    attempt_number = attempt.retry_state.attempt_number
                     effective_method, effective_body = _resolve_retry_method(
                         method, json_data, stream_established=stream_established
                     )
@@ -788,22 +881,69 @@ class HTTPTransport:
                             body = await response.read()
                             _check_status(response.status, body, path=path)
                             raise HTTPTransportStreamError(
-                                f"Task stream returned finite HTTP {response.status}: {path}"
+                                f"Task stream returned finite HTTP {response.status}: {path}",
+                                status_code=response.status,
                             )
                         if response.mode != "sse" or response.status != HTTPStatus.OK:
                             raise HTTPTransportStreamError(
-                                f"Task stream returned HTTP {response.status} in mode {response.mode}: {path}"
+                                f"Task stream returned HTTP {response.status} in mode {response.mode}: {path}",
+                                status_code=response.status,
                             )
                         stream_established = True
                         try:
                             async for event in parse_sse_stream(response.iter_sse()):
                                 current_last_event_id = event.id
                                 yield event
+                                if isinstance(
+                                    event.data,
+                                    (BridgeTaskCompletedResponse, BridgeTaskErrorResponse, BridgeTaskStoppedResponse),
+                                ):
+                                    return
                         except SSEChecksumError:
                             raise
                         except SSEParseError as error:
-                            raise HTTPTransportStreamError(f"SSE parse error: {error}") from error
-        except (TransportError, ProtocolError, StateError, aiohttp.ClientError, TimeoutError) as error:
-            raise HTTPTransportStreamError(f"Protected Task stream failed: {task_id}") from error
-        except SSEChecksumError as error:
-            raise HTTPTransportStreamError(f"Task stream checksum failed: {task_id}") from error
+                            raise HTTPTransportStreamError(
+                                f"SSE parse error: {error}", code="sse_parse_error"
+                            ) from error
+                        raise HTTPTransportStreamError(
+                            f"Task stream ended without a terminal event: {task_id}", code="stream_incomplete"
+                        )
+        except (
+            HTTPTransportError,
+            TransportError,
+            ProtocolError,
+            StateError,
+            aiohttp.ClientError,
+            ConnectionError,
+            asyncio.TimeoutError,
+            TimeoutError,
+            ssl.SSLError,
+            SSEChecksumError,
+        ) as error:
+            failure = (
+                error
+                if isinstance(error, HTTPTransportError)
+                else HTTPTransportStreamError(
+                    f"Protected Task stream failed: {task_id}",
+                    status_code=error.status_code if isinstance(error, TransportError) else None,
+                    code=error.code
+                    if isinstance(error, (TransportError, ProtocolError, StateError))
+                    else type(error).__name__,
+                )
+            )
+            metadata: dict[str, str | int | float | bool] = {"logical_method": effective_method}
+            if failure.status_code is not None:
+                metadata["http_status"] = failure.status_code
+            if current_last_event_id is not None:
+                metadata["last_event_id"] = current_last_event_id
+            failure.context = ErrorContext(
+                error_code=(failure.problem_details.error_code if failure.problem_details else None)
+                or failure.code
+                or type(failure).__name__,
+                task_id=task_id,
+                retry_attempt=attempt_number - 1,
+                metadata=metadata,
+            )
+            if failure is error:
+                raise
+            raise failure from error

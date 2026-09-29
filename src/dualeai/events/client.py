@@ -10,7 +10,7 @@ Client dispatch and error translation are covered by
 
 import types
 from collections.abc import AsyncIterator, Callable
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 import structlog
 from typing_extensions import Self
@@ -24,6 +24,7 @@ from dualeai.events.http_transport import (
 )
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
 from dualeai.exceptions import BusinessError, DualeAIAuthError, DualeAIConnectionError, DualeAIError
+from dualeai.messages import ErrorContext
 from dualeai.models.bridge import (
     AgentDeregistrationMessage,
     AgentHeartbeatMessage,
@@ -48,13 +49,17 @@ logger = structlog.get_logger(__name__)
 
 
 def _lift_problem_details(sdk_error: DualeAIError, cause: HTTPTransportError) -> DualeAIError:
-    """Carry the RFC 9457 ProblemDetails from a transport error onto the SDK error.
+    """Preserve transport ProblemDetails and optional stream context on the SDK error.
 
-    The bridge returns a typed ProblemDetails body on lifecycle and tool-result
-    failures; without this the wrapped SDK error would expose only an HTTP status
-    line and drop the ``error_code`` and retry hints.
+    ProblemDetails describes the authenticated service response. Stream context
+    also identifies local failures without a service body; it does not establish
+    a remote terminal outcome. ``_consume_terminal_stream`` labels the operation
+    as ``task_run``, ``task_continue``, or ``tool_results`` before translation.
+    ``test_task_error_context_identifies_the_operation`` checks those labels.
     """
     sdk_error.problem_details = cause.problem_details
+    if cause.context is not None:
+        sdk_error.context = cause.context
     return sdk_error
 
 
@@ -64,7 +69,7 @@ def _raise_translated(prefix: str, error: HTTPTransportError) -> NoReturn:
     Authentication failures become ``DualeAIAuthError``; other client request
     rejections become ``BusinessError``; transport and server failures become
     ``DualeAIConnectionError``. Each carries the platform ProblemDetails when
-    one was returned.
+    one was returned, plus stream context when the transport supplied it.
     """
     if isinstance(error, HTTPTransportAuthError):
         raise _lift_problem_details(DualeAIAuthError(f"{prefix}: {error}"), error) from error
@@ -273,7 +278,7 @@ class CloudEventsClient:
             task_id=task_id,
             request_type=request.type,
         )
-        operation = "Task continuation" if request.type == "continue" else "Task run"
+        operation = "task_continue" if request.type == "continue" else "task_run"
         return await self._consume_terminal_stream(
             task_id=task_id,
             stream=transport.run_task(task_id, request),
@@ -288,12 +293,17 @@ class CloudEventsClient:
         *,
         task_id: str,
         stream: AsyncIterator[BridgeSSEEvent],
-        operation: str,
+        operation: Literal["task_run", "task_continue", "tool_results"],
         delta_callback: DeltaCallback | None,
         reset_callback: ResetCallback | None,
         tool_use_callback: ToolUseCallback | None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Consume one bridge SSE stream through the shared terminal contract."""
+        operation_label = {
+            "task_run": "Task run",
+            "task_continue": "Task continuation",
+            "tool_results": "Tool results submission",
+        }[operation]
         try:
             try:
                 async for event in stream:
@@ -312,8 +322,17 @@ class CloudEventsClient:
                 if close_stream is not None:
                     await close_stream()
         except HTTPTransportError as error:
-            _raise_translated(f"{operation} failed", error)
-        raise DualeAIConnectionError(f"{operation} stream for task {task_id} ended without a terminal event")
+            context = error.context or ErrorContext(
+                error_code=(error.problem_details.error_code if error.problem_details else None)
+                or error.code
+                or type(error).__name__,
+            )
+            error.context = context.model_copy(update={"operation": operation, "task_id": task_id})
+            _raise_translated(f"{operation_label} failed", error)
+        raise DualeAIConnectionError(
+            f"{operation_label} stream for task {task_id} ended without a terminal event",
+            context=ErrorContext(error_code="stream_incomplete", operation=operation, task_id=task_id),
+        )
 
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
         """Ask the platform to stop a running task."""
@@ -348,7 +367,7 @@ class CloudEventsClient:
                 request=request,
                 last_event_id=last_event_id,
             ),
-            operation="Tool results submission",
+            operation="tool_results",
             delta_callback=delta_callback,
             reset_callback=reset_callback,
             tool_use_callback=tool_use_callback,
