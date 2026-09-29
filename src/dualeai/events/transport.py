@@ -84,9 +84,9 @@ class HTTPTransportProtocol(Protocol):
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit a root create or child continuation and stream that task.
 
-        Logical POST /http-bridge/v1/hpke/tasks/{task_id} inside HPKE. The typed
+        Encrypted POST /v1/hpke/tasks/{task_id}. The typed
         body's discriminator selects creation or continuation. After a protected
-        SSE response starts, the retry loop uses logical GET on the same path.
+        SSE response starts, the retry loop uses encrypted GET on the same path.
 
         Args:
             task_id: Client-owned task ID in the URL. Root callers may select
@@ -112,7 +112,7 @@ class HTTPTransportProtocol(Protocol):
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit tool results and resume the same public task stream.
 
-        Logical POST /http-bridge/v1/hpke/tasks/{task_id} inside HPKE with
+        Encrypted POST /v1/hpke/tasks/{task_id} with
         type=tool_results. The bridge publishes an internal tool-result
         continuation beneath the URL task and returns that task's existing
         stream. ``last_event_id`` is the opaque SSE cursor for the triggering
@@ -170,7 +170,7 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentUploadResponse":
         """Request presigned URLs for document upload.
 
-        ``POST /libraries/v1/hpke/tenants/{tenant_id}/document-uploads`` runs inside
+        ``POST /v1/hpke/tenants/{tenant_id}/document-uploads`` runs inside
         the HPKE tunnel authenticated by the issued platform token. The body
         contains only ``size_bytes``.
 
@@ -191,7 +191,7 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentCreateResponse":
         """Create a queued Library document after all parts uploaded.
 
-        ``POST /libraries/v1/hpke/tenants/{tenant_id}/{library_id}/documents`` runs
+        ``POST /v1/hpke/tenants/{tenant_id}/{library_id}/documents`` runs
         inside the HPKE tunnel authenticated by the issued platform token. The body
         binds a temporary upload session to a stable Library id.
 

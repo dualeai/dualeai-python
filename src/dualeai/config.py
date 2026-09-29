@@ -48,12 +48,13 @@ class ObservabilityConfig(BaseModel):
 class DualeAIConfig(BaseSettings):
     """Configuration loaded from arguments, environment variables, and ``.env``.
 
-    Task operations are logical requests inside HPKE. The outer discovery GET
-    and encrypted POST use the fixed /http-bridge/v1/hpke endpoint:
-    - POST /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (create task, type=create)
-    - POST /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (tool results, type=tool_results)
-    - POST /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (continue, type=continue)
-    - GET /http-bridge/v1/hpke/tasks/{task_id} → SSE stream (reconnect)
+    Task operations are encrypted, including their method and path. Discovery
+    GET and encrypted POST requests use /http-bridge/v1/hpke. The encrypted
+    operations use these paths without the /http-bridge service name:
+    - POST /v1/hpke/tasks/{task_id} → SSE stream (create task, type=create)
+    - POST /v1/hpke/tasks/{task_id} → SSE stream (tool results, type=tool_results)
+    - POST /v1/hpke/tasks/{task_id} → SSE stream (continue, type=continue)
+    - GET /v1/hpke/tasks/{task_id} → SSE stream (reconnect)
 
     ``tenant_id`` and ``agent_id`` are not interchangeable with the API token:
     Library logical routes need ``tenant_id`` and hosted-tool lifecycle calls

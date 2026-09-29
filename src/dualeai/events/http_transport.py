@@ -61,8 +61,26 @@ from dualeai.observability import inject_trace_context
 
 logger = get_logger(__name__)
 _LibraryModelT = TypeVar("_LibraryModelT", bound=BaseModel)
-_BRIDGE_PATH = "/http-bridge/v1/hpke"
-_LIBRARY_PATH = "/libraries/v1/hpke"
+# Public HTTP paths, appended to the configured Gateway URL.
+# GET fetches the service's public encryption key; POST sends an encrypted message.
+_BRIDGE_ENDPOINT_PATH = "/http-bridge/v1/hpke"
+_LIBRARY_ENDPOINT_PATH = "/libraries/v1/hpke"
+
+_OPERATION_PREFIX = "/v1/hpke"
+"""Prefix for the request path inside the encrypted message.
+
+Task request:
+- HTTP request sent by the SDK: POST /http-bridge/v1/hpke.
+- Request inside the encrypted message: POST /v1/hpke/tasks/{task_id}.
+
+Library list request:
+- HTTP request sent by the SDK: POST /libraries/v1/hpke.
+- Request inside the encrypted message: GET /v1/hpke/tenants/{tenant_id}.
+
+Each service decrypts the message, then runs the request it contains.
+`test_real_v3_tls_boundary_reuses_discovery_per_service` checks the HTTP paths
+and the request paths read from the decrypted messages.
+"""
 
 
 def _endpoint_origin(endpoint: str) -> str:
@@ -81,10 +99,10 @@ def _endpoint_origin(endpoint: str) -> str:
     return f"https://{parts.netloc}"
 
 
-def _library_gateway_path(tenant_id: str, *segments: str) -> str:
-    """Build the target Library route with escaped path identifiers."""
+def _library_path(tenant_id: str, *segments: str) -> str:
+    """Build the encrypted Library operation path with escaped identifiers."""
     values = ["tenants", tenant_id, *segments]
-    return _LIBRARY_PATH + "/" + "/".join(quote(value, safe="") for value in values)
+    return _OPERATION_PREFIX + "/" + "/".join(quote(value, safe="") for value in values)
 
 
 def _resolve_retry_method(
@@ -302,10 +320,10 @@ class HTTPTransport:
             # HPKE key, which has nothing to do with our credential, so keeping it
             # on this stack means a rotation costs no re-discovery.
             self._bridge_source = await resources.enter_async_context(
-                DiscoveredEndpoint(f"{self._endpoint}{_BRIDGE_PATH}", timeout=timeout, **pooled)  # ty: ignore[invalid-argument-type]
+                DiscoveredEndpoint(f"{self._endpoint}{_BRIDGE_ENDPOINT_PATH}", timeout=timeout, **pooled)  # ty: ignore[invalid-argument-type]
             )
             self._library_source = await resources.enter_async_context(
-                DiscoveredEndpoint(f"{self._endpoint}{_LIBRARY_PATH}", timeout=timeout, **pooled)  # ty: ignore[invalid-argument-type]
+                DiscoveredEndpoint(f"{self._endpoint}{_LIBRARY_ENDPOINT_PATH}", timeout=timeout, **pooled)  # ty: ignore[invalid-argument-type]
             )
         except BaseException:
             await resources.aclose()
@@ -559,7 +577,7 @@ class HTTPTransport:
     def run_task(self, task_id: str, request: BridgeTaskRequest) -> AsyncGenerator[BridgeSSEEvent, None]:
         return self._stream_request(
             method="POST",
-            path=f"{_BRIDGE_PATH}/tasks/{quote(task_id, safe='')}",
+            path=f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}",
             task_id=task_id,
             json_data=dump_wire_model(request),
         )
@@ -567,7 +585,7 @@ class HTTPTransport:
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
         return await self._request_model(
             "POST",
-            f"{_BRIDGE_PATH}/tasks/{quote(task_id, safe='')}/stop",
+            f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}/stop",
             TaskStopAccepted,
             request=request,
             schema_error="Task stop response did not match its schema",
@@ -582,7 +600,7 @@ class HTTPTransport:
     ) -> AsyncGenerator[BridgeSSEEvent, None]:
         return self._stream_request(
             method="POST",
-            path=f"{_BRIDGE_PATH}/tasks/{quote(task_id, safe='')}",
+            path=f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}",
             task_id=task_id,
             json_data=dump_wire_model(request),
             last_event_id=last_event_id,
@@ -598,10 +616,10 @@ class HTTPTransport:
             raise HTTPTransportConnectionError(f"Bridge accepted response contained an unexpected body: POST {path}")
 
     async def register_agent_manifest(self, request: AgentRegistrationMessage) -> None:
-        await self._post_bridge_accepted(f"{_BRIDGE_PATH}/agent/registration", request)
+        await self._post_bridge_accepted(f"{_OPERATION_PREFIX}/agent/registration", request)
 
     async def send_agent_heartbeat(self, request: AgentHeartbeatMessage) -> AgentHeartbeatResponse:
-        response = await self._request_finite("POST", f"{_BRIDGE_PATH}/agent/heartbeat", request=request)
+        response = await self._request_finite("POST", f"{_OPERATION_PREFIX}/agent/heartbeat", request=request)
         if response.status != HTTPStatus.ACCEPTED:
             raise HTTPTransportConnectionError(f"Bridge heartbeat response returned HTTP {response.status}")
         try:
@@ -610,12 +628,12 @@ class HTTPTransport:
             raise HTTPTransportConnectionError("Heartbeat response did not match schema") from error
 
     async def deregister_agent_process(self, request: AgentDeregistrationMessage) -> None:
-        await self._post_bridge_accepted(f"{_BRIDGE_PATH}/agent/deregistration", request)
+        await self._post_bridge_accepted(f"{_OPERATION_PREFIX}/agent/deregistration", request)
 
     async def create_library(self, request: LibraryCreateRequest) -> LibraryWithRevision:
         return await self._request_model(
             "POST",
-            _library_gateway_path(self._require_library_tenant_id()),
+            _library_path(self._require_library_tenant_id()),
             LibraryWithRevision,
             request=request,
             library=True,
@@ -625,14 +643,14 @@ class HTTPTransport:
     async def list_libraries(self) -> LibraryListResponse:
         return await self._request_model(
             "GET",
-            _library_gateway_path(self._require_library_tenant_id()),
+            _library_path(self._require_library_tenant_id()),
             LibraryListResponse,
             library=True,
             schema_error="Library list response did not match schema",
         )
 
     async def get_library(self, request: LibraryGetRequest) -> LibraryWithRevision:
-        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id))
+        path = _library_path(self._require_library_tenant_id(), str(request.library_id))
         return await self._request_model(
             "GET",
             path,
@@ -642,7 +660,7 @@ class HTTPTransport:
         )
 
     async def update_library(self, request: LibraryUpdateRequest) -> LibraryWithRevision:
-        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id))
+        path = _library_path(self._require_library_tenant_id(), str(request.library_id))
         return await self._request_model(
             "PATCH",
             path,
@@ -663,14 +681,14 @@ class HTTPTransport:
 
     async def delete_library(self, request: LibraryDeleteRequest) -> None:
         await self._request_no_content(
-            "DELETE", _library_gateway_path(self._require_library_tenant_id(), str(request.library_id))
+            "DELETE", _library_path(self._require_library_tenant_id(), str(request.library_id))
         )
 
     async def list_library_documents(self, request: LibraryDocumentListRequest) -> LibraryDocumentPage:
         params = {"limit": str(request.limit)}
         if request.cursor is not None:
             params["cursor"] = request.cursor
-        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id), "documents")
+        path = _library_path(self._require_library_tenant_id(), str(request.library_id), "documents")
         return await self._request_model(
             "GET",
             path,
@@ -681,7 +699,7 @@ class HTTPTransport:
         )
 
     async def get_library_document(self, request: LibraryDocumentGetRequest) -> PublicIndexedDocument:
-        path = _library_gateway_path(
+        path = _library_path(
             self._require_library_tenant_id(), str(request.library_id), "documents", str(request.document_id)
         )
         return await self._request_model(
@@ -693,13 +711,13 @@ class HTTPTransport:
         )
 
     async def delete_library_document(self, request: LibraryDocumentDeleteRequest) -> None:
-        path = _library_gateway_path(
+        path = _library_path(
             self._require_library_tenant_id(), str(request.library_id), "documents", str(request.document_id)
         )
         await self._request_no_content("DELETE", path)
 
     async def create_document_upload(self, request: LibraryDocumentUploadRequest) -> LibraryDocumentUploadResponse:
-        path = _library_gateway_path(self._require_library_tenant_id(), "document-uploads")
+        path = _library_path(self._require_library_tenant_id(), "document-uploads")
         return await self._request_model(
             "POST",
             path,
@@ -712,7 +730,7 @@ class HTTPTransport:
     async def create_library_document(
         self, request: LibraryDocumentCreateOperationRequest
     ) -> LibraryDocumentCreateResponse:
-        path = _library_gateway_path(self._require_library_tenant_id(), str(request.library_id), "documents")
+        path = _library_path(self._require_library_tenant_id(), str(request.library_id), "documents")
         return await self._request_model(
             "POST",
             path,

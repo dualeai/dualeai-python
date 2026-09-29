@@ -75,7 +75,7 @@ _TENANT = "tenant-test"
 _LIBRARY_ID = "018f35a8-2e90-7f2c-a6bb-9426f9c1f501"
 _DOCUMENT_ID = "018f35a8-2e90-7f2c-a6bb-9426f9c1f502"
 _UPLOAD_ID = "018f35a8-2e90-7f2c-a6bb-9426f9c1f503"
-_BASE = f"https://api.example.test/libraries/v1/hpke/tenants/{_TENANT}"
+_BASE = f"https://api.example.test/v1/hpke/tenants/{_TENANT}"
 _DATE = "2026-06-12T10:00:00Z"
 
 
@@ -302,16 +302,16 @@ async def test_public_library_routes_use_platform_token_without_api_token_header
     assert document.document_id == document_id
     assert receipt.location == f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents/{_DOCUMENT_ID}"
     assert [(call.method, urlsplit(call.url).path) for call in session.calls] == [
-        ("POST", f"/libraries/v1/hpke/tenants/{_TENANT}"),
-        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}"),
-        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}"),
-        ("PATCH", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}"),
-        ("DELETE", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}"),
-        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents"),
-        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents/{_DOCUMENT_ID}"),
-        ("DELETE", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents/{_DOCUMENT_ID}"),
-        ("POST", f"/libraries/v1/hpke/tenants/{_TENANT}/document-uploads"),
-        ("POST", f"/libraries/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents"),
+        ("POST", f"/v1/hpke/tenants/{_TENANT}"),
+        ("GET", f"/v1/hpke/tenants/{_TENANT}"),
+        ("GET", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}"),
+        ("PATCH", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}"),
+        ("DELETE", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}"),
+        ("GET", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents"),
+        ("GET", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents/{_DOCUMENT_ID}"),
+        ("DELETE", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents/{_DOCUMENT_ID}"),
+        ("POST", f"/v1/hpke/tenants/{_TENANT}/document-uploads"),
+        ("POST", f"/v1/hpke/tenants/{_TENANT}/{_LIBRARY_ID}/documents"),
     ]
     assert all("authorization" not in {name.lower() for name in call.headers} for call in session.calls)
     assert session.calls[3].body == {"tags": {}}
@@ -434,10 +434,10 @@ async def test_agent_lifecycle_and_task_stop_use_protected_finite_routes() -> No
     accepted = await transport.stop_task("task-stop-me-123456", TaskStopRequest(reason="Synthetic stop"))
     assert accepted.task_id == "task-stop-me-123456"
     assert [urlsplit(call.url).path for call in session.calls] == [
-        "/http-bridge/v1/hpke/agent/registration",
-        "/http-bridge/v1/hpke/agent/heartbeat",
-        "/http-bridge/v1/hpke/agent/deregistration",
-        "/http-bridge/v1/hpke/tasks/task-stop-me-123456/stop",
+        "/v1/hpke/agent/registration",
+        "/v1/hpke/agent/heartbeat",
+        "/v1/hpke/agent/deregistration",
+        "/v1/hpke/tasks/task-stop-me-123456/stop",
     ]
     assert all(call.method == "POST" and "Authorization" not in call.headers for call in session.calls)
     registration_body = session.calls[0].body
@@ -578,7 +578,7 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
     assert [event.data.type async for event in transport.run_task("task-wire-fields", request)] == ["task.completed"]
 
     [call] = session.calls
-    assert (call.method, urlsplit(call.url).path) == ("POST", "/http-bridge/v1/hpke/tasks/task-wire-fields")
+    assert (call.method, urlsplit(call.url).path) == ("POST", "/v1/hpke/tasks/task-wire-fields")
     body = call.body
     assert isinstance(body, dict)
     assert body["response_stream"] is True
@@ -619,8 +619,8 @@ async def test_continuation_and_tool_results_send_literal_child_bodies_and_curso
     ] == ["task.completed"]
 
     assert [(call.method, urlsplit(call.url).path) for call in session.calls] == [
-        ("POST", "/http-bridge/v1/hpke/tasks/child-task"),
-        ("POST", "/http-bridge/v1/hpke/tasks/child-task"),
+        ("POST", "/v1/hpke/tasks/child-task"),
+        ("POST", "/v1/hpke/tasks/child-task"),
     ]
     assert session.calls[0].body == {
         "type": "continue",
@@ -700,7 +700,7 @@ async def test_task_resumes_after_nonterminal_event_and_closes_each_stream(monke
     assert result.type == "task.completed"
     assert deltas == ["first"]
     assert [call.method for call in session.calls] == ["POST", "GET"]
-    assert all(urlsplit(call.url).path == "/http-bridge/v1/hpke/tasks/task-1" for call in session.calls)
+    assert all(urlsplit(call.url).path == "/v1/hpke/tasks/task-1" for call in session.calls)
     assert session.calls[1].headers["Last-Event-ID"] == "5:1"
     assert "Authorization" not in session.calls[0].headers
     assert session.calls[0].headers["Accept"] == "text/event-stream"
@@ -812,10 +812,9 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
 ) -> None:
     """Real adapter reuses each service key, with platform-token auth and live SSE.
 
-    Two contracts in one exchange because they need the same fixture. Discovery
-    is leased per service, so each key is fetched once; the TCP pool is NOT per
-    service — issuance and both tunnels share the single connector
-    `make_connector` returns, so one set of sockets serves this origin.
+    The network endpoints include each service name; encrypted operations use
+    /v1/hpke paths without that name. Discovery is leased per service, while
+    issuance and both tunnels share the connector `make_connector` returns.
     """
     keypair = generate_key_pair()
     recipient_id = b"synthetic-key-1"
@@ -868,7 +867,7 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
                 observed.append(
                     (logical.method.value, logical.path, {h.name: h.value for h in logical.headers}, bytes(clear_body))
                 )
-                if logical.path.startswith("/libraries/"):
+                if request.path == "/libraries/v1/hpke":
                     body = json.dumps({"libraries": []}).encode()
                     envelope = response_right.protect_response(
                         Response(200, (Header("content-type", "application/json"),), body)
@@ -989,10 +988,10 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
         ("POST", "/http-bridge/v1/hpke"),
     ]
     assert [item[:2] for item in observed] == [
-        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}"),
-        ("GET", f"/libraries/v1/hpke/tenants/{_TENANT}"),
-        ("POST", "/http-bridge/v1/hpke/tasks/task-1"),
-        ("POST", "/http-bridge/v1/hpke/tasks/task-stop-me-123456/stop"),
+        ("GET", f"/v1/hpke/tenants/{_TENANT}"),
+        ("GET", f"/v1/hpke/tenants/{_TENANT}"),
+        ("POST", "/v1/hpke/tasks/task-1"),
+        ("POST", "/v1/hpke/tasks/task-stop-me-123456/stop"),
     ]
     assert all("authorization" not in headers for _, _, headers, _ in observed)
     assert observed[2][2]["accept"] == "text/event-stream"
@@ -1260,7 +1259,7 @@ async def lifetime_endpoint(  # noqa: PLR0915  # One loopback TLS owner includes
                 offset += consumed
             right = opened.finish_eof()
             try:
-                if opened.head.path.startswith("/libraries/"):
+                if request.path == "/libraries/v1/hpke":
                     pending, harness.finite = harness.finite, None
                     if pending is not None:
                         pending.started.set()
