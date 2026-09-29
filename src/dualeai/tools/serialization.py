@@ -1,7 +1,8 @@
-"""Normalize a tool return value into the bridge result shape (pure).
+"""Validate and normalize a tool return value into the bridge result shape (pure).
 
-A ``str``, mapping, or Pydantic model passes through; any other JSON value is wrapped
-as ``{"result": ...}``; a non-serializable return raises with the offending type named.
+A ``str`` passes through; a mapping and a Pydantic model become the dict the bridge
+carries; any other JSON value is wrapped as ``{"result": ...}``. A value the shape
+cannot carry raises ``TypeError``.
 """
 
 from __future__ import annotations
@@ -19,27 +20,37 @@ from dualeai.tools._json import json_schema_adapter
 def tool_success_output(result: object) -> dict[str, JsonValue | None] | str:
     """Validate and normalize a tool return value against the bridge result shape.
 
-    A ``str``, mapping, or Pydantic model passes through directly. Any other
-    JSON-serializable return (``None``, scalar, list, dataclass) is wrapped as
-    ``{"result": value}`` so a tool need not hand-wrap every return. A non-serializable
-    return raises with the offending type named.
+    A ``str`` passes through. A mapping becomes a plain dict; a Pydantic model
+    becomes its wire dump, which uses field aliases and omits what was never set.
+    Any other JSON value (``None``, scalar, list, dataclass) is wrapped as
+    ``{"result": value}`` so a tool need not hand-wrap every return. Everything but
+    the ``str`` is checked against the bridge's JSON shape, and a value it cannot
+    carry raises ``TypeError`` naming the type that reached the check — a dataclass
+    is converted to a mapping first, so it is reported as ``dict``.
     """
     if isinstance(result, BaseModel):
-        # dump_wire_model already validates through the identical JSON-object
-        # adapter; a second walk here could never fail.
-        return dump_wire_model(result)
-    if dataclasses.is_dataclass(result) and not isinstance(result, type):
-        result = dataclasses.asdict(result)
-    if isinstance(result, str):
-        return result
-    # A mapping validates as-is; any other JSON value (None, scalar, list) is wrapped
-    # as {"result": ...}. Both paths share one JSON-serializability check so a
-    # non-serializable nested value raises the same offending-type error.
-    candidate = dict(result) if isinstance(result, Mapping) else {"result": result}
+        # A CUSTOMER'S MODEL IS NOT A GENERATED ONE, so its dump is checked like
+        # every other branch. `dump_wire_model` is one `model_dump` and nothing
+        # more, and the safe-integer bound its docstring relies on is the
+        # generator's — a tool author writes a plain `int` field, which carries no
+        # bound at all, so a value like 2**53 + 1 reaches the check below on this
+        # branch exactly as it does on the mapping branch.
+        candidate = dump_wire_model(result)
+    else:
+        if dataclasses.is_dataclass(result) and not isinstance(result, type):
+            result = dataclasses.asdict(result)
+        if isinstance(result, str):
+            return result
+        # A mapping validates as-is; any other JSON value (None, scalar, list) is
+        # wrapped as {"result": ...}.
+        candidate = dict(result) if isinstance(result, Mapping) else {"result": result}
+    # One JSON-shape check for every branch, so a nested value the bridge cannot
+    # carry raises the same offending-type error whatever the tool returned.
     try:
         return json_schema_adapter.validate_python(candidate)
     except (ValidationError, ValueError, TypeError) as exc:
         raise TypeError(
-            f"Tool returned {type(result).__name__}; a tool result must be JSON-serializable "
-            '(a str, a mapping, a Pydantic model, or a value wrappable as {"result": ...}).'
+            f"Tool returned {type(result).__name__}; a tool result must be a str, a mapping, a "
+            'Pydantic model, or a value wrappable as {"result": ...}, holding only JSON values '
+            "whose numbers are within +/-(2**53 - 1)."
         ) from exc

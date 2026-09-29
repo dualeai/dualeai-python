@@ -1699,8 +1699,9 @@ async def test_tool_use_posts_error_for_invalid_output(
     assert isinstance(result, BridgeToolResultError)
     assert result.tool_call_id == tool_call_id
     assert result.message == (
-        f"builtins.TypeError: Tool returned {expected_type_name}; a tool result must be JSON-serializable "
-        '(a str, a mapping, a Pydantic model, or a value wrappable as {"result": ...}).'
+        f"builtins.TypeError: Tool returned {expected_type_name}; a tool result must be a str, a mapping, "
+        'a Pydantic model, or a value wrappable as {"result": ...}, holding only JSON values whose numbers '
+        "are within +/-(2**53 - 1)."
     )
 
 

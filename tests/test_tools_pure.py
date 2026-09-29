@@ -33,6 +33,12 @@ class AliasedToolResult(BaseModel):
     optional: str | None = None
 
 
+class UnboundedToolResult(BaseModel):
+    """A tool author's own model: a plain ``int`` field, with no generated bound."""
+
+    rows: int
+
+
 _UnboundParameter = TypeVar("_UnboundParameter")
 
 
@@ -201,6 +207,26 @@ def test_tool_success_output_preserves_model_aliases_and_absent_fields() -> None
 
 
 @pytest.mark.unit
+def test_tool_success_output_holds_a_returned_model_to_the_same_bound_as_a_mapping() -> None:
+    """A model is a tool's return value like any other, not a trusted one.
+
+    The bridge carries JSON, so the number it can carry stops at the safe-integer
+    bound `JsonValue` names. Nothing about a value's arriving inside a Pydantic
+    model widens that: a tool author's field is a plain `int`, and only a
+    generated model gets the bound from its generator.
+    """
+    beyond_safe_integers = 2**53 + 1
+
+    with pytest.raises(TypeError, match="Tool returned dict"):
+        tool_success_output({"rows": beyond_safe_integers})
+
+    with pytest.raises(TypeError, match="Tool returned UnboundedToolResult"):
+        tool_success_output(UnboundedToolResult(rows=beyond_safe_integers))
+
+    assert tool_success_output(UnboundedToolResult(rows=2**53 - 1)) == {"rows": 2**53 - 1}
+
+
+@pytest.mark.unit
 def test_compiled_contract_builds_closed_object() -> None:
     async def gate(width: int, height: int = 3) -> dict[str, int]:
         return {"width": width, "height": height}
@@ -289,18 +315,28 @@ def test_compiled_contract_rejects_unsupported_signatures(func, message: str) ->
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "default",
+    ("annotation", "default", "message"),
     [
-        pytest.param("not-an-int", id="wrong-type"),
-        pytest.param(float("nan"), id="nan"),
-        pytest.param(float("inf"), id="infinity"),
+        pytest.param(int, "not-an-int", "does not satisfy its annotation", id="wrong-type"),
+        pytest.param(float, float("nan"), "non-finite default", id="nan"),
+        pytest.param(float, float("inf"), "non-finite default", id="infinity"),
     ],
 )
-def test_compiled_contract_rejects_invalid_defaults(default: object) -> None:
-    async def gate(retries: int = default) -> dict[str, object]:  # ty: ignore[invalid-parameter-default]
+def test_compiled_contract_rejects_invalid_defaults(annotation: type, default: object, message: str) -> None:
+    """Each case names the guard that has to reject it.
+
+    The non-finite defaults are annotated ``float`` on purpose. Under ``int`` the
+    ordinary annotation check rejects them first and its message also contains
+    "default", so a shared expectation would prove nothing about the non-finite
+    guard.
+    """
+
+    async def gate(retries: object = default) -> dict[str, object]:
         return {"retries": retries}
 
-    with pytest.raises(TypeError, match="default"):
+    gate.__annotations__["retries"] = annotation
+
+    with pytest.raises(TypeError, match=message):
         _contract(gate)
 
 
