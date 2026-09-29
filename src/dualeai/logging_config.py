@@ -186,7 +186,8 @@ def configure_logging(level: str | int = logging.ERROR) -> None:
             foreign_pre_chain=shared_processors,
             processors=[
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                structlog.dev.ConsoleRenderer(colors=True),
+                # Automatic Rich tracebacks include frame locals such as API tokens.
+                structlog.dev.ConsoleRenderer(colors=True, exception_formatter=structlog.dev.plain_traceback),
             ],
         )
     )
