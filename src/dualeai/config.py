@@ -7,7 +7,8 @@ URL. Hosted-tool lifecycle operations require ``agent_id``. Attachment uploads
 use the configured Agent ID unless a per-call ID is supplied.
 
 Local validation and environment-loading behavior is covered by
-``tests/test_config.py`` and ``tests/test_token_removal_validation.py``.
+``tests/test_config.py``, and ``tests/test_api_token_prefix_contract.py`` pins
+the token prefix against the credential the platform mints.
 """
 
 from pathlib import Path
@@ -17,7 +18,7 @@ from dotenv import find_dotenv
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_HPKE_PSK_MIN_BYTES = 32
+from dualeai._platform_token import API_TOKEN_PREFIX
 
 
 class ObservabilityConfig(BaseModel):
@@ -59,7 +60,7 @@ class DualeAIConfig(BaseSettings):
     need ``agent_id``. Ordinary task requests need only the token and endpoint.
 
     Environment variables:
-    - DUALEAI_TOKEN: API token for protected API calls; starts with dualeai_ [required]
+    - DUALEAI_TOKEN: API token identifying the caller to Duale AI [required]
     - DUALEAI_ENDPOINT: HTTPS Gateway base URL [optional]
     - DUALEAI_TENANT_ID: Library tenant path segment [required for Library operations]
     - DUALEAI_AGENT_ID: Provisioned identity [required for hosted Tools unless passed to the SDK]
@@ -83,7 +84,8 @@ class DualeAIConfig(BaseSettings):
         default=None,
         max_length=256,
         description=(
-            "API token used as the hpke-http/3 PSK; starts with dualeai_ and has at least 32 UTF-8 bytes. "
+            f"API token identifying the caller to Duale AI, which exchanges it for the credential "
+            f"that opens every tunnel; starts with {API_TOKEN_PREFIX}. "
             "Provided through the Duale AI workspace access handoff. "
             "Set via DUALEAI_TOKEN environment variable."
         ),
@@ -92,18 +94,29 @@ class DualeAIConfig(BaseSettings):
     @field_validator("token")
     @classmethod
     def validate_token_present_and_format(cls, v: str | None) -> str:
-        """Validate token is provided (from env or constructor) and has correct format."""
+        """Validate the token is present and carries the platform's credential prefix.
+
+        THE PREFIX IS THE ONLY LOCAL RULE, and there is no length floor. This
+        token identifies the caller to Duale AI, which exchanges it for the
+        credential that opens every tunnel; the 32-byte floor RFC 9180 sets is
+        on that derived credential and belongs to the issuer, not here.
+        Everything else about this credential's shape is the issuer's to
+        choose, so a second bound here would go stale unnoticed.
+
+        ``tests/test_api_token_prefix_contract.py`` enforces the prefix in both
+        directions: a token the platform mints is accepted, and one carrying the
+        ``duale_`` package prefix instead is refused.
+        """
         if v is None:
             raise ValueError(
                 "token is required. Set DUALEAI_TOKEN environment variable or pass token= to DualeAIConfig(). "
                 "Obtain a token through your Duale AI workspace access handoff."
             )
-        if not v.startswith("dualeai_"):
+        if not v.startswith(API_TOKEN_PREFIX):
             raise ValueError(
-                "token must start with 'dualeai_'. Obtain a valid token through your Duale AI workspace access handoff."
+                f"token must start with {API_TOKEN_PREFIX!r}. "
+                "Obtain a valid token through your Duale AI workspace access handoff."
             )
-        if len(v.encode("utf-8")) < _HPKE_PSK_MIN_BYTES:
-            raise ValueError("token must contain at least 32 UTF-8 bytes for hpke-http/3")
         return v
 
     # Gateway base for the two protected service endpoints.

@@ -41,8 +41,8 @@ access.
 | [`simple_agent.py`](simple_agent.py) | Agent ID | Basic: publish a Tool manifest and maintain heartbeats; no Tool call executes |
 | [`tool_execution.py`](tool_execution.py) | Agent ID | Basic: register one Tool and execute it on a Task stream opened by the same SDK |
 | [`inventory_agent.py`](inventory_agent.py) | Agent ID | Advanced: sync and async Tools, side-effect safety, and error redaction |
-| [`document_upload.py`](document_upload.py) | Tenant ID, Agent ID, synthetic file | Upload, ingest, attach, and submit one document with a Task |
-| [`library_management.py`](library_management.py) | Tenant ID, Library access | Manage and clean up a persistent Library without an Agent |
+| [`document_upload.py`](document_upload.py) | Tenant ID, Agent ID, synthetic file, Library permissions below | Upload, ingest, attach, and submit one document with a Task |
+| [`library_management.py`](library_management.py) | Tenant ID, Library permissions below | Create, upload to, and inspect a persistent Library without an Agent |
 | [`streaming_minimal.py`](streaming_minimal.py) | None | Basic: print a replaceable preview and a labeled final result |
 | [`streaming_demo.py`](streaming_demo.py) | None | Record reset and completion metadata with structured logging |
 | [`streaming_with_visualization.py`](streaming_with_visualization.py) | `rich` | Advanced: replace content in a Rich terminal display |
@@ -60,7 +60,16 @@ The Rich example has one example-only dependency:
 python -m pip install rich
 ```
 
-Run the two document workflows as follows:
+Before running either document workflow, arrange Tenant-scoped `library:upload` and access from which `library:write`
+can be derived for the new Library. Both examples also need `library:read` to poll ingestion and inspect documents.
+Creation does not grant permissions the caller lacks. See
+[Library access](https://duale.ai/en/docs/libraries/access) for the applicable policies and Grants.
+
+Both examples leave a Library and its document in the configured environment. Arrange cleanup with a person who can
+delete that Library in the Dashboard: whole-Library deletion requires `library:delete` and a fresh AAL3 sign-in.
+The SDK's API-token session has AAL2 and cannot perform that deletion.
+
+Run the document workflows as follows:
 
 ```bash
 python examples/document_upload.py path/to/synthetic-document.pdf
@@ -71,7 +80,7 @@ python examples/library_management.py
 `library_management.py` operates an explicit persistent Library and needs no Agent identifier. Neither example claims
 document search, retrieval/RAG, or a particular model's interpretation of embedded content.
 
-<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_libraries_client.py::test_upload_targets_explicit_library_and_returns_keyed_receipt; tests/test_libraries_client.py::test_wait_for_document_uses_fixed_interval_and_returns_terminal_state. -->
+<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_libraries_client.py::test_upload_targets_explicit_library_and_returns_keyed_receipt; tests/test_libraries_client.py::test_wait_for_document_uses_fixed_interval_and_returns_terminal_state. Library permissions and the AAL3 deletion requirement are Platform contracts; no automated SDK test enforces them. -->
 
 ## Tool execution boundary
 
@@ -108,6 +117,8 @@ Take the authoritative result from `await response.model()`, not from the accumu
 
 ## Project links
 
+- [SDK documentation](https://duale.ai/en/docs/sdk)
+- [Errors and reliability](https://duale.ai/en/docs/sdk/errors)
 - [SDK package overview](https://github.com/dualeai/dualeai-python/blob/main/README.md)
 - [Release notes](https://github.com/dualeai/dualeai-python/releases)
 - [Issues](https://github.com/dualeai/dualeai-python/issues)

@@ -129,11 +129,15 @@ class CloudEventsClient:
     async def connect(self) -> None:
         """Initialize the transport for protected Bridge and Library requests.
 
-        The production transport discovers each service's public key and
-        authenticates when a request starts.
+        The production transport obtains its initial platform token during
+        connect. It discovers each service's public key and authenticates the
+        protected request when that request starts. Issuance errors are covered
+        by ``test_platform_token_errors.py``; lazy discovery is covered by
+        ``test_real_v3_tls_boundary_reuses_discovery_per_service``.
 
         Raises:
-            DualeAIAuthError: If an injected transport rejects authentication.
+            DualeAIAuthError: If platform-token issuance or an injected transport
+                rejects authentication.
             DualeAIConnectionError: If transport initialization fails.
         """
         try:
@@ -176,14 +180,16 @@ class CloudEventsClient:
                 endpoint=self.config.endpoint,
                 error=str(e),
             )
-            raise DualeAIAuthError(f"Authentication failed: {e}") from e
+            raise _lift_problem_details(DualeAIAuthError(f"Authentication failed: {e}"), e) from e
         except HTTPTransportError as e:
             logger.error(
                 "HTTP connection failed",
                 endpoint=self.config.endpoint,
                 error=str(e),
             )
-            raise DualeAIConnectionError(f"Failed to connect to protected services: {e}") from e
+            raise _lift_problem_details(
+                DualeAIConnectionError(f"Failed to connect to protected services: {e}"), e
+            ) from e
         except Exception as e:
             logger.error(
                 "Unexpected error connecting to protected services",

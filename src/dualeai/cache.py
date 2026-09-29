@@ -3,7 +3,7 @@
 Backend behavior is covered by ``tests/test_cache.py``,
 ``tests/test_cache_enhanced.py``, and ``tests/test_cache_cleanup.py``.
 No focused automated test currently covers the SDK's token-to-namespace
-selection or token-rotation behavior.
+selection or API-token rotation behavior.
 """
 
 import asyncio
@@ -29,8 +29,6 @@ from tenacity import (
 
 from dualeai.constants import CacheLimits
 from dualeai.models.json_value import JsonValue
-
-# UTC constant removed - use timezone.utc directly
 
 logger = structlog.get_logger(__name__)
 

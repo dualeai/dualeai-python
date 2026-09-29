@@ -170,9 +170,9 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentUploadResponse":
         """Request presigned URLs for document upload.
 
-        ``POST /libraries/v1/hpke/tenants/{tenant_id}/document-uploads`` inside HPKE
-        with an encrypted ``Authorization: Bearer <api_token>``. The body contains only
-        ``size_bytes``.
+        ``POST /libraries/v1/hpke/tenants/{tenant_id}/document-uploads`` runs inside
+        the HPKE tunnel authenticated by the issued platform token. The body
+        contains only ``size_bytes``.
 
         Args:
             request: Upload request body.
@@ -191,9 +191,9 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentCreateResponse":
         """Create a queued Library document after all parts uploaded.
 
-        ``POST /libraries/v1/hpke/tenants/{tenant_id}/{library_id}/documents`` inside
-        HPKE with an encrypted ``Authorization: Bearer <api_token>``. The body binds
-        a temporary upload session to a stable Library id.
+        ``POST /libraries/v1/hpke/tenants/{tenant_id}/{library_id}/documents`` runs
+        inside the HPKE tunnel authenticated by the issued platform token. The body
+        binds a temporary upload session to a stable Library id.
 
         Args:
             request: Operation request with the stable Library identifier and

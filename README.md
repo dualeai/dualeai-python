@@ -25,13 +25,15 @@ as customer-hosted Tools. Duale AI runs each Task; your application runs the Too
 The distribution and import name are both `dualeai`. The SDK supports CPython 3.10 through 3.14 on Linux and macOS.
 Every Task and Agent request and every Library metadata request goes through a Duale AI HPKE-protected API. Their
 logical request and response contents are encrypted end to end between the SDK and the service over HTTPS. HPKE uses
-each service's public key for encryption; your API token acts as the pre-shared key (PSK) to authenticate token
-possession, as described by [RFC 9180 PSK mode](https://datatracker.ietf.org/doc/html/rfc9180.html#section-5.1.2).
-The SDK does not call the Dashboard raw API. The Library service supplies signed HTTPS URLs for S3 part uploads; the
-SDK sends those parts directly to the supplied URLs, outside HPKE. Optional telemetry and remote Redis use separate
-connections.
+each service's public key for encryption; a short-lived platform token acts as the pre-shared key (PSK) to
+authenticate token possession, as described by
+[RFC 9180 PSK mode](https://datatracker.ietf.org/doc/html/rfc9180.html#section-5.1.2). Before the first tunnel opens,
+the SDK exchanges your API token for that platform token over HTTPS, and replaces it before it expires. The SDK does
+not call the Dashboard raw API. The Library service supplies signed HTTPS URLs for S3 part uploads; the SDK sends
+those parts directly to the supplied URLs, outside HPKE. That token exchange, the signed S3 part uploads, optional
+telemetry, and remote Redis are the connections made outside HPKE.
 
-<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests; tests/test_config.py::TestConfigLoading::test_default_config_values. The SDK follows the presigned upload URL without validating its scheme; no automated SDK test checks the service's HTTPS URL contract. Separate signed S3, telemetry, and Redis egress paths are a source-inspection finding without one cross-destination automated test. No automated test checks a deployed Duale AI endpoint or every advertised Python and OS combination. -->
+<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service; tests/test_http_transport_v3.py::test_public_library_routes_use_platform_token_without_api_token_headers; tests/test_config.py::TestConfigLoading::test_default_config_values; tests/test_platform_token_issuance.py::test_a_well_formed_answer_becomes_a_usable_token for the pre-tunnel exchange; tests/test_platform_token_rotation.py::test_crossing_the_advisory_instant_replaces_the_token for the replacement before expiry. The SDK follows the presigned upload URL without validating its scheme; no automated SDK test checks the service's HTTPS URL contract. Separate signed S3, telemetry, and Redis egress paths are a source-inspection finding without one cross-destination automated test. No automated test checks a deployed Duale AI endpoint or every advertised Python and OS combination. -->
 
 ```bash
 python -m pip install dualeai
@@ -83,6 +85,9 @@ Run it with `python quickstart.py`. A completed run prints the Task ID followed 
 exact values depend on the configured model. `ask()` returns an asynchronous response handle, and
 `await response.model()` waits for its terminal result and validates it against `SupportDecision`.
 
+If the request fails, follow [Errors and reliability](https://duale.ai/en/docs/sdk/errors) to distinguish credential,
+permission, service, and transport failures before retrying.
+
 <!-- Evidence: tests/test_feature_ask.py::TestUnitAskFunction::test_ask_returns_agent_response; tests/test_feature_results.py::TestUnitModelExtraction::test_model_validates_against_expected_type. No automated test executes this live quickstart or enforces its printed shape. -->
 
 ## Configure each workflow
@@ -111,22 +116,25 @@ GET and encrypted POST to these fixed endpoints. The encrypted requests use the 
 | --- | --- | --- |
 | HTTP Bridge | `/http-bridge/v1/hpke` | `/http-bridge/v1/hpke/tasks/{task_id}` and `/http-bridge/v1/hpke/agent/...` |
 | Library | `/libraries/v1/hpke` | `/libraries/v1/hpke/tenants/{tenant_id}/...` |
+| Platform token | `POST /profile/platform-token` | not applicable — this call is outside HPKE |
 
 Each service's discovery endpoint must return an HHKD v2 public-key record with a positive reuse lifetime. The SDK
 shares that key across protected calls to the same service during its lifetime, so the first call uses a discovery GET
 and an encrypted POST, while later calls use only encrypted POSTs. A call that needs a key after the lifetime ends
 fetches a new one.
 
-Both paths include the service prefix. The complete API token bytes are the PSK; SHA-512 of those bytes is the public
-PSK ID. Each service's discovery response supplies a separate recipient public-key ID. Library bearer authorization
-is a header inside the encrypted logical request.
+Both tunnel paths include the service prefix. The platform-token call carries the API token in an `Authorization`
+header over TLS, sends the public half of an ephemeral X25519 key pair, and receives the issuer's public key and a
+`psk_id`. Both sides derive the PSK from that exchange, so it never crosses the network; the `psk_id` is a random
+public identifier the issuer supplies, unrelated to any digest of the API token. Each service's discovery response
+supplies a separate recipient public-key ID. Protected Task, Agent, and Library requests authenticate with the
+platform token; they do not carry the original API token.
 
 A Library document-create receipt uses a different path: its `Location` header and body `location` identify the
 document as `/v1/hpke/tenants/{tenant_id}/{library_id}/documents/{document_id}`. That response path is not the
-`/libraries/v1/hpke` network endpoint. The SDK validates a synthetic response body in a local test; no automated
-SDK test checks the header or a deployed service response.
+`/libraries/v1/hpke` network endpoint.
 
-<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests. The local TLS test checks one discovery GET and two protected POSTs per service during the lease. No automated SDK test forces lease expiry or checks the deployed Gateway routes or the receipt Location header. -->
+<!-- Evidence: tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service; tests/test_http_transport_v3.py::test_public_library_routes_use_platform_token_without_api_token_headers; tests/test_platform_token.py::test_it_reaches_the_exact_key_the_issuer_recorded pins the derived PSK against a vector the issuer produced; tests/test_platform_token_issuance.py::test_an_identifier_of_the_wrong_width_is_refused pins the issued psk_id. The local TLS test checks one discovery GET and two protected POSTs per service during the lease, and issues its platform token from a loopback stub. No automated SDK test forces lease expiry or checks the deployed Gateway routes, the platform-token route, or the receipt Location header. -->
 
 ## Document workflows
 
@@ -136,13 +144,21 @@ Task attachments and persistent Libraries are different workflows:
   Tenant and one resolved Agent identifier. See
   [`document_upload.py`](https://github.com/dualeai/dualeai-python/blob/main/examples/document_upload.py).
 - `sdk.libraries` manages persistent Libraries and their documents independently of a Task. Ordinary Library
-  create/upload/read/delete operations need a Tenant but not an Agent identifier. See
+  create/upload/read operations need a Tenant but not an Agent identifier. See
   [`library_management.py`](https://github.com/dualeai/dualeai-python/blob/main/examples/library_management.py).
+
+Before either example creates a Library, the Agent Identity needs Tenant-scoped `library:upload` and access from which
+`library:write` can be derived for the new Library. Both examples also need `library:read` to poll ingestion and inspect
+the document. Creation does not grant permissions the caller lacks. See
+[Library access](https://duale.ai/en/docs/libraries/access) for the applicable policies and Grants.
+
+The examples leave their Libraries for a person to delete in the Dashboard. Whole-Library deletion requires
+`library:delete` and a fresh AAL3 sign-in; SDK API-token sessions have AAL2 and cannot perform that cleanup.
 
 These SDK operations establish document upload and lifecycle state; they do not by themselves promise retrieval,
 search, RAG, or a particular model's interpretation of document content.
 
-<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_http_transport_v3.py::test_task_create_fields_reach_the_hpke_session_with_wire_aliases; tests/test_libraries_client.py::test_public_library_surface_is_exported_and_stable_on_sdk; tests/test_http_transport_v3.py::test_public_library_routes_and_bearer_stay_in_protected_logical_requests. No automated test enforces the negative retrieval/search/RAG capability statement. -->
+<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_http_transport_v3.py::test_task_create_fields_reach_the_hpke_session_with_wire_aliases; tests/test_libraries_client.py::test_public_library_surface_is_exported_and_stable_on_sdk; tests/test_http_transport_v3.py::test_public_library_routes_use_platform_token_without_api_token_headers. Library permission and sign-in requirements are Platform contracts; no automated SDK test enforces them. No automated test enforces the negative retrieval/search/RAG capability statement. -->
 
 ## Before production use
 
@@ -215,6 +231,7 @@ dispatch, or terminal failures.
 
 ## Project links
 
+- [SDK documentation](https://duale.ai/en/docs/sdk)
 - [Examples](https://github.com/dualeai/dualeai-python/tree/main/examples)
 - [Release notes](https://github.com/dualeai/dualeai-python/releases)
 - [Issues](https://github.com/dualeai/dualeai-python/issues)

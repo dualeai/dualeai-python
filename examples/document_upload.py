@@ -1,10 +1,14 @@
 """Upload a document and reference it in one live Task.
 
 Requires ``DUALEAI_TOKEN``, ``DUALEAI_TENANT_ID``, ``DUALEAI_AGENT_ID``,
-access to a configured model, and a synthetic input file. Run with
+access to a configured model, and a synthetic input file. The caller also needs
+Tenant-scoped ``library:upload`` and access from which ``library:write`` and
+``library:read`` can be derived for the new Library. Run with
 ``python examples/document_upload.py path/to/document.pdf``. The example creates
-a call-scoped Library and uploads the file; it is not executed by the automated
-test suite.
+a call-scoped Library and uploads the file. Arrange later Dashboard cleanup by
+a person with ``library:delete`` and a fresh AAL3 sign-in; the SDK's AAL2
+API-token session cannot delete the whole Library. The automated test suite
+does not execute this example.
 
 Set ``DUALEAI_ENDPOINT`` only when your access instructions name a non-default
 environment.
@@ -68,6 +72,10 @@ async def main() -> None:
         print(f"Uploaded in {time.monotonic() - start:.1f}s")  # noqa: T201
 
         receipt = receipts[attachments[0].key]
+        print(  # noqa: T201
+            f"Cleanup required after this example: delete Library {receipt.library_id} "
+            "in the Dashboard with library:delete and a fresh sign-in."
+        )
         document = await sdk.libraries.wait_for_document(
             LibraryDocumentGetRequest(
                 library_id=receipt.library_id,

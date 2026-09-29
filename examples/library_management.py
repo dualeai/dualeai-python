@@ -1,9 +1,13 @@
 """Manage a persistent Library with a synthetic document.
 
-This live example requires ``DUALEAI_TOKEN`` and ``DUALEAI_TENANT_ID`` plus
-Library access, but no Agent identifier. Run it with
-``python examples/library_management.py``. It creates and later deletes a
-Library in the configured environment.
+This live example requires ``DUALEAI_TOKEN`` and ``DUALEAI_TENANT_ID``, but no
+Agent identifier. The caller needs Tenant-scoped ``library:upload`` and access
+from which ``library:write`` and ``library:read`` can be derived for the new
+Library. Run it with ``python examples/library_management.py``.
+
+The Library and its document remain until a person deletes the Library in the
+Dashboard with ``library:delete`` and a fresh AAL3 sign-in. An SDK API-token
+session has AAL2 and cannot perform whole-Library deletion.
 
 The automated test suite does not execute this example.
 """
@@ -16,7 +20,6 @@ from uuid import uuid4
 
 from dualeai import (
     LibraryCreateRequest,
-    LibraryDeleteRequest,
     LibraryDocumentGetRequest,
     LibraryGetRequest,
     LibraryResponseDocumentStatus,
@@ -26,7 +29,7 @@ from dualeai import (
 
 
 async def main() -> None:
-    """Create, upload to, inspect, and clean up one persistent Library."""
+    """Create, upload to, and inspect a Library; print the cleanup handoff."""
     with TemporaryDirectory(prefix="dualeai-library-") as directory:
         source = Path(directory) / "synthetic-policy.txt"
         source.write_text(
@@ -56,8 +59,11 @@ async def main() -> None:
                 current = await sdk.libraries.get_document(request)
                 print(f"Document {current.document_id} is {current.status.value}")  # noqa: T201
             finally:
-                await sdk.libraries.delete(LibraryDeleteRequest(library_id=library.id))
-                print(f"Deleted Library {library.id}")  # noqa: T201
+                print(  # noqa: T201
+                    f"Cleanup required: Library {library.id} ({library.path}) remains. "
+                    "Ask a person with library:delete to delete it in the Dashboard "
+                    "and complete the fresh sign-in prompt."
+                )
 
 
 if __name__ == "__main__":

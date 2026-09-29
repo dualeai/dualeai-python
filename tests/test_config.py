@@ -166,12 +166,6 @@ class TestConfigValidation:
         ):
             DualeAIConfig()
 
-    def test_token_must_meet_hpke_psk_byte_floor(self):
-        with pytest.raises(ValueError, match="at least 32 UTF-8 bytes"):
-            DualeAIConfig(token="dualeai_short")
-
-        assert DualeAIConfig(token="dualeai_" + "x" * 24).token == "dualeai_" + "x" * 24
-
     def test_endpoint_format_validation(self):
         """The Gateway base is an HTTPS origin, without an operation path."""
         with (
