@@ -96,6 +96,7 @@ class GateCommandResult(BaseModel):
     command_id: str
 
 
+@pytest.mark.unit
 def test_create_sdk_coerces_constructor_arguments_with_pydantic() -> None:
     """create_sdk uses a Pydantic boundary for constructor-only settings."""
     sdk = create_sdk(
@@ -1293,6 +1294,11 @@ async def test_serve_survives_single_heartbeat_auth_blip(
 
     # Must return normally — a single auth blip is tolerated, not fatal.
     await sdk.serve(stop_event=stop)
+    # AT LEAST three, not exactly three. `stop` is set inside the third beat, but
+    # `serve` returns only when its `asyncio.wait` next runs, and with the interval
+    # patched to 0 the heartbeat loop keeps spinning until then. The observed count
+    # is 5 here and is an event-loop scheduling artifact, not a lifecycle contract.
+    # The lower bound is the whole claim: a beat after the failing one succeeded.
     assert calls >= 3
 
 
@@ -1322,6 +1328,11 @@ async def test_serve_survives_transient_heartbeat_failure(
 
     # Must return normally — the transient blip is tolerated, not fatal.
     await sdk.serve(stop_event=stop)
+    # AT LEAST three, not exactly three. `stop` is set inside the third beat, but
+    # `serve` returns only when its `asyncio.wait` next runs, and with the interval
+    # patched to 0 the heartbeat loop keeps spinning until then. The observed count
+    # is 5 here and is an event-loop scheduling artifact, not a lifecycle contract.
+    # The lower bound is the whole claim: a beat after the failing one succeeded.
     assert calls >= 3
 
 
@@ -1348,8 +1359,8 @@ async def test_serve_stops_after_consecutive_heartbeat_failures(
 
     with pytest.raises(DualeAIConnectionError, match="bridge down"):
         await sdk.serve()
-    # Startup beat (1) + MAX_CONSECUTIVE_HEARTBEAT_FAILURES failing loop beats.
-    assert calls == 1 + TimingDefaults.MAX_CONSECUTIVE_HEARTBEAT_FAILURES
+    # Startup beat (1) plus the three consecutive failures the loop tolerates.
+    assert calls == 4
 
 
 @pytest.mark.unit

@@ -231,12 +231,27 @@ def moto_server() -> Generator[str]:
     server.stop()
 
 
+@pytest.fixture(scope="session")
+def aioboto3_session() -> aioboto3.Session:
+    """One session for the whole run, because building one is not free.
+
+    `aioboto3.Session()` makes botocore re-parse the S3 service model: measured
+    54 ms against 5 ms for a client built on an existing session. A `Session`
+    carries configuration, not connections, so sharing one isolates nothing
+    away — the per-test client and bucket still do that.
+    """
+    return aioboto3.Session()
+
+
 @pytest.fixture
-async def moto_s3(moto_server: str, request: pytest.FixtureRequest) -> AsyncIterator[MotoS3]:
+async def moto_s3(
+    moto_server: str,
+    aioboto3_session: aioboto3.Session,
+    request: pytest.FixtureRequest,
+) -> AsyncIterator[MotoS3]:
     test_name_hash = hashlib.sha256(request.node.name.encode()).hexdigest()[:12]
     bucket = f"{TEST_BUCKET}-{test_name_hash}"
-    session = aioboto3.Session()
-    async with session.client(
+    async with aioboto3_session.client(
         "s3",
         endpoint_url=moto_server,
         region_name="us-east-1",

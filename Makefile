@@ -40,8 +40,11 @@ test-func:
 	$(MAKE) test-unit
 	$(MAKE) test-int
 
+# `not integration` rather than `unit`: an unmarked test then runs here instead of
+# being dropped by both passes. `--ignore=tests/benchmarks` keeps benchmarks out,
+# and `test-bench` selects that directory rather than the `benchmark` marker.
 test-unit:
-	uv run pytest tests/ -v -n auto -m "unit" --ignore=tests/benchmarks
+	uv run pytest tests/ -v -n auto -m "not integration" --ignore=tests/benchmarks
 
 test-int:
 	uv run pytest tests/ -v -n 0 -m "integration" --ignore=tests/benchmarks --no-cov
