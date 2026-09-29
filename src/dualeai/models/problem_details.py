@@ -44,7 +44,7 @@ def _reject_explicit_null(value: object) -> object:
 
 
 class ErrorCategory(str, Enum):
-    """Broad category for routing logic — drives operator dashboards and SDK retry decisions. RFC 9457 §3.2 envelope extension."""
+    """Broad failure category for diagnostics and application error handling. RFC 9457 §3.2 envelope extension."""
 
     transient = "transient"
     upstream = "upstream"
@@ -56,7 +56,7 @@ class ErrorCategory(str, Enum):
         json_schema = handler.resolve_ref_schema(handler(core_schema))
         json_schema.update(
             {
-                "description": "Broad category for routing logic — drives operator dashboards and SDK retry decisions. RFC 9457 §3.2 envelope extension."
+                "description": "Broad failure category for diagnostics and application error handling. RFC 9457 §3.2 envelope extension."
             }
         )
         return json_schema
@@ -140,7 +140,7 @@ class ProblemDetails(BaseModel):
     error_category: Annotated[
         Union[ErrorCategory, None],
         Field(
-            description="Broad category for routing logic — drives operator dashboards and SDK retry decisions. RFC 9457 §3.2 envelope extension.",
+            description="Broad failure category for diagnostics and application error handling. RFC 9457 §3.2 envelope extension.",
             json_schema_extra={"default": None},
         ),
     ] = None
