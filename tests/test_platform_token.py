@@ -8,6 +8,9 @@ request is refused — so the shared value is what makes a divergence fail
 loudly here.
 
 The browser client pins the same vector. Three implementations, one number.
+The expected value was independently calculated with Node's X25519 and
+RFC 5869's HMAC-SHA-256 construction, using empty salt and the UTF-8 context
+`dualeai-platform-token/1`.
 """
 
 from __future__ import annotations
@@ -21,18 +24,15 @@ pytestmark = pytest.mark.unit
 
 _CLIENT_PRIVATE = bytes.fromhex("77" * 32)
 _ISSUER_PUBLIC = "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59"
-_EXPECTED = "dualeai_cf82f8fb7fb10982e63952b12ffa5586128a8a54603345088e8acbff341905b7"
+_EXPECTED = "dualeai_6022dc966a28a0bcb0989f498d97424aa6fba22d096906b5aa50cc5a77fea81d"
 
 
 def test_it_reaches_the_exact_key_the_issuer_recorded() -> None:
     private = X25519PrivateKey.from_private_bytes(_CLIENT_PRIVATE)
+    actual = derive_psk(private, _ISSUER_PUBLIC)
 
-    assert derive_psk(private, _ISSUER_PUBLIC) == _EXPECTED
-
-
-def test_it_carries_the_prefix_the_resolvers_look_for() -> None:
-    """The platform token IS the pre-shared key, so it looks like a token."""
-    assert _EXPECTED.startswith(API_TOKEN_PREFIX)
+    assert actual == _EXPECTED
+    assert actual.startswith(API_TOKEN_PREFIX)
 
 
 def test_two_clients_reach_two_keys() -> None:

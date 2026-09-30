@@ -89,11 +89,10 @@ async def test_the_key_it_keeps_is_the_private_half_of_the_one_it_published() ->
     """Both sides must reach the same secret, or every tunnel is refused at runtime.
 
     THE ORACLE IS ECDH'S SYMMETRY, not `derive_psk`'s arithmetic — that is pinned
-    against four independent implementations in `tests/test_platform_token.py`.
+    to an independently calculated fixed vector in `tests/test_platform_token.py`.
     Here the issuer derives from its own private key and the `client_public_key`
     it actually received, so the two agree only if `issue` kept the private half
-    of the key it published. Nothing else in this package observes `psk`:
-    `issue` deriving against a throwaway key passed the whole unit suite.
+    of the key it published.
     """
     async with _issuer(_answer()) as (endpoint, received), aiohttp.ClientSession() as session:
         token = await issue(session, endpoint, _API_TOKEN)

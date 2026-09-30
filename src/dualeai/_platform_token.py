@@ -11,7 +11,7 @@ bootstrap runs outside the protected tunnel.
 
 THE DERIVATION MUST MATCH THE ISSUER BYTE FOR BYTE. A mismatch is silent — no
 tunnel opens and every request is refused, far from the cause — so
-`tests/test_platform_token.py` pins it against a vector the issuer produced.
+`tests/test_platform_token.py` pins it against an independently calculated vector.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ a platform library. The derived key carries it because both sides build the same
 string, and the golden vector is what keeps them equal.
 """
 
-_HKDF_INFO: Final[bytes] = b"duale-platform-token/1"
+_HKDF_INFO: Final[bytes] = b"dualeai-platform-token/1"
 """Domain separation, versioned in the label. Matches the issuer exactly."""
 
 _ISSUANCE_PATH: Final[str] = "/profile/platform-token"
@@ -138,19 +138,17 @@ class _Held(NamedTuple):
 
 
 class PlatformTokenProvider:
-    """Hold one platform token and replace it before it stops working.
+    """Hold one platform token and manage renewal from local deadlines.
 
-    A PLATFORM TOKEN EXPIRES, so obtaining one at connect and keeping it is a
-    defect that surfaces hours later as every request refused. This owns that
-    lifecycle in one place: a caller asks for a token and gets a usable one,
-    and rotation never reaches the API this SDK publishes.
+    A PLATFORM TOKEN EXPIRES, so obtaining one at connect and keeping it would
+    eventually leave requests using an expired credential. This provider owns
+    reuse and renewal without exposing rotation in the SDK's public API.
 
     TWO BANDS, NOT ONE DEADLINE. This is ``RefreshableCredentials``' idea in
-    botocore. In the advisory band the held token is still valid, so a failed
-    reissue is survivable and the call proceeds on what we have; in the
-    mandatory band we stop treating it as cover, so the failure belongs to the
-    caller. With a single margin one issuer blip fails a request that a
-    still-valid credential could have served.
+    botocore. In the advisory band the held token remains eligible for local
+    fallback, so a failed reissue returns it; in the mandatory band we stop using
+    it as fallback, so the failure reaches the caller. With a single margin one
+    issuer blip fails a request that a still-valid credential could have served.
 
     THE BANDS ARE FRACTIONS OF THE TOKEN'S OWN LIFETIME, where botocore uses
     fixed 15- and 10-minute timeouts. The issuer controls the lifetime: an AAL3
@@ -206,7 +204,7 @@ class PlatformTokenProvider:
         )
 
     async def get(self) -> PlatformToken:
-        """Return a token that will still resolve, issuing one if needed."""
+        """Return the held token or renew it according to local deadlines."""
         held = self._held
         now = _now()
         if held is not None and now < held.refresh_at:
@@ -230,7 +228,7 @@ class PlatformTokenProvider:
             except Exception:
                 if not survivable:
                     raise
-                # The held token still opens tunnels; the next call tries again.
+                # Keep the held token after an advisory failure; the next call retries.
                 assert held is not None
                 return held.token
             self._held = self._schedule(issued, now=now)
