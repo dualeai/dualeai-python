@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from enum import Enum
 from re import fullmatch
 from typing import Annotated, Literal, Union
@@ -78,6 +79,8 @@ _PortableJsonValue = TypeAliasType(
 
 def _validate_string_constraints_2(value: object) -> object:
     if not isinstance(value, str):
+        if not isinstance(value, datetime):
+            raise ValueError("date-time input must be an RFC 3339 string or a datetime")
         return value
     if fullmatch("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})", value) is None:
         raise ValueError("string is not a canonical date-time")
