@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from uuid import UUID
-from zlib import crc32
 
 import aiohttp
 import pytest
@@ -487,8 +486,7 @@ def _completed_block(event_id: str = "1:1") -> bytes:
     data = (
         '{"type":"task.completed","timestamp":"2026-09-24T00:00:00Z","result":{"completion":"done","cache_hit":false}}'
     )
-    checksum = crc32(f"task.completed:{data}".encode()) & 0xFFFFFFFF
-    return f": crc={checksum:08x}\nid: {event_id}\nevent: task.completed\ndata: {data}\n\n".encode()
+    return f"id: {event_id}\nevent: task.completed\ndata: {data}\n\n".encode()
 
 
 def _delta_block(event_id: str, delta: str) -> bytes:
@@ -496,8 +494,7 @@ def _delta_block(event_id: str, delta: str) -> bytes:
         {"type": "content.delta", "timestamp": "2026-09-24T00:00:00Z", "delta": delta},
         separators=(",", ":"),
     )
-    checksum = crc32(f"content.delta:{data}".encode()) & 0xFFFFFFFF
-    return f": crc={checksum:08x}\nid: {event_id}\nevent: content.delta\ndata: {data}\n\n".encode()
+    return f"id: {event_id}\nevent: content.delta\ndata: {data}\n\n".encode()
 
 
 class _StreamReply:
@@ -735,23 +732,15 @@ async def test_task_replays_pre_start_post_but_never_retries_tampering(monkeypat
 
 
 @pytest.mark.unit
-async def test_task_recovers_from_checked_crc_failure_and_missing_end(monkeypatch) -> None:
+async def test_task_recovers_from_missing_end_with_the_last_delivered_cursor(monkeypatch) -> None:
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
-    bad_crc = b": crc=00000000" + _delta_block("9:2", "ignored")[14:]
-    first = _StreamReply([_delta_block("9:1", "first"), bad_crc])
-    second = _StreamReply([_completed_block("9:2")])
-    transport, session = await _with_stream_session([first, second])
-    events = [event async for event in transport.run_task("task-1", _task_request())]
-    assert [event.id for event in events] == ["9:1", "9:2"]
-    assert [call.method for call in session.calls] == ["POST", "GET"]
-    assert session.calls[1].headers["Last-Event-ID"] == "9:1"
-
     first = _StreamReply([_delta_block("10:1", "first"), ProtocolError("malformed_envelope", "missing END")])
     second = _StreamReply([_completed_block("10:2")])
     transport, session = await _with_stream_session([first, second])
     events = [event async for event in transport.run_task("task-1", _task_request())]
     assert [event.id for event in events] == ["10:1", "10:2"]
     assert [call.method for call in session.calls] == ["POST", "GET"]
+    assert session.calls[1].headers["Last-Event-ID"] == "10:1"
 
 
 @pytest.mark.unit
@@ -1188,8 +1177,7 @@ async def test_task_terminal_does_not_read_or_retry_past_the_result(terminal: st
         ),
     }
     data = json.dumps(payload)
-    checksum = crc32(f"{terminal}:{data}".encode()) & 0xFFFFFFFF
-    block = f": crc={checksum:08x}\nid: 13:1\nevent: {terminal}\ndata: {data}\n\n".encode()
+    block = f"id: 13:1\nevent: {terminal}\ndata: {data}\n\n".encode()
     reply = _StreamReply([block, AssertionError("read past terminal")])
     transport, session = await _with_stream_session([reply])
     try:
@@ -1240,6 +1228,7 @@ async def test_task_cancellation_during_backoff_closes_the_stream(monkeypatch: p
         "eof_empty",
         "eof_delta",
         "finite_integrity",
+        "sse_integrity",
     ],
 )
 async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercises the native HPKE adapter
@@ -1307,6 +1296,9 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
                     if step == 1 and fault in {"outer_resume", "eof_empty", "eof_delta"}:
                         if fault != "eof_empty":
                             wire.extend(sealer.seal_sse_block(_delta_block("3:1", "first")))
+                    elif fault == "sse_integrity":
+                        block = sealer.seal_sse_block(_delta_block("3:1", "untrusted"))
+                        wire.extend(block[:-1] + bytes([block[-1] ^ 1]))
                     else:
                         wire.extend(sealer.seal_sse_block(_completed_block("3:2")))
                     if not (fault == "outer_resume" and step == 1):
@@ -1340,9 +1332,13 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
     delivered: list[str] = []
     try:
         await client.connect()
-        if fault == "finite_integrity":
+        if fault in {"finite_integrity", "sse_integrity"}:
             with pytest.raises(DualeAIConnectionError) as error:
-                await client.run_task(task_id="task-native", request=_task_request())
+                await client.run_task(
+                    task_id="task-native",
+                    request=_task_request(),
+                    delta_callback=lambda delta: delivered.append(delta.delta),
+                )
             assert error.value.context.error_code == "authentication_failed"
             assert error.value.problem_details is None
             assert error.value.context.retry_attempt == 0
@@ -1365,6 +1361,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
         "eof_empty": ["POST", "GET"],
         "discovery_503": ["POST"],
         "finite_integrity": ["POST"],
+        "sse_integrity": ["POST"],
     }.get(fault, ["POST", "POST"])
     assert [call[0] for call in calls] == expected
     assert discoveries == (2 if fault == "discovery_503" else 1)

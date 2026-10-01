@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from dualeai.events.sse_parser import _MAX_SSE_EVENT_BYTES, _compute_checksum, parse_sse_stream
+from dualeai.events.sse_parser import _MAX_SSE_EVENT_BYTES, parse_sse_stream
 from dualeai.models.bridge import BridgeTaskCompletedResponse
 from tests.test_sse_parser import CheckedBlockReader
 
@@ -29,9 +29,8 @@ def _completed_stream() -> str:
         "result": {"completion": _MARKED, "tool_calls": []},
     }
     data_str = json.dumps(payload, separators=(",", ":"))
-    checksum = _compute_checksum("task.completed", data_str)
     data_lines = "\n".join(f"data: {line}" for line in data_str.split("\n"))
-    return f": crc={checksum}\nid: 1:1\nevent: task.completed\n{data_lines}\n\n"
+    return f"id: 1:1\nevent: task.completed\n{data_lines}\n\n"
 
 
 def _completion_of(event_data: object) -> str:

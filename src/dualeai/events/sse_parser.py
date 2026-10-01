@@ -5,10 +5,9 @@ to the Task API's emission profile: line terminators are LF/CRLF only (bare-CR
 delimiters are not handled), and ``id`` is treated as an opaque server-defined
 cursor. This is not a general-purpose SSE reader.
 
-Integrity validation: Server sends `: crc={hex}` comment before each event.
-Client validates CRC32 of "{event_type}:{data}" against checksum.
-On mismatch, raises SSEChecksumError. The transport resumes from the last
-validated event ID, which can differ from the failed event's ID.
+``hpke-http`` authenticates each complete SSE block before ``iter_sse()``
+releases it. This parser validates the event shape and payload; comments have
+no application integrity semantics.
 
 Parsing and exact-text preservation are covered by ``tests/test_sse_parser.py``
 and ``tests/test_marked_answer_parsing.py``.
@@ -17,13 +16,11 @@ and ``tests/test_marked_answer_parsing.py``.
 import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from zlib import crc32
 
 from pydantic import ValidationError
 
 from dualeai.models.bridge import BridgeSSEEvent
 
-_CRC32_HEX_LENGTH = 8
 # One fixed protocol guard covers both a physical line and the joined data
 # payload. It keeps untrusted stream input bounded without adding a user-facing
 # tuning knob to the Bridge wire contract.
@@ -38,31 +35,12 @@ class SSEParseError(Exception):
         super().__init__(f"{message}: {line!r}" if line else message)
 
 
-class SSEChecksumError(SSEParseError):
-    """CRC32 mismatch; ``event_id`` identifies the failed event for diagnostics."""
-
-    def __init__(self, event_id: str, expected: str, actual: str, event_type: str) -> None:
-        self.event_id = event_id
-        self.expected = expected
-        self.actual = actual
-        self.event_type = event_type
-        super().__init__(f"CRC32 mismatch for {event_type} (id={event_id}): expected {expected}, got {actual}")
-
-
-def _compute_checksum(event_type: str, data_str: str) -> str:
-    """Compute CRC32 checksum matching server format."""
-    payload = f"{event_type}:{data_str}"
-    checksum = crc32(payload.encode("utf-8")) & 0xFFFFFFFF
-    return f"{checksum:08x}"
-
-
 async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE state machine
     content: AsyncIterator[bytes],
 ) -> AsyncIterator[BridgeSSEEvent]:
     """Parse SSE stream from byte chunks.
 
     SSE format (per spec):
-        : crc=a1b2c3d4
         id: 123:1
         event: content.delta
         data: {"type": "content.delta", "delta": "..."}
@@ -73,7 +51,6 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
     Supports:
     - Multi-line data (multiple `data:` lines joined with newline)
     - Comments (lines starting with `:`)
-    - Required CRC32 checksum validation (`: crc={hex}` comments)
     - Byte chunks containing multiple lines (handles HPKE decrypted events)
     - Fixed byte limits for one line and one accumulated event payload
 
@@ -85,13 +62,11 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
 
     Raises:
         SSEParseError: On malformed or oversized event data.
-        SSEChecksumError: On CRC32 mismatch (triggers retry with Last-Event-ID).
     """
     event_id: str = ""  # SSE IDs persist until another id field changes them.
     event_type: str = "message"  # SSE default
     data_lines: list[str] = []
     data_bytes = 0
-    pending_checksum: str | None = None
     buffer = bytearray()
     first_line = True
 
@@ -117,18 +92,9 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
                 # An empty payload is ignored; non-empty whitespace is invalid Task JSON.
                 data_str = "\n".join(data_lines) if data_lines else ""
                 if data_str:
-                    if pending_checksum is None:
-                        raise SSEParseError("Missing CRC32 checksum")
-
-                    actual = _compute_checksum(event_type, data_str)
-                    if actual != pending_checksum:
-                        raise SSEChecksumError(
-                            event_id=event_id,
-                            expected=pending_checksum,
-                            actual=actual,
-                            event_type=event_type,
-                        )
-
+                    # NOTE: CRC32 validation and required checksum comments were
+                    # removed because hpke-http authenticates each complete block
+                    # before iter_sse() releases it. Payload validation stays here.
                     try:
                         data = json.loads(data_str)
                     except json.JSONDecodeError as e:
@@ -156,20 +122,9 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
                 event_type = "message"
                 data_lines = []
                 data_bytes = 0
-                pending_checksum = None
                 continue
 
-            # Comment line - check for checksum
             if line.startswith(":"):
-                comment = line[1:].lstrip()  # Strip colon and leading whitespace
-                if comment.startswith("crc="):
-                    checksum = comment[4:]
-                    if len(checksum) != _CRC32_HEX_LENGTH or any(
-                        character not in "0123456789abcdef" for character in checksum
-                    ):
-                        raise SSEParseError("Invalid CRC32 checksum", line=checksum)
-                    pending_checksum = checksum
-                # Other comments (heartbeat, etc.) ignored
                 continue
 
             # Parse field:value
@@ -189,7 +144,7 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
                 if "\0" not in value:
                     event_id = value
             elif field == "event":
-                event_type = value  # Capture for checksum validation
+                event_type = value
             elif field == "data":
                 value_bytes = len(value.encode("utf-8"))
                 next_data_bytes = data_bytes + value_bytes + (1 if data_lines else 0)

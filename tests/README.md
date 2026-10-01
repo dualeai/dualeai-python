@@ -54,7 +54,7 @@ async def test_action_reaches_the_task_request(minimal_mock_sdk: DualeAISDK) -> 
 
 ## Benchmarks
 
-CodSpeed benchmarks cover Pydantic validation, SSE checksums, cache-key generation,
+CodSpeed benchmarks cover Pydantic validation, SSE parsing, cache-key generation,
 JSON serialization, and string truncation.
 
 ```bash
@@ -71,3 +71,29 @@ calls against a local TLS endpoint. The enforcing tests are
 `test_many_parts_keep_pending_upload_tasks_bounded`, and
 `test_real_v3_tls_boundary_reuses_discovery_per_service`. These
 tests do not contact external services.
+
+## Verify Task stream integrity
+
+`HTTPTransport` passes authenticated `hpke-http` SSE blocks to the event parser.
+The [protected response contract](https://github.com/dualeai/hpke-http/blob/v4.0.1/PROTOCOL.md#protected-response)
+authenticates each complete block, including its cursor, event type, and data,
+before delivery. The SDK neither requires nor validates application CRC32
+comments: they add no required protection inside this authenticated transport
+and provide no keyed authentication. The parser still validates JSON, event
+schemas, matching event types, and size limits.
+
+- `test_sse_parser.py::TestSSEParserEvents::test_parser_accepts_the_frozen_content_delta_wire_event`
+  accepts a CRC-free typed event. The parser suite also covers malformed payloads,
+  limits, cursor handling, and ordinary SSE comments.
+- `test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service`
+  delivers a CRC-free Task result over real TLS and HPKE.
+- `test_http_transport_v3.py::test_real_tls_task_recovery[sse_integrity]`
+  rejects an altered encrypted SSE record before event delivery and does not retry
+  the authentication failure.
+
+`test_task_recovers_from_missing_end_with_the_last_delivered_cursor` checks the
+resume cursor after an interrupted stream. Per-event authentication does not
+prove full transport completion, which requires END and outer EOF.
+`test_task_terminal_does_not_read_or_retry_past_the_result` pins the SDK's return
+at an application terminal without draining the transport. Both tests are in
+`test_http_transport_v3.py`.
