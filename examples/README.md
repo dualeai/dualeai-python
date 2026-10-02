@@ -64,8 +64,8 @@ documents.
 Creation does not grant permissions the caller lacks. See
 [Library access](https://duale.ai/en/docs/libraries/access) for the applicable policies and Grants.
 
-Both examples leave a Library and its document in the configured environment. Arrange cleanup with a person who can
-delete that Library in the Dashboard: whole-Library deletion requires `library:delete` and a fresh AAL3 sign-in.
+Both examples leave a Library and its document in the configured environment. Arrange cleanup with a Human Identity who can
+delete that Library in the Dashboard: whole-Library deletion requires `library:delete` and valid `aal3` authentication.
 The SDK's API-token session has AAL2 and cannot perform that deletion.
 
 Run the document workflows as follows:

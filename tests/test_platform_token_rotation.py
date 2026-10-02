@@ -78,9 +78,12 @@ class _Issuer:
         self.calls = 0
         self.down = False
         self.gate: asyncio.Event | None = None
+        self.entered: asyncio.Event | None = None
 
     async def __call__(self, _session: object, _endpoint: str, _api_token: str) -> PlatformToken:
         self.calls += 1
+        if self.entered is not None:
+            self.entered.set()
         if self.gate is not None:
             await self.gate.wait()
         if self.down:
@@ -270,6 +273,82 @@ async def test_a_first_issuance_failure_always_reaches_the_caller(provider_for) 
     assert issuer.calls == 1
 
 
+@pytest.mark.parametrize("finished_at", [89, 90, 100, 101])
+async def test_renewal_failure_uses_the_cover_deadline_when_it_finishes(
+    provider_for, clock: _Clock, finished_at: int
+) -> None:
+    """A 100-second token remains fallback only before its 90-second deadline."""
+    provider, issuer = provider_for(timedelta(seconds=100))
+    first = await provider.get()
+    clock.at = _EPOCH + timedelta(seconds=82)
+    issuer.down = True
+    issuer.entered = asyncio.Event()
+    issuer.gate = asyncio.Event()
+    renewal = asyncio.create_task(provider.get())
+    try:
+        await asyncio.wait_for(issuer.entered.wait(), timeout=1)
+        clock.at = _EPOCH + timedelta(seconds=finished_at)
+        issuer.gate.set()
+        if finished_at < 90:
+            assert await renewal is first
+        else:
+            with pytest.raises(RuntimeError, match="the issuer is unreachable"):
+                await renewal
+        assert issuer.calls == 2
+    finally:
+        issuer.gate.set()
+        await asyncio.gather(renewal, return_exceptions=True)
+
+
+async def test_invalidated_cover_is_not_returned_after_pending_renewal_fails(provider_for, clock: _Clock) -> None:
+    """Early withdrawal during issuance cannot restore the discarded credential."""
+    provider, issuer = provider_for(timedelta(seconds=100))
+    await provider.get()
+    clock.at = _EPOCH + timedelta(seconds=82)
+    issuer.down = True
+    issuer.entered = asyncio.Event()
+    issuer.gate = asyncio.Event()
+    renewal = asyncio.create_task(provider.get())
+    try:
+        await asyncio.wait_for(issuer.entered.wait(), timeout=1)
+        provider.invalidate()
+        issuer.gate.set()
+        with pytest.raises(RuntimeError, match="the issuer is unreachable"):
+            await renewal
+        issuer.down = False
+        replacement = await provider.get()
+        assert replacement.psk_id == bytes([3]) * 64
+    finally:
+        issuer.gate.set()
+        await asyncio.gather(renewal, return_exceptions=True)
+
+
+async def test_a_delayed_issuance_schedules_from_receipt_time(
+    provider_for, clock: _Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipt at 20s with expiry at 120s starts the advisory band at 95s."""
+    monkeypatch.setattr(_platform_token.random, "random", lambda: 0)
+    provider, issuer = provider_for(timedelta(seconds=100))
+    issuer.entered = asyncio.Event()
+    issuer.gate = asyncio.Event()
+    issuance = asyncio.create_task(provider.get())
+    try:
+        await asyncio.wait_for(issuer.entered.wait(), timeout=1)
+        clock.at = _EPOCH + timedelta(seconds=20)
+        issuer.gate.set()
+        first = await issuance
+        assert first.valid_until == _EPOCH + timedelta(seconds=120)
+
+        clock.at = _EPOCH + timedelta(seconds=94)
+        assert await provider.get() is first
+        assert issuer.calls == 1
+        clock.at = _EPOCH + timedelta(seconds=95)
+        assert (await provider.get()).psk_id == bytes([2]) * 64
+    finally:
+        issuer.gate.set()
+        await asyncio.gather(issuance, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # Concurrency: a burst costs one round trip
 # ---------------------------------------------------------------------------
@@ -325,22 +404,29 @@ async def test_a_caller_arriving_during_an_advisory_renewal_is_not_delayed(
 # ---------------------------------------------------------------------------
 
 
-async def test_two_providers_over_one_lifetime_reach_two_refresh_instants(provider_for) -> None:
-    """Without jitter every agent in a rollout renews on the same instant.
+async def test_two_providers_over_one_lifetime_reach_two_refresh_instants(
+    provider_for, clock: _Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Jitter separates actual issuer requests from providers issued together."""
+    draws = iter((0.0, 0.8, 0.0, 0.0))
+    monkeypatch.setattr(_platform_token.random, "random", lambda: next(draws))
+    first, _ = provider_for()
+    second, issuer = provider_for()
+    # Both providers use the same patched issuer; its count observes the fleet.
+    first_token = await first.get()
+    second_token = await second.get()
+    assert first_token.valid_until == second_token.valid_until
+    assert issuer.calls == 2
 
-    A rollout hands every agent its token in the same second and for the same
-    lifetime, so a deadline computed from the lifetime alone is one instant for
-    the whole fleet, and the issuer takes the fleet in a single burst. The
-    jitter fraction is the only thing that separates them, and it is drawn once
-    per token so the deadline cannot move while it is being read.
-    """
-    first, _first_issuer = provider_for()
-    second, _second_issuer = provider_for()
+    # Ten hours gives a 7h30m advisory time and up to 30m of jitter.
+    # The two draws place renewal at 7h30m and 7h54m respectively.
+    clock.at = _EPOCH + timedelta(hours=7, minutes=40)
+    renewed_first = await first.get()
+    assert renewed_first != first_token
+    assert await second.get() is second_token
+    assert issuer.calls == 3
 
-    await first.get()
-    await second.get()
-
-    assert first._held is not None
-    assert second._held is not None
-    assert first._held.token.valid_until == second._held.token.valid_until, "the two tokens did not share a lifetime"
-    assert first._held.refresh_at != second._held.refresh_at, "two agents issued together renew on the same instant"
+    clock.at = _EPOCH + timedelta(hours=8)
+    assert await first.get() is renewed_first
+    assert await second.get() != second_token
+    assert issuer.calls == 4

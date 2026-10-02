@@ -5,8 +5,8 @@ Agent identifier. The caller needs Tenant-scoped ``library:upload`` and access
 from which ``library:write`` and ``library:read`` can be derived for the new
 Library. Run it with ``python examples/library_management.py``.
 
-The Library and its document remain until a person deletes the Library in the
-Dashboard with ``library:delete`` and a fresh AAL3 sign-in. An SDK API-token
+The Library and its document remain until a Human Identity deletes the Library in the
+Dashboard with ``library:delete`` and valid ``aal3`` authentication. An SDK API-token
 session has AAL2 and cannot perform whole-Library deletion.
 
 The automated test suite does not execute this example.
@@ -61,8 +61,8 @@ async def main() -> None:
             finally:
                 print(  # noqa: T201
                     f"Cleanup required: Library {library.id} ({library.path}) remains. "
-                    "Ask a person with library:delete to delete it in the Dashboard "
-                    "and complete the fresh sign-in prompt."
+                    "Ask a Human Identity with library:delete to delete it in the Dashboard "
+                    "with valid aal3 authentication; sign in when prompted."
                 )
 
 

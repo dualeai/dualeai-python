@@ -69,7 +69,7 @@ PlatformToken = TypeAliasType(
 
 
 class AssuranceLevel(str, Enum):
-    """The authentication context the issuer certified for this token. It is settled once, at issuance, by the only party that authenticates: an Agent Identity is always 'aal2', and a person reaches 'aal1', 'aal2' or 'aal3' from the ceremony they completed. A route states the least it accepts and the issuer compares, so nothing downstream recomputes it. Local 'aal3' is a fresh approved AAL2 ceremony and claims no NIST AAL3."""
+    """The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks. Product 'aal3' requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity."""
 
     aal1 = "aal1"
     aal2 = "aal2"
@@ -80,20 +80,20 @@ class AssuranceLevel(str, Enum):
         json_schema = handler.resolve_ref_schema(handler(core_schema))
         json_schema.update(
             {
-                "description": "The authentication context the issuer certified for this token. It is settled once, at issuance, by the only party that authenticates: an Agent Identity is always 'aal2', and a person reaches 'aal1', 'aal2' or 'aal3' from the ceremony they completed. A route states the least it accepts and the issuer compares, so nothing downstream recomputes it. Local 'aal3' is a fresh approved AAL2 ceremony and claims no NIST AAL3."
+                "description": "The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks. Product 'aal3' requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity."
             }
         )
         return json_schema
 
 
 class PlatformTokenIssueRequest(BaseModel):
-    """Ask for a platform token. The caller identifies with its Authorization header — a session JWT for a person, an API token for an Agent Identity — and supplies the public half of an ephemeral key pair it just generated. Both parties derive the pre-shared key; it is not sent in the public issuance request or response."""
+    """Ask for a platform token. A Human Identity identifies with a Keycloak access token; an Agent Identity identifies with its API token. The caller supplies the public half of a new ephemeral key pair. Both parties derive the pre-shared key, which is absent from the public request and response."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     tenant_id: Annotated[
         Union[tenant_id_module.TenantId, None],
         Field(
-            description="The tenant this token acts within. REQUIRED for a person and optional for an Agent Identity, because the two differ in whether it can be inferred: a person can hold several memberships, so a token minted for the wrong one would act with the wrong authority, while an agent belongs to exactly one tenant and its token names it. An agent may still send it, and the issuer refuses a value that disagrees with its token — which turns a client mistake into a refusal rather than a surprise."
+            description="The tenant this token acts within. Required for a Human Identity, which can hold several tenant memberships. Optional for an Agent Identity, whose API token already identifies its single tenant. An explicit tenant must match that token's tenant."
         ),
     ] = None
     client_public_key: Annotated[

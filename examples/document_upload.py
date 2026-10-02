@@ -6,7 +6,7 @@ Tenant-scoped ``library:upload`` and access from which ``library:write`` and
 ``library:read`` can be derived for the new Library. Run with
 ``python examples/document_upload.py path/to/document.pdf``. The example creates
 a call-scoped Library and uploads the file. Arrange later Dashboard cleanup by
-a person with ``library:delete`` and a fresh AAL3 sign-in; the SDK's AAL2
+a Human Identity with ``library:delete`` and valid ``aal3`` authentication; the SDK's AAL2
 API-token session cannot delete the whole Library. The automated test suite
 does not execute this example.
 
@@ -74,7 +74,7 @@ async def main() -> None:
         receipt = receipts[attachments[0].key]
         print(  # noqa: T201
             f"Cleanup required after this example: delete Library {receipt.library_id} "
-            "in the Dashboard with library:delete and a fresh sign-in."
+            "in the Dashboard with library:delete and valid aal3 authentication; sign in when prompted."
         )
         document = await sdk.libraries.wait_for_document(
             LibraryDocumentGetRequest(

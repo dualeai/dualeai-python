@@ -151,13 +151,13 @@ class PlatformTokenProvider:
     issuer blip fails a request that a still-valid credential could have served.
 
     THE BANDS ARE FRACTIONS OF THE TOKEN'S OWN LIFETIME, where botocore uses
-    fixed 15- and 10-minute timeouts. The issuer controls the lifetime: an AAL3
-    token expires at its ceremony's freshness deadline, so it may have only
-    seconds remaining when issued. A fixed 15-minute advisory margin would
-    reissue a short token on every call, and a 10-minute mandatory margin could
-    never be satisfied. Fractions scale to the validity the issuer returns.
+    fixed 15- and 10-minute timeouts. The issuer controls the lifetime, and a
+    token may have only seconds remaining when received. A fixed 15-minute
+    advisory margin would reissue a short token on every call, and a 10-minute
+    mandatory margin could never be satisfied. Fractions scale to the validity
+    the issuer returns.
     ``test_the_bands_scale_to_a_short_lived_token`` covers short-token rotation;
-    SDK tests do not enforce the issuer's ceremony-freshness deadline.
+    ``test_a_delayed_issuance_schedules_from_receipt_time`` covers issuance latency.
 
     :meth:`invalidate` requests replacement after a possible credential refusal.
     The stamped expiry does not reveal early withdrawal or distinguish it from
@@ -220,16 +220,16 @@ class PlatformTokenProvider:
             now = _now()
             if held is not None and now < held.refresh_at:
                 return held.token
-            # Decided BEFORE the attempt: whether a failure is survivable depends
-            # on the cover we hold now, not on how long the attempt took.
-            survivable = held is not None and now < held.renew_by
             try:
                 issued = await issue(self._session, self._endpoint, self._api_token)
+                now = _now()
+                if issued.valid_until <= now:
+                    raise ValueError("Issued platform token has already expired")
             except Exception:
-                if not survivable:
+                # Issuance can outlast cover or race its invalidation.
+                if held is None or self._held is not held or _now() >= held.renew_by:
                     raise
                 # Keep the held token after an advisory failure; the next call retries.
-                assert held is not None
                 return held.token
             self._held = self._schedule(issued, now=now)
             return issued
