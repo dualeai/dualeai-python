@@ -39,12 +39,12 @@ from dualeai.events.http_transport import (
     HTTPTransportStreamError,
 )
 from dualeai.exceptions import BusinessError, DualeAIAuthError, DualeAIConnectionError
+from dualeai.models.attachment import Attachment
 from dualeai.models.bridge import (
     AgentDeregistrationMessage,
     AgentHeartbeatMessage,
     AgentRegistrationMessage,
-    Attachment,
-    BridgeSSEEvent,
+    BridgeContentDeltaResponse,
     BridgeTaskContinueRequest,
     BridgeTaskCreateRequest,
     BridgeToolResultsRequest,
@@ -69,7 +69,7 @@ from dualeai.models.library import (
 from dualeai.models.response_format import JsonSchemaResponseFormat, PredefinedResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.models.task_stop import TaskStopRequest
-from dualeai.models.tool import Parameters, Tool
+from dualeai.response import StreamingContentEvent
 
 _TOKEN = "dualeai_test_v3_token_padded_beyond_32_bytes"
 _TENANT = "tenant-test"
@@ -477,6 +477,7 @@ async def test_agent_lifecycle_rejects_wrong_accepted_status_and_malformed_repli
 def _task_request() -> BridgeTaskCreateRequest:
     return BridgeTaskCreateRequest(
         type="create",
+        routing_policy=RoutingPolicy(),
         action_prompt="Synthetic action",
         deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
     )
@@ -491,7 +492,7 @@ def _completed_block(event_id: str = "1:1") -> bytes:
 
 def _delta_block(event_id: str, delta: str) -> bytes:
     data = json.dumps(
-        {"type": "content.delta", "timestamp": "2026-09-24T00:00:00Z", "delta": delta},
+        {"type": "content.delta", "delta": delta, "generation": 1, "sequence": 0},
         separators=(",", ":"),
     )
     return f"id: {event_id}\nevent: content.delta\ndata: {data}\n\n".encode()
@@ -554,24 +555,51 @@ async def _with_stream_session(results: list[_StreamReply | BaseException]) -> t
 
 
 @pytest.mark.unit
-async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> None:
-    tool = Tool(
-        name="reserve",
-        description="Reserve units.",
-        parameters=Parameters.model_validate(
-            {
-                "type": "object",
-                "properties": {"sku": {"type": "string"}},
-                "required": ["sku"],
-                "additionalProperties": False,
-            }
+@pytest.mark.parametrize(
+    ("policy", "wire_policy"),
+    [
+        pytest.param(None, {}, id="default-empty-object"),
+        pytest.param(
+            RoutingPolicy(target_accuracy=0.9, cost_sensitivity=None),
+            {"target_accuracy": 0.9, "cost_sensitivity": None},
+            id="sent-fields-and-explicit-null",
         ),
+    ],
+)
+async def test_sdk_tasks_send_a_required_policy_object(
+    policy: RoutingPolicy | None, wire_policy: dict[str, object]
+) -> None:
+    """Creation and continuation send an object, retaining only the policy fields set by the caller."""
+    transport, session = await _with_stream_session(
+        [_StreamReply([_completed_block()]), _StreamReply([_completed_block()])]
     )
+    sdk = DualeAISDK(
+        config=DualeAIConfig(endpoint="https://api.example.test", token=_TOKEN, tenant_id=_TENANT),
+        transport=transport,
+        auto_start=False,
+    )
+    try:
+        parent = await sdk.submit_task(
+            "Synthetic action", capabilities=[], routing_policy=policy, request_id="task-policy-parent"
+        )
+        await parent.task
+        child = await parent.next("Continue", routing=policy, request_id="task-policy-child")
+        await child.task
+    finally:
+        await sdk.cleanup()
+
+    create_call, continue_call = session.calls
+    for call in (create_call, continue_call):
+        assert isinstance(call.body, dict)
+        assert call.body["routing_policy"] == wire_policy
+
+
+@pytest.mark.unit
+async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> None:
     request = BridgeTaskCreateRequest(
         type="create",
         action_prompt="do it",
         deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
-        tools=[tool],
         routing_policy=RoutingPolicy(target_accuracy=0.9, required_capabilities=[Capability.analysis]),
         response_format=JsonSchemaResponseFormat(json_schema={"type": "object"}),
         response_stream=True,
@@ -591,17 +619,13 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
     assert body["attachments"] == [
         {"key": "attachment-key", "filename": "report.pdf", "description": "Quarterly report"}
     ]
-    tools = body["tools"]
-    assert isinstance(tools, list)
-    parameters = tools[0]["parameters"]
-    assert parameters["additionalProperties"] is False
-    assert "additional_properties" not in parameters
 
 
 @pytest.mark.unit
 async def test_continuation_and_tool_results_send_literal_child_bodies_and_cursor() -> None:
     continuation = BridgeTaskContinueRequest(
         type="continue",
+        routing_policy=RoutingPolicy(),
         parent_task_id="parent-task-123",
         message="Continue with é漢🙂",
         response_format=PredefinedResponseFormat.json,
@@ -628,6 +652,7 @@ async def test_continuation_and_tool_results_send_literal_child_bodies_and_curso
     ]
     assert session.calls[0].body == {
         "type": "continue",
+        "routing_policy": {},
         "parent_task_id": "parent-task-123",
         "message": "Continue with é漢🙂",
         "response_format": "json",
@@ -656,6 +681,7 @@ async def test_task_rejected_finite_reply_keeps_problem_and_does_not_retry(monke
     )
     continuation = BridgeTaskContinueRequest(
         type="continue",
+        routing_policy=RoutingPolicy(),
         parent_task_id="parent-task-123",
         message="Continue",
         deadline=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
@@ -692,17 +718,17 @@ async def test_task_resumes_after_nonterminal_event_and_closes_each_stream(monke
     transport, session = await _with_stream_session([first, second])
     client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
     await client.connect()
-    deltas: list[str] = []
+    delivered: list[StreamingContentEvent] = []
     try:
         result = await client.run_task(
             task_id="task-1",
             request=_task_request(),
-            delta_callback=lambda event: deltas.append(event.delta),
+            content_callback=delivered.append,
         )
     finally:
         await client.disconnect()
     assert result.type == "task.completed"
-    assert deltas == ["first"]
+    assert delivered == [BridgeContentDeltaResponse(type="content.delta", delta="first", generation=1, sequence=0)]
     assert [call.method for call in session.calls] == ["POST", "GET"]
     assert all(urlsplit(call.url).path == "/v1/hpke/tasks/task-1" for call in session.calls)
     assert session.calls[1].headers["Last-Event-ID"] == "5:1"
@@ -745,38 +771,73 @@ async def test_task_recovers_from_missing_end_with_the_last_delivered_cursor(mon
 
 @pytest.mark.unit
 async def test_public_terminal_consumer_closes_live_iterator() -> None:
-    event = BridgeSSEEvent.model_validate(
-        {
-            "id": "1:1",
-            "timestamp": datetime(2026, 9, 24, tzinfo=timezone.utc),
-            "data": {
-                "type": "task.completed",
-                "timestamp": "2026-09-24T00:00:00Z",
-                "result": {"completion": "done", "cache_hit": False},
-            },
+    reply = _StreamReply([_completed_block(), AssertionError("read past terminal")])
+    transport, session = await _with_stream_session([reply])
+    client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
+    await client.connect()
+    try:
+        result = await client.run_task(task_id="task-terminal-0001", request=_task_request())
+
+        assert result.type == "task.completed"
+        assert reply.closed is True
+        assert len(session.calls) == 1
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("answer", ["sse_200", "finite_403"])
+async def test_run_task_reports_acceptance_when_the_stream_starts(answer: str) -> None:
+    """Acceptance precedes the first event, including when an accepted stream stays quiet."""
+    reader_started = asyncio.Event()
+    release_first_block = asyncio.Event()
+
+    class HeldReply(_StreamReply):
+        async def iter_sse(self) -> AsyncIterator[bytes]:
+            reader_started.set()
+            await release_first_block.wait()
+            async for block in super().iter_sse():
+                yield block
+
+    if answer == "sse_200":
+        reply = HeldReply([_completed_block()])
+    else:
+        problem = {
+            "title": "Forbidden",
+            "status": 403,
+            "detail": "synthetic",
+            "error_code": "AUTHORIZATION_FAILED",
+            "retryable": False,
         }
+        reply = _StreamReply([json.dumps(problem).encode()], status=403, mode="finite")
+    transport, _ = await _with_stream_session([reply])
+    calls: list[str] = []
+    stream = transport.run_task(
+        "task-accept-0001",
+        _task_request(),
+        accepted_callback=lambda: calls.append("accepted"),
     )
-    closed = False
 
-    async def stream() -> AsyncIterator[BridgeSSEEvent]:
-        nonlocal closed
+    if answer == "sse_200":
+        first_event = asyncio.create_task(anext(stream))
         try:
-            yield event
-            await asyncio.Future()  # A live connection would otherwise remain open.
-        finally:
-            closed = True
+            await asyncio.wait_for(reader_started.wait(), timeout=2.0)
+            assert calls == ["accepted"], "Accepted headers must release the caller before the first event"
+            assert not first_event.done()
 
-    client = CloudEventsClient(DualeAIConfig(token=_TOKEN))
-    result = await client._consume_terminal_stream(
-        task_id="task-1",
-        stream=stream(),
-        operation="task_run",
-        delta_callback=None,
-        reset_callback=None,
-        tool_use_callback=None,
-    )
-    assert result.type == "task.completed"
-    assert closed
+            release_first_block.set()
+            first = await asyncio.wait_for(first_event, timeout=2.0)
+            assert first.data.type == "task.completed"
+            assert [event async for event in stream] == []
+            assert calls == ["accepted"]
+        finally:
+            first_event.cancel()
+            await asyncio.gather(first_event, return_exceptions=True)
+            await stream.aclose()
+    else:
+        with pytest.raises(HTTPTransportAuthError):
+            _ = [event async for event in stream]
+        assert calls == []
 
 
 @pytest.mark.unit
@@ -850,7 +911,7 @@ async def test_task_retry_flag_and_http_status_are_independent(monkeypatch, stat
         "title": "Task request failed",
         "status": body_status,
         "detail": "synthetic",
-        "error_code": "PUBLISH_FAILED",
+        "error_code": "INTERNAL_ERROR",
     }
     if flag is not None:
         problem["retryable"] = flag
@@ -985,6 +1046,7 @@ async def test_task_error_context_identifies_the_operation(operation: str) -> No
                     if operation == "task_run"
                     else BridgeTaskContinueRequest(
                         type="continue",
+                        routing_policy=RoutingPolicy(),
                         parent_task_id="parent-task-123",
                         message="continue",
                         deadline=_task_request().deadline,
@@ -1329,7 +1391,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
     await site.start()
     config = DualeAIConfig(endpoint=f"https://localhost:{runner.addresses[0][1]}", token=_TOKEN)
     client = CloudEventsClient(config)
-    delivered: list[str] = []
+    delivered: list[StreamingContentEvent] = []
     try:
         await client.connect()
         if fault in {"finite_integrity", "sse_integrity"}:
@@ -1337,7 +1399,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
                 await client.run_task(
                     task_id="task-native",
                     request=_task_request(),
-                    delta_callback=lambda delta: delivered.append(delta.delta),
+                    content_callback=delivered.append,
                 )
             assert error.value.context.error_code == "authentication_failed"
             assert error.value.problem_details is None
@@ -1346,7 +1408,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
             result = await client.run_task(
                 task_id="task-native",
                 request=_task_request(),
-                delta_callback=lambda delta: delivered.append(delta.delta),
+                content_callback=delivered.append,
             )
             assert result.type == "task.completed"
             assert result.result.completion == "done"
@@ -1369,7 +1431,11 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
     for method, _path, headers, body in calls[1:]:
         assert body == (b"" if method == "GET" else calls[0][3])
         assert headers.get("last-event-id") == ("3:1" if fault in {"outer_resume", "eof_delta"} else None)
-    assert delivered == (["first"] if fault in {"outer_resume", "eof_delta"} else [])
+    assert delivered == (
+        [BridgeContentDeltaResponse(type="content.delta", delta="first", generation=1, sequence=0)]
+        if fault in {"outer_resume", "eof_delta"}
+        else []
+    )
 
 
 @pytest.mark.integration
@@ -1487,7 +1553,7 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
         )
 
     app = web.Application()
-    app.router.add_route("POST", "/profile/platform-token", platform_token)
+    app.router.add_route("POST", "/profile/v1/raw/platform-token", platform_token)
     app.router.add_route("*", "/http-bridge/v1/hpke", endpoint)
     app.router.add_route("*", "/libraries/v1/hpke", endpoint)
     runner = web.AppRunner(app)

@@ -79,7 +79,7 @@ from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.models.tool import Tool
 
 # Orchestration
-from dualeai.orchestrator import ask, continue_conversation
+from dualeai.orchestrator import ask
 
 # Core SDK
 from dualeai.sdk import DualeAISDK
@@ -232,7 +232,6 @@ __all__ = [
     "activity",
     "ask",
     "configure_logging",
-    "continue_conversation",
     "create_cache_backend",
     "create_sdk",
     "current_tool_context",

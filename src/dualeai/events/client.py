@@ -40,9 +40,9 @@ from dualeai.models.bridge import (
     BridgeToolUseResponse,
 )
 from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
+from dualeai.response import StreamingContentEvent
 
-DeltaCallback = Callable[[BridgeContentDeltaResponse], None]
-ResetCallback = Callable[[BridgeContentResetResponse], None]
+ContentCallback = Callable[[StreamingContentEvent], None]
 ToolUseCallback = Callable[[BridgeToolUseResponse, str | None], None]
 
 logger = structlog.get_logger(__name__)
@@ -79,33 +79,28 @@ def _raise_translated(prefix: str, error: HTTPTransportError) -> NoReturn:
 
 
 def _dispatch_stream_event(
-    data: object,
-    event_id: str | None,
-    delta_callback: DeltaCallback | None,
-    reset_callback: ResetCallback | None,
+    event: BridgeSSEEvent,
+    content_callback: ContentCallback | None,
     tool_use_callback: ToolUseCallback | None,
 ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse | None:
-    """Route one SSE event payload to its callback; return the terminal event or None.
+    """Route one SSE event payload to its callback; return the terminal payload or None.
 
-    Content-delta, content-reset, and tool-use events invoke their callback
-    (when provided) and return None so the caller keeps iterating. A terminal
-    event is returned so the caller stops and yields it.
+    Content-delta and content-reset events invoke the content callback, and
+    tool-use events invoke the tool-use callback with the event id, when
+    provided; each returns None so the caller keeps iterating. Every other
+    ``BridgeSSEEvent.data`` variant is terminal and is returned so the caller
+    stops and yields it.
     """
-    if isinstance(data, BridgeContentDeltaResponse):
-        if delta_callback is not None:
-            delta_callback(data)
-        return None
-    if isinstance(data, BridgeContentResetResponse):
-        if reset_callback is not None:
-            reset_callback(data)
+    data = event.data
+    if isinstance(data, (BridgeContentDeltaResponse, BridgeContentResetResponse)):
+        if content_callback is not None:
+            content_callback(data)
         return None
     if isinstance(data, BridgeToolUseResponse):
         if tool_use_callback is not None:
-            tool_use_callback(data, event_id)
+            tool_use_callback(data, event.id)
         return None
-    if isinstance(data, (BridgeTaskCompletedResponse, BridgeTaskErrorResponse, BridgeTaskStoppedResponse)):
-        return data
-    return None
+    return data
 
 
 class CloudEventsClient:
@@ -233,9 +228,9 @@ class CloudEventsClient:
         *,
         task_id: str,
         request: BridgeTaskRequest,
-        delta_callback: DeltaCallback | None = None,
-        reset_callback: ResetCallback | None = None,
+        content_callback: ContentCallback | None = None,
         tool_use_callback: ToolUseCallback | None = None,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Submit one typed task request and consume its task-keyed stream.
 
@@ -245,16 +240,22 @@ class CloudEventsClient:
 
         Args:
             task_id: Client-owned ID in the HTTP task path. The request decides
-                whether it represents a root or continuation child.
+                whether it represents a root or continuation child. Root and
+                continuation callers may select it (``request_id``); otherwise
+                the SDK generates UUID4.
             request: Validated create or continuation request body.
-            delta_callback: Sync callback invoked on each
-                ``BridgeContentDeltaResponse``. Must be fast — runs on
-                the SSE iteration coroutine.
-            reset_callback: Sync callback invoked when previously emitted
-                content must be discarded before rendering replacement output.
+            content_callback: Sync callback invoked in arrival order on each
+                ``BridgeContentDeltaResponse`` and on each
+                ``BridgeContentResetResponse``, which starts a new generation.
+                Must be fast — runs on the SSE iteration coroutine.
             tool_use_callback: Sync callback invoked on each
                 ``BridgeToolUseResponse`` with its SSE event id. Same
                 fast-callback rule.
+            accepted_callback: Called once when the Platform accepts the
+                request, as its authenticated event stream starts; never called
+                for a refused request.
+                ``tests/test_http_transport_v3.py::test_run_task_reports_acceptance_when_the_stream_starts``
+                enforces this for the production transport.
 
         Returns:
             The terminal event: ``BridgeTaskCompletedResponse`` on success,
@@ -281,10 +282,9 @@ class CloudEventsClient:
         operation = "task_continue" if request.type == "continue" else "task_run"
         return await self._consume_terminal_stream(
             task_id=task_id,
-            stream=transport.run_task(task_id, request),
+            stream=transport.run_task(task_id, request, accepted_callback=accepted_callback),
             operation=operation,
-            delta_callback=delta_callback,
-            reset_callback=reset_callback,
+            content_callback=content_callback,
             tool_use_callback=tool_use_callback,
         )
 
@@ -294,8 +294,7 @@ class CloudEventsClient:
         task_id: str,
         stream: AsyncIterator[BridgeSSEEvent],
         operation: Literal["task_run", "task_continue", "tool_results"],
-        delta_callback: DeltaCallback | None,
-        reset_callback: ResetCallback | None,
+        content_callback: ContentCallback | None,
         tool_use_callback: ToolUseCallback | None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Consume one bridge SSE stream through the shared terminal contract."""
@@ -307,13 +306,7 @@ class CloudEventsClient:
         try:
             try:
                 async for event in stream:
-                    terminal = _dispatch_stream_event(
-                        event.data,
-                        event.id,
-                        delta_callback,
-                        reset_callback,
-                        tool_use_callback,
-                    )
+                    terminal = _dispatch_stream_event(event, content_callback, tool_use_callback)
                     if terminal is not None:
                         logger.info("Task terminated", task_id=task_id, outcome=type(terminal).__name__)
                         return terminal
@@ -349,8 +342,6 @@ class CloudEventsClient:
         task_id: str,
         request: BridgeToolResultsRequest,
         last_event_id: str | None = None,
-        delta_callback: DeltaCallback | None = None,
-        reset_callback: ResetCallback | None = None,
         tool_use_callback: ToolUseCallback | None = None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Submit tool results and consume the same public task stream to terminal.
@@ -368,8 +359,7 @@ class CloudEventsClient:
                 last_event_id=last_event_id,
             ),
             operation="tool_results",
-            delta_callback=delta_callback,
-            reset_callback=reset_callback,
+            content_callback=None,
             tool_use_callback=tool_use_callback,
         )
 

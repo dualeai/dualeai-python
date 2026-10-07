@@ -2,7 +2,7 @@
 
 Covers the hot paths: Pydantic model validation (config, SSE events),
 cache key generation/validation, JSON serialization, SSE parsing,
-and utility functions (string truncation, backoff math).
+and string truncation.
 
 Run with: make test-bench
 
@@ -48,8 +48,9 @@ def content_delta_json() -> str:
     return json.dumps(
         {
             "type": "content.delta",
-            "timestamp": "2025-01-01T00:00:00Z",
             "delta": "Hello, world!",
+            "generation": 1,
+            "sequence": 0,
         }
     )
 
@@ -76,8 +77,9 @@ def sse_event_content_delta() -> dict[str, object]:
         "id": "42:1",
         "data": {
             "type": "content.delta",
-            "timestamp": "2025-01-01T00:00:00Z",
             "delta": "streaming chunk",
+            "generation": 1,
+            "sequence": 0,
         },
         "timestamp": "2025-01-01T00:00:00Z",
     }
@@ -267,7 +269,7 @@ class TestCacheOperations:
 
 
 # ===========================================================================
-# Utility functions — string truncation, backoff math
+# Utility functions — string truncation
 # ===========================================================================
 
 
@@ -280,5 +282,3 @@ class TestUtilities:
         @benchmark
         def _() -> None:
             truncate_error_preview(error)
-
-    # Backoff-tracker benchmarks were removed alongside ConsecutiveTimeoutTracker.

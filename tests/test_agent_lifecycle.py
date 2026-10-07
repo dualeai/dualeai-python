@@ -249,7 +249,7 @@ def test_registered_tools_returns_detached_models(
     async def close_security_gate(gate_id: str) -> dict[str, str]:
         return {"gate_id": gate_id}
 
-    initial_hash = sdk._config_hash()
+    initial_hash = sdk._lifecycle.config_hash()
     published = sdk.registered_tools
     published[0].tool.description = "Mutated outside the SDK"
     published[0].tool.parameters.properties["gate_id"]["type"] = "integer"
@@ -257,7 +257,7 @@ def test_registered_tools_returns_detached_models(
     current = sdk.registered_tools[0]
     assert current.tool.description == "Close a named security gate."
     assert current.tool.parameters.properties["gate_id"]["type"] == "string"
-    assert sdk._config_hash() == initial_hash
+    assert sdk._lifecycle.config_hash() == initial_hash
 
 
 @pytest.mark.unit
@@ -1021,8 +1021,8 @@ async def test_registered_tool_config_hash_uses_canonical_escaped_json(
     # Frozen golden for a non-ASCII manifest. It pins ensure_ascii encoding so the
     # same manifest keeps one digest across SDK processes and versions.
     non_ascii_golden = "24aaaefd01809222bd43b0c78f1d802af6ad0c100326269ddac9383c643b7232"
-    assert sdk._config_hash() == non_ascii_golden
-    assert sdk._config_hash() == sdk._config_hash()  # stable across repeated calls
+    assert sdk._lifecycle.config_hash() == non_ascii_golden
+    assert sdk._lifecycle.config_hash() == sdk._lifecycle.config_hash()  # stable across repeated calls
 
 
 @pytest.mark.unit
@@ -1047,7 +1047,7 @@ async def test_config_hash_includes_and_canonicalizes_parameters(
         async def set_gate(width: int, height: int) -> dict[str, int]:
             return {"width": width, "height": height}
 
-        return sdk._config_hash()
+        return sdk._lifecycle.config_hash()
 
     def one_param_hash() -> str:
         sdk = DualeAISDK(
@@ -1060,7 +1060,7 @@ async def test_config_hash_includes_and_canonicalizes_parameters(
         async def set_gate(width: int) -> dict[str, int]:
             return {"width": width}
 
-        return sdk._config_hash()
+        return sdk._lifecycle.config_hash()
 
     # Stable canonicalization: identical manifest → identical hash.
     assert two_param_hash() == two_param_hash()
@@ -1096,7 +1096,7 @@ async def test_registered_tool_config_hash_golden_detects_schema_gen_drift(
     # Re-pinned when generated tool schemas began preserving $ref/$defs and field
     # titles.
     golden = "3692635cfc9984ac26236f3b4e74d2110d6630ca38e64db6bea2239d2887afd6"
-    assert sdk._config_hash() == golden
+    assert sdk._lifecycle.config_hash() == golden
 
 
 @pytest.mark.unit
@@ -1116,7 +1116,7 @@ async def test_registered_tool_config_hash_is_a_one_sided_canonicalization_golde
     async def close_gate() -> dict[str, str]:
         return {}
 
-    assert sdk._config_hash() == "065c719fed99b179e89d484df76bc68922d5c6206f1a2799fb96bf5023989ee0"
+    assert sdk._lifecycle.config_hash() == "065c719fed99b179e89d484df76bc68922d5c6206f1a2799fb96bf5023989ee0"
 
 
 @pytest.mark.unit
@@ -1141,7 +1141,7 @@ def test_registered_tool_config_hash_normalizes_negative_zero(
         async def configure_gate(value: float = default) -> dict[str, float]:
             return {"value": value}
 
-        return sdk._config_hash()
+        return sdk._lifecycle.config_hash()
 
     assert config_hash(-0.0) == config_hash(0.0)
 

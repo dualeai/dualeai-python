@@ -10,14 +10,15 @@ that the Task has stopped.
 
 Terminal, streaming, continuation, and stop behavior is covered by
 ``tests/test_feature_results.py``, ``tests/test_streaming_callbacks.py``,
-``tests/test_feature_multiturn.py``, and ``tests/test_task_stop.py``. No dedicated
-automated test covers continuation model defaults, parent result validation, or
-stream-runner failures during streaming.
+``tests/test_feature_multiturn.py``, and ``tests/test_task_stop.py``.
+``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_next_sends_only_the_criteria_the_caller_sets``
+covers continuation defaults; no dedicated automated test covers parent result
+validation or stream-runner failures during streaming.
 """
 
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import TYPE_CHECKING, Generic, TypeVar, overload
 
@@ -40,10 +41,12 @@ from dualeai.models.bridge import (
 from dualeai.models.llm_result import LLMResult
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.response_format import ResponseFormat
+from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.models.task_stop import TaskStopAccepted
 from dualeai.utils import get_type_name
 
 if TYPE_CHECKING:
+    from dualeai.attachments import PreparedAttachment
     from dualeai.sdk import DualeAISDK
 
 logger = structlog.get_logger(__name__)
@@ -61,10 +64,10 @@ def _exception_from_terminal(terminal: BridgeTaskErrorResponse, task_id: str) ->
     The SDK does NOT re-bucket platform error codes into an artificial
     timeout/auth/connection taxonomy. The canonical wire identifier is
     ``terminal.data.error_code`` (e.g. ``TASK_DEADLINE_EXCEEDED``,
-    ``BILLING_LIMIT_EXCEEDED``, ``AUTHORIZATION_FAILED``,
-    ``RESOURCE_NOT_FOUND``, ``TOOL_VALIDATION_FAILED``,
-    ``LOOP_DETECTED``, ``INTERNAL_ROUTING``) and callers branch on it
-    directly. Additional envelope fields (``retryable``,
+    ``BILLING_LIMIT_EXCEEDED``, ``LLM_NO_PROGRESS``, ``INTERNAL_ERROR``) and
+    callers branch on it directly. ``error_code`` is a string, and the public
+    errors page ("Errors and reliability", https://duale.ai/en/docs/sdk/errors)
+    lists every code. Additional envelope fields (``retryable``,
     ``retry_after_seconds``, ``owner_action_required``, ``error_category``) live
     on ``exc.problem_details`` so retry logic reads them without an SDK-side
     mapping table. When ``errors`` is present, each item can carry ``ai_hints``
@@ -88,7 +91,8 @@ class AgentResponse(Generic[T]):
     """Handle one Task's content events and terminal result.
 
     ``T`` is the optional local result type used by :meth:`model`. Iterating
-    :meth:`stream` exposes content preview events only; call :meth:`model`
+    :meth:`stream` exposes content deltas and resets in arrival order, each with
+    a ``generation``; call :meth:`model`
     afterward to apply terminal error and result-validation semantics.
     """
 
@@ -99,9 +103,9 @@ class AgentResponse(Generic[T]):
         expected_type: type[T] | None = None,
         *,
         sdk: "DualeAISDK",
-        streaming: bool = False,
+        accepted: asyncio.Event,
         delta_queue: asyncio.Queue[StreamingContentEvent] | None = None,
-        deltas: list[BridgeContentDeltaResponse] | None = None,
+        deltas: list[StreamingContentEvent] | None = None,
     ) -> None:
         """Initialize agent response.
 
@@ -114,17 +118,19 @@ class AgentResponse(Generic[T]):
                 validation.
             sdk: SDK instance — kept on the response so ``next()`` can
                 start a continuation.
-            streaming: Whether streaming deltas were requested.
+            accepted: Set when the Platform accepts this Task's request, or
+                when this response's runner ends; ``next`` waits on it.
             delta_queue / deltas: Shared streaming buffers populated by
                 the spawn-time callbacks. SDK passes these in so the spawn
                 callback can close over them without needing the response
-                object yet.
+                object yet. ``streaming`` is True exactly when both are given.
         """
         self.task_id: str = task_id
         self.task: asyncio.Task[TerminalEvent] = task
         self.expected_type: type[T] | None = expected_type
         self.sdk: DualeAISDK = sdk
-        self.streaming: bool = streaming
+        self._accepted: asyncio.Event = accepted
+        self.streaming: bool = delta_queue is not None and deltas is not None
         # LLMResult cached after first model() call.
         self._llm_result: LLMResult | None = None
         self._llm_result_loaded: bool = False
@@ -135,11 +141,9 @@ class AgentResponse(Generic[T]):
         self._delta_queue = delta_queue
         self._deltas = deltas
 
-    async def _await_terminal(self, *, isolate_waiter_cancellation: bool = False) -> "TerminalEvent":
-        """Await the terminal event, optionally preserving shared task ownership."""
+    async def _await_terminal(self) -> "TerminalEvent":
+        """Await the terminal event of this response's runner."""
         try:
-            if isolate_waiter_cancellation:
-                return await asyncio.shield(self.task)
             return await self.task
         except asyncio.CancelledError:
             if self.task.cancelled():
@@ -371,14 +375,16 @@ class AgentResponse(Generic[T]):
     async def stream(self) -> AsyncGenerator[StreamingContentEvent, None]:
         """Stream real-time content changes from agent execution.
 
-        Yields content deltas as the bridge produces them. A content reset
-        tells consumers to discard previously rendered deltas before applying
-        later replacement output. Backed by ``asyncio.Queue`` (event-driven,
-        no busy-poll).
+        Yields content deltas and resets in arrival order, which can differ
+        from answer order. Keep only the highest ``generation``, which a reset
+        starts, and display its deltas by ``sequence``. Backed by
+        ``asyncio.Queue`` (event-driven, no busy-poll).
 
-        Replay: iterating ``stream()`` after the task is done yields
-        the buffered ``_deltas`` list — useful for re-rendering on UI
-        re-mount.
+        Replay: iterating ``stream()`` after the task is done yields every
+        buffered content event, resets included, in arrival order — useful
+        for re-rendering on UI re-mount.
+        ``tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_replay_repeats_every_content_event_in_arrival_order``
+        enforces this.
 
         With ``streaming=False`` this method just awaits the task and returns
         without yielding. Terminal ``task.error`` and ``task.stopped`` events
@@ -389,17 +395,15 @@ class AgentResponse(Generic[T]):
         ends iteration without propagating its exception; with
         ``streaming=False``, awaiting that runner propagates it.
         """
-        if not self.streaming:
+        delta_queue, deltas = self._delta_queue, self._deltas
+        if delta_queue is None or deltas is None:
             await self.task
             return
 
-        if self._delta_queue is None or self._deltas is None:
-            raise RuntimeError("Streaming response is missing its content buffers")
-
         # Replay path after the terminal task has completed.
         if self.task.done():
-            for delta in self._deltas:
-                yield delta
+            for event in deltas:
+                yield event
             return
 
         # Live path. Two phases per iteration:
@@ -413,13 +417,13 @@ class AgentResponse(Generic[T]):
         #    still running, race the next ``queue.get`` against
         #    ``self.task`` completion.
         while True:
-            while not self._delta_queue.empty():
-                yield self._delta_queue.get_nowait()
+            while not delta_queue.empty():
+                yield delta_queue.get_nowait()
 
             if self.task.done():
                 return
 
-            get_task: asyncio.Task[StreamingContentEvent] = asyncio.create_task(self._delta_queue.get())
+            get_task: asyncio.Task[StreamingContentEvent] = asyncio.create_task(delta_queue.get())
             done, _pending = await asyncio.wait(
                 {get_task, self.task},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -461,73 +465,135 @@ class AgentResponse(Generic[T]):
         res: type[T] | None = None,
         deadline: datetime | None = None,
         response_format: ResponseFormat | None = None,
+        streaming: bool | None = None,
+        routing: RoutingPolicy | None = None,
+        attachments: "list[PreparedAttachment] | None" = None,
+        request_id: str | None = None,
     ) -> "AgentResponse[T]":
-        """Submit a next message as a child of this Task.
+        """Start a continuation Task that carries this Task's conversation forward.
 
-        Waits for a completed terminal event before the SDK creates and submits
-        a distinct child task. It does not validate the parent result; call
-        :meth:`model` first if your application requires that check. A parent
-        error, stopped event, or cancellation propagates without a child.
+        Sends it as soon as the Platform has accepted this Task's request,
+        without waiting for this Task's outcome: the Platform continues the
+        conversation of this Task's last finished step, whether this Task is
+        still running, completed, failed or stopped. A continuation that
+        arrives before this Task finishes its first step waits for that step
+        until its own deadline, then fails with ``PARENT_TASK_UNAVAILABLE``.
+        The new Task has its own identifier (``request_id``, or a new UUID4),
+        deadline, result and stop. A setting left as None takes this Task's
+        value; attachments add documents. The new Task inherits only the
+        conversation. The Platform accepts a continuation only while this
+        immediate parent Task is within its own 30-day retention window.
+        The continuation uses the inherited conversation context that remains
+        available. Conversation content expires 30 days after the request that
+        supplied it. System instructions may remain available for up to 90 days
+        after the request that supplied them. Tool Calls of the last finished
+        step that have no recorded reply appear to the model as 'status unknown'.
+        This Task's final answer text is not part of the conversation.
 
-        The request sends this response's ``task_id`` as ``parent_task_id`` and
-        creates a new, non-streaming child with its own UUID4 identifier. It
-        does not mutate this response or another child. Conversation history,
-        routing, and attachment treatment beyond those wire fields are platform
-        behavior rather than guarantees implemented by this class.
+        Requires ``agent:continue_task`` and ``agent:read_task`` on this Task,
+        plus ``agent:read_task`` on the new Task. The new Task runs under this
+        Task's Agent Identity.
+
+        This method never raises this Task's outcome; call ``model()`` for it.
+        Cancelling this call before it sends the continuation sends nothing and
+        leaves this Task running.
+
+        ``tests/test_feature_multiturn.py`` enforces the SDK side:
+        ``test_next_continues_a_running_parent_at_once``,
+        ``test_next_continues_after_any_parent_outcome``,
+        ``test_next_waits_only_for_the_parents_acceptance``,
+        ``test_cancelling_one_next_waiter_preserves_parent_and_sibling``,
+        ``test_next_sends_only_the_criteria_the_caller_sets``,
+        ``test_omitted_streaming_keeps_the_parents_local_buffering`` and
+        ``test_continuation_http_rejection_uses_continuation_translation``; so do
+        ``tests/test_http_transport_v3.py::test_task_error_context_identifies_the_operation``
+        and ``tests/test_http_transport_v3.py::test_run_task_reports_acceptance_when_the_stream_starts``.
+        No test in this repository enforces the Platform behavior described here.
 
         Args:
-            message: New user turn for the child task.
-            res: Optional child result type for local validation. Omission does
-                not inherit the parent's type. When ``response_format`` is
-                absent, the SDK also derives the type's JSON Schema for the
-                request.
-            deadline: Timezone-aware child deadline. Omission uses the SDK's
-                default Task timeout.
+            message: New user turn for the continuation Task.
+            res: Optional continuation result type for local validation.
+                Omission does not inherit the parent's type. When
+                ``response_format`` is absent, the SDK also derives the type's
+                JSON Schema for the request. When neither ``res`` nor
+                ``response_format`` is given, the Platform keeps this Task's
+                response format.
+            deadline: Timezone-aware continuation deadline. Omission uses the
+                SDK's default Task timeout, not this Task's deadline.
             response_format: Explicit wire response format. It takes precedence
-                over schema derivation from ``res``.
+                over schema derivation from ``res``. None keeps this Task's
+                value when ``res`` is also None.
+            streaming: Request content delta/reset events for the continuation's
+                ``stream()``. None keeps this Task's value, on the Platform and
+                for the returned response's local buffering.
+            routing: Routing Policy of the continuation Task. None keeps this
+                Task's value.
+            attachments: Prepared attachments already uploaded under
+                ``request_id``. None adds no document.
+            request_id: Task identifier of the continuation Task; upload its
+                attachments under it with
+                ``upload_attachments(request_id, attachments)``; None generates
+                a UUID4.
 
         Returns:
-            An ``AgentResponse`` whose ``task_id`` is the new UUID4 child ID.
+            An ``AgentResponse`` whose ``task_id`` is ``request_id``, or a new
+            UUID4.
 
         Raises:
-            DualeAIError: If the parent finished with a task error.
-            TaskStoppedError: If the parent finished with a stopped event.
             ValueError: If ``deadline`` is timezone-naive.
-            asyncio.CancelledError: If this waiter is cancelled. The shared
-                parent Task continues running.
+            asyncio.CancelledError: If this call is cancelled before it sends
+                the continuation; this Task keeps running.
 
-        Cancelling this waiter does not cancel the shared parent task or other
-        callers waiting to create sibling continuations.
+        A refused continuation (``AUTHORIZATION_FAILED``) raises
+        ``DualeAIAuthError`` when the returned response's ``model()`` is
+        awaited. A continuation of a parent that the Platform never admitted,
+        or that does not exist, waits until its own deadline; ``model()`` then
+        raises ``DualeAIError`` with ``PARENT_TASK_UNAVAILABLE``. A known parent
+        Task that expired and whose record the Platform still holds ends the
+        continuation with ``PARENT_TASK_NOT_FOUND``. A ``request_id`` already
+        used by this Agent Identity names that existing Task: the returned
+        response streams it, and no second Task starts.
+        ``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_continuation_child_error_preserves_problem_details``
+        enforces that ``model()`` raises the continuation's error code; no test
+        in this repository enforces these Platform answers.
 
         Example:
             response = await ask(action="What's 2+2?", sdk=sdk)
+            branch = await response.next(message="and times two?")
             result = await response.model()
-
-            continued = await response.next(message="and times two?")
-            final = await continued.model()
+            final = await branch.model()
         """
-        terminal = await self._await_terminal(isolate_waiter_cancellation=True)
-        if isinstance(terminal, BridgeTaskStoppedResponse):
-            # A stop is not a task failure, so it carries no problem details.
-            raise TaskStoppedError(terminal.reason, task_id=self.task_id)
-        if isinstance(terminal, BridgeTaskErrorResponse):
-            raise _exception_from_terminal(terminal, self.task_id)
+        await self._accepted.wait()
         return await self.sdk._continue_task(  # noqa: SLF001 - paired SDK response implementation
             parent_task_id=self.task_id,
             message=message,
             response_type=res,
             deadline=deadline,
             response_format=response_format,
+            streaming=streaming,
+            local_streaming=streaming if streaming is not None else self.streaming,
+            routing_policy=routing,
+            attachments=attachments,
+            request_id=request_id,
         )
 
     async def stop(self, reason: str) -> TaskStopAccepted:
         """Submit a stop request for this Task.
 
-        Unlike :meth:`next`, this does not wait for the task to finish — waiting
-        would defeat the purpose. The returned receipt acknowledges only the
-        request: it does not prove that this Task exists, is eligible to stop,
-        or will emit ``task.stopped``. If that terminal event later arrives,
-        :meth:`model` raises :class:`TaskStoppedError` with the event's reason.
+        This does not wait for the Task to finish — waiting would defeat the
+        purpose. The returned receipt does not prove that the Task stopped. If
+        ``task.stopped`` later arrives, :meth:`model` raises
+        :class:`TaskStoppedError` with the event's reason.
+
+        Requires ``agent:stop_task`` on the Task; an Agent Identity holds it on
+        its own Tasks by default. Without the permission the call raises
+        ``DualeAIAuthError`` (``AUTHORIZATION_FAILED``) at once. A permitted
+        stop is accepted even when the Task already ended or the Platform does
+        not know it; a stop of a Task that already ended changes nothing.
+
+        ``tests/test_task_stop.py::test_refused_stop_raises_the_authorization_error``
+        enforces the refusal. No test in this repository enforces that a
+        permitted stop of an ended or unknown Task is accepted.
 
         Args:
             reason: Why the task is being stopped. Required, non-empty.
@@ -537,7 +603,9 @@ class AgentResponse(Generic[T]):
 
         Raises:
             ValueError: If ``reason`` is empty or whitespace.
-            DualeAIError: If the stop request fails before acceptance.
+            DualeAIAuthError: If the Platform refuses the stop (403).
+            DualeAIError: If the stop request fails before acceptance for any
+                other reason.
 
         Example:
             response = await ask(action="Analyse this contract", sdk=sdk)
@@ -549,7 +617,3 @@ class AgentResponse(Generic[T]):
                 print(stopped.reason)
         """
         return await self.sdk.stop_task(self.task_id, reason)
-
-    def __or__(self, message: str) -> Coroutine[object, object, "AgentResponse[T]"]:
-        """Pipe operator for continuing conversations."""
-        return self.next(message)

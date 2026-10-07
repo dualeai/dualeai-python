@@ -11,7 +11,7 @@ Protocol conformance is exercised through the production and mock transports in
 ``tests/test_http_transport_v3.py`` and ``tests/mocks/mock_http.py``.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from dualeai.models.bridge import BridgeTaskContinueRequest, BridgeTaskCreateRequest
@@ -72,8 +72,10 @@ class HTTPTransportProtocol(Protocol):
     async def stop_task(self, task_id: str, request: "TaskStopRequest") -> "TaskStopAccepted":
         """Submit a Task stop request and return its acceptance receipt.
 
-        Acceptance does not prove that the target exists, is eligible to stop,
-        or will later emit ``task.stopped``.
+        The receipt confirms that the caller may stop the Task. It proves
+        neither that the Task exists nor that it stopped: a permitted stop of a
+        Task that already ended, or that the Platform does not know, is also
+        accepted. No test in this repository enforces this Platform behavior.
         """
         ...
 
@@ -81,6 +83,8 @@ class HTTPTransportProtocol(Protocol):
         self,
         task_id: str,
         request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit a root create or child continuation and stream that task.
 
@@ -89,10 +93,15 @@ class HTTPTransportProtocol(Protocol):
         SSE response starts, the retry loop uses encrypted GET on the same path.
 
         Args:
-            task_id: Client-owned task ID in the URL. Root callers may select
-                it; otherwise the SDK generates UUID4. Continuations use a new
-                SDK-generated UUID4 child ID.
+            task_id: Client-owned task ID in the URL. Root and continuation
+                callers may select it (``request_id``); otherwise the SDK
+                generates UUID4.
             request: Fully validated bridge request body.
+            accepted_callback: Called once when the Platform accepts the
+                request, as its authenticated event stream starts; never called
+                for a refused request.
+                ``tests/test_http_transport_v3.py::test_run_task_reports_acceptance_when_the_stream_starts``
+                enforces this for the production transport.
 
         Yields:
             BridgeSSEEvent objects from SSE stream.

@@ -41,21 +41,13 @@ The table lists requirements beyond the token and, for Tasks, configured-model a
 | [`inventory_agent.py`](inventory_agent.py) | Agent ID | Advanced: sync and async Tools, side-effect safety, and error redaction |
 | [`document_upload.py`](document_upload.py) | Tenant ID, Agent ID, synthetic file, Library permissions below | Upload, ingest, attach, and submit one document with a Task |
 | [`library_management.py`](library_management.py) | Tenant ID, Library permissions below | Create, upload to, and inspect a persistent Library without configuring an Agent ID |
-| [`streaming_minimal.py`](streaming_minimal.py) | None | Basic: print a replaceable preview and a labeled final result |
-| [`streaming_demo.py`](streaming_demo.py) | None | Record reset and completion metadata with structured logging |
-| [`streaming_with_visualization.py`](streaming_with_visualization.py) | `rich` | Advanced: replace content in a Rich terminal display |
-| [`streaming_web_ui_pattern.py`](streaming_web_ui_pattern.py) | None | Advanced: keep content and status state separate for WebSocket or SSE UIs |
+| [`streaming_minimal.py`](streaming_minimal.py) | None | Basic: print the streamed answer in order, then the final result |
+| [`streaming_web_ui_pattern.py`](streaming_web_ui_pattern.py) | None | Advanced: keep ordered content and status state separate for WebSocket or SSE UIs |
 
 Run the smallest example from the repository root:
 
 ```bash
 python examples/streaming_minimal.py
-```
-
-Install `rich` before running `streaming_with_visualization.py`:
-
-```bash
-python -m pip install rich
 ```
 
 Before running either document workflow, obtain Tenant-scoped `library:upload`. Your existing access must let the
@@ -89,14 +81,25 @@ on a Task stream.
 
 <!-- Evidence: tests/test_tool_dispatch_invariants.py::TestServeOpensNoTaskStream::test_serve_makes_lifecycle_requests_only; tests/test_tool_dispatch_invariants.py::TestToolUseCarriesNoTaskIdentity::test_tool_use_event_has_no_task_id_field; tests/test_agent_lifecycle.py::test_tool_results_submission_resumes_after_triggering_tool_use_event. -->
 
-## Handle streaming replacement
+## Order and replace streamed content
 
-Treat deltas as a preview. On `BridgeContentResetResponse`, clear the buffer and build the replacement from later deltas.
-Take the authoritative result from `await response.model()`, not from the accumulated preview; the two can differ.
-[`streaming_web_ui_pattern.py`](streaming_web_ui_pattern.py) demonstrates buffer replacement and final-result handling.
-The terminal-only `streaming_minimal.py` prints a reset marker because it cannot withdraw text already printed.
+Streamed content is a live view of the answer while the Platform writes it, and chunks can arrive out of order. Every
+`BridgeContentDeltaResponse` carries `generation` and `sequence`; a `BridgeContentResetResponse` carries the
+`generation` it starts:
 
-<!-- Evidence: tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_reset_withdraws_failed_output_from_live_and_replay_views. -->
+1. Keep only events from the highest `generation`; a higher generation replaces everything from earlier ones.
+2. Display that generation's deltas sorted by `sequence`.
+
+`response.stream()` yields events in arrival order. A replay after completion repeats every event, resets included.
+Take the final answer from `await response.model()`. It can differ from the streamed text and, for an answer with no
+format or the `text` format, it is the only copy that can carry the
+[content mark](https://duale.ai/en/docs/content-marking). Only free-text answers stream: pass no `res` or
+`response_format`, or use the `text` or `markdown` format.
+[`streaming_web_ui_pattern.py`](streaming_web_ui_pattern.py) keeps the ordered text in UI state. The terminal-only
+[`streaming_minimal.py`](streaming_minimal.py) prints the corrected text again when a late chunk or a reset changes text
+it already printed.
+
+<!-- Evidence: tests/test_sse_parser.py::TestSSEParserEvents::test_parser_accepts_the_frozen_content_delta_wire_event; tests/test_sse_parser.py::TestSSEParserEvents::test_parse_sse_preserves_content_replacement; tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_replay_repeats_every_content_event_in_arrival_order. No automated test runs the ordering rule in these examples. Out-of-order arrival, the free-text rule and the content mark are Platform behavior; no test in this repository enforces them. -->
 
 ## Project links
 

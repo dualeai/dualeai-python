@@ -16,7 +16,7 @@ from dualeai import DualeAISDK
 from dualeai.constants import TimingDefaults
 from dualeai.models.bridge import BridgeTaskContinueRequest, BridgeTaskCreateRequest
 from dualeai.models.capability import Capability
-from dualeai.orchestrator import ask, continue_conversation
+from dualeai.orchestrator import ask
 from tests.mocks.mock_http import require_mock_http_transport
 
 
@@ -63,8 +63,7 @@ class TestUnitDeadlineHandling:
         await parent.task
 
         # Continue task with deadline
-        await continue_conversation(
-            response=parent,
+        await parent.next(
             message="Continue the task",
             deadline=deadline,
         )

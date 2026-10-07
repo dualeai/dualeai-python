@@ -90,10 +90,13 @@ For application tests without a live connection, use the
 
 ## Integrate into an application
 
-- **Results:** treat streamed text as a preview. Clear it on `BridgeContentResetResponse` and use
-  `await response.model()` for the validated result.
+- **Results:** streamed text is a live view of the answer and can arrive out of order. Order it by `generation` and
+  `sequence` as the [examples guide](https://github.com/dualeai/dualeai-python/blob/main/examples/README.md#order-and-replace-streamed-content)
+  shows, and use `await response.model()` for the validated result.
 - **Stopping:** cancelling `response.task` stops local observation. Use `await response.stop(reason)` to request a
   Platform Stop. The response confirms acceptance of the Stop request, not that the Task has stopped.
+  A Stop without the permission is refused at once with `DualeAIAuthError`. A permitted Stop is accepted even when
+  the Task has already ended or the Platform does not know it.
   Keep `response.task_id` for diagnosis; the SDK cannot reattach to a Task using only its saved ID.
 - **Tools:** calls execute on Task streams opened by the same SDK instance that registered the functions. Protect
   side effects with durable duplicate detection and redact exception text with `error_transform`. The
@@ -103,7 +106,7 @@ For application tests without a live connection, use the
   them. Optional telemetry instrumentation also acts across the process. Coordinate these settings with your host
   application.
 
-<!-- Proof owners: tests/test_streaming_callbacks.py, tests/test_task_stop.py, tests/test_tool_dispatch_invariants.py and tests/test_agent_lifecycle.py. Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings without dedicated automated tests. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. -->
+<!-- Proof owners: tests/test_streaming_callbacks.py, tests/test_task_stop.py, tests/test_tool_dispatch_invariants.py and tests/test_agent_lifecycle.py. Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings without dedicated automated tests. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; no test in this repository enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; no test in this repository enforces it. -->
 
 ## Project links
 

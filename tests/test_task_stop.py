@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from dualeai import BridgeTaskStoppedResponse, DualeAISDK, TaskStoppedError
+from dualeai import BridgeTaskStoppedResponse, DualeAIAuthError, DualeAISDK, TaskStoppedError
+from dualeai.events.http_transport import HTTPTransportAuthError
 from dualeai.models.bridge import BridgeSSEEvent
+from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.task_stop import TaskStopRequest
 from tests.mocks.mock_http import require_mock_http_transport
 
@@ -34,6 +36,32 @@ async def test_stop_task_posts_the_reason(minimal_mock_sdk: DualeAISDK) -> None:
     assert request["task_id"] == "task-stop-me-123456"
     assert isinstance(request["request"], TaskStopRequest)
     assert request["request"].reason == "Wrong document supplied"
+
+
+@pytest.mark.unit
+async def test_refused_stop_raises_the_authorization_error(minimal_mock_sdk: DualeAISDK) -> None:
+    """A stop without the permission raises from the stop call itself."""
+    transport = require_mock_http_transport(minimal_mock_sdk)
+    transport.fail_next_stop(
+        HTTPTransportAuthError(
+            "HTTP 403",
+            problem_details=ProblemDetails(
+                title="Forbidden",
+                status=403,
+                detail="synthetic",
+                error_code="AUTHORIZATION_FAILED",
+                retryable=False,
+            ),
+            status_code=403,
+        )
+    )
+
+    with pytest.raises(DualeAIAuthError) as refused:
+        await minimal_mock_sdk.stop_task("task-stop-me-123456", "Wrong document supplied")
+
+    assert refused.value.problem_details is not None
+    assert refused.value.problem_details.error_code == "AUTHORIZATION_FAILED"
+    assert [record["operation"] for record in transport.get_requests()] == ["stop_task"]
 
 
 @pytest.mark.unit

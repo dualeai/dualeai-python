@@ -9,7 +9,7 @@ Presigned object-store uploads are separate. Transport behavior is covered by
 import asyncio
 import json
 import ssl
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from http import HTTPStatus
@@ -651,12 +651,19 @@ class HTTPTransport:
         except ValidationError as error:
             raise HTTPTransportConnectionError(schema_error) from error
 
-    def run_task(self, task_id: str, request: BridgeTaskRequest) -> AsyncGenerator[BridgeSSEEvent, None]:
+    def run_task(
+        self,
+        task_id: str,
+        request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
+    ) -> AsyncGenerator[BridgeSSEEvent, None]:
         return self._stream_request(
             method="POST",
             path=f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}",
             task_id=task_id,
             json_data=dump_wire_model(request),
+            accepted_callback=accepted_callback,
         )
 
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
@@ -824,6 +831,7 @@ class HTTPTransport:
         task_id: str,
         json_data: Mapping[str, object] | None = None,
         last_event_id: str | None = None,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncGenerator[BridgeSSEEvent, None]:
         """Run or resume the Task stream with the service's stable-ID contract.
 
@@ -836,6 +844,11 @@ class HTTPTransport:
         after this operation's authenticated SSE 200 START. Reconnect with the
         last checked event ID when available. EOF without a Task terminal is
         recoverable; completed, error, and stopped terminals end consumption.
+
+        `accepted_callback` runs once, at the first authenticated SSE 200 START;
+        a finite answer, an error status, a failure before that START, and a
+        later reconnect never call it.
+        `test_run_task_reports_acceptance_when_the_stream_starts` checks this.
 
         `test_task_mixed_budget_counts_renewal_without_an_http_request` checks
         the shared budget; `test_task_terminal_does_not_read_or_retry_past_the_result`
@@ -891,6 +904,8 @@ class HTTPTransport:
                                 f"Task stream returned HTTP {response.status} in mode {response.mode}: {path}",
                                 status_code=response.status,
                             )
+                        if accepted_callback is not None and not stream_established:
+                            accepted_callback()
                         stream_established = True
                         try:
                             async for event in parse_sse_stream(response.iter_sse()):

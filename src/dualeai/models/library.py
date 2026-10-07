@@ -279,7 +279,7 @@ class LibraryDocumentDeleteRequest(BaseModel):
 
 
 class LibraryErrorCode(str, Enum):
-    """Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and PERMISSION_DRIFT require choosing an active Library or restoring write access."""
+    """Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."""
 
     expired_upload = "EXPIRED_UPLOAD"
     hash_mismatch = "HASH_MISMATCH"
@@ -290,18 +290,17 @@ class LibraryErrorCode(str, Enum):
     encrypted_document = "ENCRYPTED_DOCUMENT"
     extraction_failed = "EXTRACTION_FAILED"
     processing_timeout = "PROCESSING_TIMEOUT"
+    document_processing_failed = "DOCUMENT_PROCESSING_FAILED"
     malware_detected = "MALWARE_DETECTED"
     library_deleted = "LIBRARY_DELETED"
-    permission_drift = "PERMISSION_DRIFT"
-    index_write_failed = "INDEX_WRITE_FAILED"
-    segment_lost = "SEGMENT_LOST"
+    library_access_revoked = "LIBRARY_ACCESS_REVOKED"
 
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         json_schema = handler.resolve_ref_schema(handler(core_schema))
         json_schema.update(
             {
-                "description": "Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and PERMISSION_DRIFT require choosing an active Library or restoring write access."
+                "description": "Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."
             }
         )
         return json_schema

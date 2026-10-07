@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator, Generator, Mapping
+from collections.abc import AsyncIterator, Callable, Generator, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -202,7 +202,13 @@ class _MotoMetadataTransport(HTTPTransportProtocol):
     async def disconnect(self) -> None:
         self._connected = False
 
-    def run_task(self, task_id: str, request: BridgeTaskRequest) -> AsyncIterator[BridgeSSEEvent]:
+    def run_task(
+        self,
+        task_id: str,
+        request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
+    ) -> AsyncIterator[BridgeSSEEvent]:
         raise NotImplementedError("Task streams are outside this object-store fixture")
 
     async def create_document_upload(self, request: LibraryDocumentUploadRequest) -> LibraryDocumentUploadResponse:

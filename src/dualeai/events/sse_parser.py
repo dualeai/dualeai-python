@@ -43,7 +43,7 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
     SSE format (per spec):
         id: 123:1
         event: content.delta
-        data: {"type": "content.delta", "delta": "..."}
+        data: {"type": "content.delta", "delta": "...", "generation": 1, "sequence": 0}
         <empty line = event boundary>
 
     The SSE ``event`` field and JSON ``type`` discriminator must match.
@@ -153,7 +153,8 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
                 data_lines.append(value)
                 data_bytes = next_data_bytes
             elif field == "retry":
-                # Retry field - ignored, handled at transport level
+                # Ignore server retry values; HTTPTransport uses its own retry policy.
+                # test_parse_sse_skips_events_without_payload covers retry-only frames.
                 pass
             # Unknown fields are ignored per spec
 

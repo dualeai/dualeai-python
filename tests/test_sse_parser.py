@@ -37,18 +37,22 @@ class CheckedBlockReader:
 
 
 # Valid test payloads matching Pydantic models
-_CONTENT_DELTA = '{"type":"content.delta","timestamp":"2025-01-01T00:00:00Z","delta":"hello"}'
-_CONTENT_DELTA_2 = '{"type":"content.delta","timestamp":"2025-01-01T00:00:01Z","delta":"world"}'
-_CONTENT_RESET = '{"type":"content.reset","timestamp":"2025-01-01T00:00:01Z","generation":2}'
+_CONTENT_DELTA = '{"type":"content.delta","delta":"hello","generation":1,"sequence":0}'
+_CONTENT_DELTA_2 = '{"type":"content.delta","delta":"world","generation":1,"sequence":1}'
+_CONTENT_RESET = '{"type":"content.reset","generation":2}'
 _TASK_COMPLETED = '{"type":"task.completed","timestamp":"2025-01-01T00:00:00Z","result":{"completion":"done"}}'
 
 # The frozen `content.delta` event is written out in full rather than assembled
 # from the parts above. It pins the exact public wire bytes accepted by the SDK.
 _FROZEN_EVENT = (
-    "id: 1:1\n"
-    "event: content.delta\n"
-    'data: {"type":"content.delta","timestamp":"2025-01-01T00:00:00Z","delta":"hello"}\n'
-    "\n"
+    'id: 1:1\nevent: content.delta\ndata: {"type":"content.delta","delta":"hello","generation":3,"sequence":7}\n\n'
+)
+
+# Two `data:` lines: 24 bytes, then 50 bytes in 46 characters ("é" is U+00E9, two bytes; "🚀" is four bytes).
+_MULTIBYTE_TWO_LINE_DELTA = (
+    "id: 1:1\nevent: content.delta\n"
+    'data: {"type":"content.delta",\n'
+    'data: "delta":"héllo 🚀","generation":1,"sequence":1}\n\n'
 )
 
 
@@ -63,7 +67,7 @@ class TestSSEParserEvents:
         assert len(events) == 1
         assert events[0].id == "1:1"
         assert isinstance(events[0].data, BridgeContentDeltaResponse)
-        assert events[0].data.delta == "hello"
+        assert (events[0].data.delta, events[0].data.generation, events[0].data.sequence) == ("hello", 3, 7)
 
     @pytest.mark.unit
     async def test_initial_bom_and_persistent_id_follow_sse_rules(self):
@@ -156,16 +160,28 @@ class TestSSEParserEdges:
     """Malformed and forward-compat edge cases."""
 
     @pytest.mark.unit
-    async def test_parse_sse_rejects_added_fields_on_a_known_event(self):
-        payload = (
-            '{"type":"tool.use","timestamp":"2026-07-07T00:00:00Z","tool_call_id":"c1",'
-            '"name":"gate","input":{},"deadline_at":"2026-07-07T00:00:10Z",'
-            '"future_server_field":"ignored"}'
-        )
-        stream = f"id: 1:1\nevent: tool.use\ndata: {payload}\n\n"
+    @pytest.mark.parametrize(
+        ("event", "payload"),
+        [
+            pytest.param(
+                "tool.use",
+                '{"type":"tool.use","timestamp":"2026-07-07T00:00:00Z","tool_call_id":"c1",'
+                '"name":"gate","input":{},"deadline_at":"2026-07-07T00:00:10Z",'
+                '"future_server_field":"ignored"}',
+                id="tool_use",
+            ),
+            pytest.param(
+                "content.delta",
+                '{"type":"content.delta","delta":"hello","generation":1,"sequence":1,"delta_tokens":5}',
+                id="content_delta",
+            ),
+        ],
+    )
+    async def test_parse_sse_rejects_added_fields_on_a_known_event(self, event: str, payload: str):
+        stream = f"id: 1:1\nevent: {event}\ndata: {payload}\n\n"
 
         with pytest.raises(SSEParseError, match="Invalid SSE event"):
-            _ = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
+            _ = [parsed async for parsed in parse_sse_stream(CheckedBlockReader(stream))]
 
     @pytest.mark.unit
     async def test_parse_sse_rejects_added_fields_in_a_known_nested_result(self):
@@ -217,17 +233,24 @@ class TestSSEParserEdges:
     @pytest.mark.unit
     async def test_parse_sse_accepts_event_at_data_byte_limit(self, monkeypatch: pytest.MonkeyPatch):
         """The event-data cap is inclusive and counts UTF-8 wire bytes."""
-        boundary_data = '{"type":"content.delta",\n"timestamp":"2025-01-01T00:00:00Z","delta":"hello"}'
-        monkeypatch.setattr(sse_parser, "_MAX_SSE_EVENT_BYTES", len(boundary_data.encode()))
-        stream = (
-            "id: 1:1\nevent: content.delta\n"
-            'data: {"type":"content.delta",\n'
-            'data: "timestamp":"2025-01-01T00:00:00Z","delta":"hello"}\n\n'
-        )
+        # 24 + 1 joining newline + 50 bytes = 75 bytes, but 71 characters: "é" and "🚀" are multibyte.
+        monkeypatch.setattr(sse_parser, "_MAX_SSE_EVENT_BYTES", 75)
 
-        events = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(_MULTIBYTE_TWO_LINE_DELTA))]
 
         assert len(events) == 1
+        assert events[0].id == "1:1"
+        assert events[0].data == BridgeContentDeltaResponse(
+            type="content.delta", delta="héllo 🚀", generation=1, sequence=1
+        )
+
+    @pytest.mark.unit
+    async def test_parse_sse_rejects_event_one_byte_over_data_limit(self, monkeypatch: pytest.MonkeyPatch):
+        """The same 75-byte event is refused one byte under its size."""
+        monkeypatch.setattr(sse_parser, "_MAX_SSE_EVENT_BYTES", 74)
+
+        with pytest.raises(SSEParseError, match="SSE event data exceeds 74 bytes"):
+            _ = [event async for event in parse_sse_stream(CheckedBlockReader(_MULTIBYTE_TWO_LINE_DELTA))]
 
     @pytest.mark.unit
     async def test_parse_sse_rejects_oversized_multiline_event(self, monkeypatch: pytest.MonkeyPatch):

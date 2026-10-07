@@ -42,7 +42,7 @@ string, and the golden vector is what keeps them equal.
 _HKDF_INFO: Final[bytes] = b"dualeai-platform-token/1"
 """Domain separation, versioned in the label. Matches the issuer exactly."""
 
-_ISSUANCE_PATH: Final[str] = "/profile/platform-token"
+_ISSUANCE_PATH: Final[str] = "/profile/v1/raw/platform-token"
 """Where the token service issues, behind the Gateway prefix the other services use."""
 
 

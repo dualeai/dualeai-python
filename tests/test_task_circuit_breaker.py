@@ -11,6 +11,7 @@ from dualeai.events.http_transport import HTTPTransportAuthError, HTTPTransportC
 from dualeai.exceptions import DualeAIAuthError, DualeAIConnectionError, DualeAIError
 from dualeai.models.bridge import BridgeSSEEvent, BridgeTaskCreateRequest, BridgeTaskErrorResponse
 from dualeai.models.problem_details import ErrorCategory, ProblemDetails
+from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.orchestrator import ask
 from tests.mocks.mock_http import MockHTTPTransport
 
@@ -146,7 +147,7 @@ class TestTaskCircuitBreaker:
     @pytest.mark.parametrize(
         ("error_code", "error_category"),
         [
-            ("TOOL_VALIDATION_FAILED", ErrorCategory.config),
+            ("LLM_CONFIG_UNAVAILABLE", ErrorCategory.config),
             ("AUTHORIZATION_FAILED", ErrorCategory.integrity),
             ("BILLING_LIMIT_EXCEEDED", ErrorCategory.config),
         ],
@@ -238,12 +239,13 @@ class TestTaskCircuitBreaker:
                 task_id="cancelled-admission",
                 request=BridgeTaskCreateRequest(
                     type="create",
+                    routing_policy=RoutingPolicy(),
                     action_prompt="cancel",
                     deadline=datetime.now(timezone.utc) + timedelta(minutes=1),
                 ),
-                delta_callback=None,
-                reset_callback=None,
-                tool_use_callback=None,
+                content_callback=None,
+                tool_use_callback=lambda _tool_use, _event_id: None,
+                accepted_callback=lambda: None,
             )
 
         assert controller.metrics.tasks_failed == 0

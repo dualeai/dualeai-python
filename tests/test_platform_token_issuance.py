@@ -63,7 +63,7 @@ async def _issuer(answer: object) -> AsyncIterator[tuple[str, list[dict[str, obj
         return web.json_response(answer, status=HTTPStatus.CREATED)
 
     app = web.Application()
-    app.router.add_post("/profile/platform-token", handle)
+    app.router.add_post("/profile/v1/raw/platform-token", handle)
     server = TestServer(app)
     await server.start_server()
     try:

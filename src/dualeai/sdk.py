@@ -81,10 +81,8 @@ from dualeai.logging_config import (
     operation_context,
 )
 from dualeai.models.agent_id import AgentId
+from dualeai.models.attachment import Attachment
 from dualeai.models.bridge import (
-    Attachment,
-    BridgeContentDeltaResponse,
-    BridgeContentResetResponse,
     BridgeTaskContinueRequest,
     BridgeTaskCreateRequest,
     BridgeTaskErrorResponse,
@@ -353,10 +351,6 @@ class DualeAISDK:
         """Server-time estimate adjusted by the heartbeat clock offset (lifecycle clock)."""
         return self._lifecycle.estimated_server_time(local_now)
 
-    def _config_hash(self) -> str:
-        """Cross-tier config hash over the tool manifest (lifecycle manager owns the recipe)."""
-        return self._lifecycle.config_hash()
-
     async def _ensure_cache(self) -> CacheBackend[CacheableValue]:
         """Ensure cache backend is initialized."""
         cache = self._cache
@@ -551,16 +545,21 @@ class DualeAISDK:
         """Submit tool outputs and consume the emitting task's stream to terminal.
 
         Args:
-            task_id: Child task that emitted the matching ``tool.use`` events.
-                Never substitute its continuation parent.
+            task_id: Public Task that emitted the matching ``tool.use`` events,
+                either a root Task or a continuation. Never substitute its
+                continuation parent.
             results: Successful or failed outputs, each carrying its Tool-call id.
             last_event_id: Opaque SSE cursor of the triggering ``tool.use``
-                event. Passing it resumes after that event on the same child
+                event. Passing it resumes after that event on the same Task
                 stream.
 
         Returns:
             The terminal event from the same public ``task_id`` stream.
         """
+        # Public Task identity is covered by
+        # tests/test_agent_lifecycle.py::test_submit_tool_results_passes_generated_request_to_transport;
+        # root Task results are covered by
+        # tests/test_agent_lifecycle.py::test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool.
         request = BridgeToolResultsRequest(type="tool_results", tool_results=results)
         client = await self._ensure_events_client()
         return await client.submit_tool_results(task_id=task_id, request=request, last_event_id=last_event_id)
@@ -1071,14 +1070,23 @@ class DualeAISDK:
     async def stop_task(self, task_id: str, reason: str) -> TaskStopAccepted:
         """Request that the platform stop a Task.
 
-        The returned receipt only acknowledges the request. It does not prove
-        that the target exists, is eligible to stop, or will later emit a
-        ``task.stopped`` event. If such an event is observed, awaiting
+        The returned receipt does not prove that the Task stopped. If a
+        ``task.stopped`` event is observed, awaiting
         :meth:`AgentResponse.model <dualeai.response.AgentResponse.model>` raises
         :class:`dualeai.exceptions.TaskStoppedError` with the event's reason.
 
+        Requires ``agent:stop_task`` on the Task; an Agent Identity holds it on
+        its own Tasks by default. Without the permission the call raises
+        ``DualeAIAuthError`` (``AUTHORIZATION_FAILED``) at once. A permitted
+        stop is accepted even when the Task already ended or the Platform does
+        not know it; a stop of a Task that already ended changes nothing.
+
+        ``tests/test_task_stop.py::test_refused_stop_raises_the_authorization_error``
+        enforces the refusal. No test in this repository enforces that a
+        permitted stop of an ended or unknown Task is accepted.
+
         Args:
-            task_id: The task to stop.
+            task_id: A Task of the API token's Agent Identity.
             reason: Non-empty explanation sent with the request.
 
         Returns:
@@ -1086,7 +1094,9 @@ class DualeAISDK:
 
         Raises:
             ValueError: If ``reason`` is empty or whitespace.
-            DualeAIError: If the request fails before acceptance.
+            DualeAIAuthError: If the Platform refuses the stop (403).
+            DualeAIError: If the request fails before acceptance for any other
+                reason.
         """
         if not reason or not reason.strip():
             raise ValueError("Stop reason cannot be empty")
@@ -1192,12 +1202,25 @@ class DualeAISDK:
         deadline: datetime | None = None,
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
+        *,
+        streaming: bool | None = None,
+        local_streaming: bool,
+        routing_policy: RoutingPolicy | None = None,
+        attachments: list[PreparedAttachment] | None = None,
+        request_id: str | None = None,
     ) -> "AgentResponse[T]":
-        """Submit a child for a successful ``AgentResponse``.
+        """Submit a continuation Task of ``parent_task_id``, running or ended.
 
-        The SDK creates the child ID before submission. It sends that ID in the
-        HTTP task path and sends ``parent_task_id`` in the continuation
-        body. The returned ``AgentResponse.task_id`` is the child ID.
+        The continuation's Task id is ``request_id``, or a new UUID4. The SDK
+        sends that id in the HTTP task path and ``parent_task_id`` in the
+        continuation body. It always sends a ``routing_policy`` object, empty
+        when the caller sets no policy fields. It sends ``response_format``,
+        ``response_stream`` and ``attachments`` only when the caller set them;
+        an omitted criterion takes the parent Task's value on the Platform.
+        ``local_streaming`` selects the returned response's local buffering.
+        ``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_next_sends_only_the_criteria_the_caller_sets``
+        enforces the sent fields; no test in this repository enforces the
+        Platform's inheritance of an omitted field.
         """
         if deadline is not None and (deadline.tzinfo is None or deadline.utcoffset() is None):
             raise ValueError("Continuation deadline must be timezone-aware")
@@ -1211,9 +1234,14 @@ class DualeAISDK:
                 deadline,
                 response_type,
                 response_format,
+                streaming=streaming,
+                local_streaming=local_streaming,
+                routing_policy=routing_policy,
+                attachments=attachments,
+                request_id=request_id,
             ),
             task_type="continuation",
-            streaming=False,
+            streaming=local_streaming,
             trace_attributes={
                 "parent_task_id": parent_task_id,
             },
@@ -1284,39 +1312,40 @@ class DualeAISDK:
         task_id: str,
     ) -> tuple[
         asyncio.Queue[StreamingContentEvent] | None,
-        list[BridgeContentDeltaResponse] | None,
-        Callable[[BridgeContentDeltaResponse], None] | None,
-        Callable[[BridgeContentResetResponse], None] | None,
-        Callable[[BridgeToolUseResponse, str | None], None] | None,
+        list[StreamingContentEvent] | None,
+        Callable[[StreamingContentEvent], None] | None,
+        Callable[[BridgeToolUseResponse, str | None], None],
     ]:
         """Build streaming buffers + spawn-time callbacks.
 
-        Returns ``(delta_queue, deltas_list, delta_callback,
-        reset_callback, tool_use_callback)``. The content callbacks close
-        over the buffers, which are then passed into ``AgentResponse`` so
-        ``response.stream()`` reads what the callbacks write.
+        Returns ``(delta_queue, deltas, content_callback, tool_use_callback)``.
+        The content callback closes over the buffers, which are then passed
+        into ``AgentResponse`` so ``response.stream()`` reads what the callback
+        writes. The replay list keeps every content event, resets included, in
+        arrival order: events can arrive out of order, so only the consumer can
+        apply a reset.
+        ``tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_replay_repeats_every_content_event_in_arrival_order``
+        enforces this.
 
-        With ``streaming=False`` no streaming queues are allocated. The
-        tool-use callback still schedules registered SDK tool execution, because
-        bridge ``tool.use`` events are delivery events rather than user-visible
-        content streaming.
+        With ``streaming=False`` the buffers and the content callback are
+        ``None``, so content events are dropped;
+        ``tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_streaming_false_yields_no_deltas_even_if_emitted``
+        enforces this. The tool-use callback still schedules registered SDK
+        tool execution, because bridge ``tool.use`` events are delivery events
+        rather than user-visible content streaming.
         """
-        delta_queue: asyncio.Queue[StreamingContentEvent] | None = asyncio.Queue() if streaming else None
-        deltas: list[BridgeContentDeltaResponse] | None = [] if streaming else None
+        on_tool_use = partial(self._schedule_tool_use, task_id)
+        if not streaming:
+            return None, None, None, on_tool_use
 
-        def on_delta(delta: BridgeContentDeltaResponse) -> None:
-            if deltas is None or delta_queue is None:
-                return
-            deltas.append(delta)
-            delta_queue.put_nowait(delta)
+        delta_queue: asyncio.Queue[StreamingContentEvent] = asyncio.Queue()
+        deltas: list[StreamingContentEvent] = []
 
-        def on_reset(reset: BridgeContentResetResponse) -> None:
-            if deltas is None or delta_queue is None:
-                return
-            deltas.clear()
-            delta_queue.put_nowait(reset)
+        def on_content(event: StreamingContentEvent) -> None:
+            deltas.append(event)
+            delta_queue.put_nowait(event)
 
-        return delta_queue, deltas, on_delta, on_reset, partial(self._schedule_tool_use, task_id)
+        return delta_queue, deltas, on_content, on_tool_use
 
     async def _run_task_with_circuit_breaker(  # noqa: PLR0912, PLR0915 - explicit terminal and local outcome classification
         self,
@@ -1324,9 +1353,9 @@ class DualeAISDK:
         admission: asyncio.Future[None],
         task_id: str,
         request: BridgeTaskRequest,
-        delta_callback: Callable[[BridgeContentDeltaResponse], None] | None,
-        reset_callback: Callable[[BridgeContentResetResponse], None] | None,
-        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None] | None,
+        content_callback: Callable[[StreamingContentEvent], None] | None,
+        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None],
+        accepted_callback: Callable[[], None],
     ) -> TerminalEvent:
         """Run one terminal bridge task under the SDK-local breaker.
 
@@ -1335,6 +1364,13 @@ class DualeAISDK:
         The breaker tracks dependency health separately: a stream failure can
         count there, while a non-retryable Task error increments ``tasks_failed``
         without counting against the breaker.
+
+        ``accepted_callback`` runs when the Platform accepts the request, and
+        again when this runner ends, so a runner that ends before acceptance (a
+        refused request, a stream failure, a local cancellation) never leaves a
+        continuation waiting.
+        ``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_next_waits_only_for_the_parents_acceptance``
+        enforces both paths.
 
         ``test_local_failure_does_not_count_a_remote_failure`` and
         ``test_stream_failure_survives_metric_views_as_a_local_outcome`` enforce
@@ -1358,9 +1394,9 @@ class DualeAISDK:
                     terminal = await events_client.run_task(
                         task_id=task_id,
                         request=request,
-                        delta_callback=delta_callback,
-                        reset_callback=reset_callback,
+                        content_callback=content_callback,
                         tool_use_callback=tool_use_callback,
+                        accepted_callback=accepted_callback,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -1389,6 +1425,7 @@ class DualeAISDK:
             raise
         finally:
             self._inflight_tasks.pop(task_id, None)
+            accepted_callback()
             if admitted:
                 duration = time.time() - spawn_time
                 if terminal is None:
@@ -1407,9 +1444,9 @@ class DualeAISDK:
         *,
         task_id: str,
         request: BridgeTaskRequest,
-        delta_callback: Callable[[BridgeContentDeltaResponse], None] | None,
-        reset_callback: Callable[[BridgeContentResetResponse], None] | None,
-        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None] | None,
+        content_callback: Callable[[StreamingContentEvent], None] | None,
+        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None],
+        accepted_callback: Callable[[], None],
     ) -> asyncio.Task[TerminalEvent]:
         """Spawn one task and wait until the breaker admits or rejects it."""
         admission = asyncio.get_running_loop().create_future()
@@ -1418,9 +1455,9 @@ class DualeAISDK:
                 admission=admission,
                 task_id=task_id,
                 request=request,
-                delta_callback=delta_callback,
-                reset_callback=reset_callback,
+                content_callback=content_callback,
                 tool_use_callback=tool_use_callback,
+                accepted_callback=accepted_callback,
             )
         )
         self._inflight_tasks[task_id] = task
@@ -1454,13 +1491,14 @@ class DualeAISDK:
         - a fully validated create or continuation ``request``;
         - ``task_logger`` (via ``_prepare_task_submission``, with any
           op-specific bindings already attached);
-        - ``task_id`` (the *new* spawn id, never the parent — see
-          continue path which mints a fresh UUID).
+        - ``task_id`` (the *new* spawn id, never the parent: a continuation's
+          Task id is its ``request_id``, or a new UUID4).
 
         Pipeline: open ``operation_context`` → ``FlowLogger.start`` → build
-        streaming buffers → spawn the protected bridge-iteration task → build
-        the ``AgentResponse`` →
-        ``FlowLogger.step`` / ``FlowLogger.end`` → ``await
+        streaming buffers and the acceptance Event → spawn the protected
+        bridge-iteration task, which sets the Event when the Platform accepts
+        the request or when the runner ends → build the ``AgentResponse`` with
+        that Event → ``FlowLogger.step`` / ``FlowLogger.end`` → ``await
         asyncio.sleep(0)`` so the spawned task reaches its first
         suspension before the caller sees the response.
 
@@ -1470,17 +1508,18 @@ class DualeAISDK:
         with operation_context(operation_name):
             FlowLogger.start(task_logger, operation_name, task_id)
 
-            delta_queue, deltas, on_delta, on_reset, on_tool_use = self._build_streaming_buffers(
+            delta_queue, deltas, on_content, on_tool_use = self._build_streaming_buffers(
                 streaming,
                 task_id,
             )
+            accepted = asyncio.Event()
             try:
                 task = await self._spawn_run_task(
                     task_id=task_id,
                     request=request,
-                    delta_callback=on_delta,
-                    reset_callback=on_reset,
+                    content_callback=on_content,
                     tool_use_callback=on_tool_use,
+                    accepted_callback=accepted.set,
                 )
             except BaseException:
                 FlowLogger.end(task_logger, operation_name, task_id, success=False)
@@ -1490,7 +1529,7 @@ class DualeAISDK:
                 task=task,
                 expected_type=response_type,
                 sdk=self,
-                streaming=streaming,
+                accepted=accepted,
                 delta_queue=delta_queue,
                 deltas=deltas,
             )
@@ -1507,40 +1546,53 @@ class DualeAISDK:
         deadline: datetime | None = None,
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
+        *,
+        streaming: bool | None = None,
+        local_streaming: bool,
+        routing_policy: RoutingPolicy | None = None,
+        attachments: list[PreparedAttachment] | None = None,
+        request_id: str | None = None,
     ) -> "AgentResponse[T]":
         """Internal task continuation: spawn task, return AgentResponse.
 
-        ``parent_task_id`` is the public parent. The SDK creates the child ID before
-        any HTTP work and keeps it on the returned ``AgentResponse``.
+        ``parent_task_id`` is the public parent. The continuation's Task id is
+        ``request_id``, or a new UUID4, chosen before any HTTP work and kept on
+        the returned ``AgentResponse``. The required policy object carries only
+        the fields the caller set; an omitted policy is an empty object.
         """
-        continuation_task_id = str(uuid4())
+        continuation_task_id = request_id or str(uuid4())
         deadline, task_logger = self._prepare_task_submission(
             operation_type="task_continuation",
             task_id=continuation_task_id,
             deadline=deadline,
-            streaming=False,
+            streaming=local_streaming,
         )
+        criteria: dict[str, object] = {}
         resolved_response_format = self._response_format_default(response_format, response_type, None)
-        if resolved_response_format is None:
-            request = BridgeTaskContinueRequest(
-                type="continue",
-                parent_task_id=parent_task_id,
-                message=message,
-                deadline=deadline,
-            )
-        else:
-            request = BridgeTaskContinueRequest(
-                type="continue",
-                parent_task_id=parent_task_id,
-                message=message,
-                deadline=deadline,
-                response_format=resolved_response_format,
-            )
+        if resolved_response_format is not None:
+            criteria["response_format"] = resolved_response_format
+        if streaming is not None:
+            criteria["response_stream"] = streaming
+        if attachments:
+            criteria["attachments"] = [
+                Attachment(key=attachment.key, filename=attachment.filename, description=attachment.description)
+                for attachment in attachments
+            ]
+        request = BridgeTaskContinueRequest.model_validate(
+            {
+                "type": "continue",
+                "parent_task_id": parent_task_id,
+                "message": message,
+                "deadline": deadline,
+                "routing_policy": routing_policy if routing_policy is not None else RoutingPolicy(),
+                **criteria,
+            }
+        )
         return await self._spawn_and_wrap_response(
             operation_name="task_continuation",
             task_id=continuation_task_id,
             request=request,
-            streaming=False,
+            streaming=local_streaming,
             response_type=response_type,
             task_logger=task_logger.bind(parent_task_id=parent_task_id),
         )
@@ -1560,8 +1612,12 @@ class DualeAISDK:
         attachments: list[PreparedAttachment] | None = None,
     ) -> "AgentResponse[T]":
         """Internal task submission: spawn task, return AgentResponse."""
-        routing_policy_obj = routing_policy or (
-            RoutingPolicy(required_capabilities=capabilities) if capabilities else None
+        routing_policy_obj = (
+            routing_policy
+            if routing_policy is not None
+            else RoutingPolicy(required_capabilities=capabilities)
+            if capabilities
+            else RoutingPolicy()
         )
         task_id_preview = request_id or str(uuid4())
 
@@ -1573,11 +1629,10 @@ class DualeAISDK:
         )
 
         task_logger = task_logger.bind(capabilities=[capability.value for capability in capabilities])
-        if routing_policy_obj:
-            task_logger = task_logger.bind(
-                has_required_capabilities=bool(routing_policy_obj.required_capabilities),
-                has_preferred_capabilities=bool(routing_policy_obj.preferred_capabilities),
-            )
+        task_logger = task_logger.bind(
+            has_required_capabilities=bool(routing_policy_obj.required_capabilities),
+            has_preferred_capabilities=bool(routing_policy_obj.preferred_capabilities),
+        )
 
         task_logger.info("Task submission details", action_length=len(action))
         resolved_response_format = self._response_format_default(response_format, response_type, response_schema)

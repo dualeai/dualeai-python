@@ -22,7 +22,7 @@ Protocol boundary the SDK function takes — not an internal SDK collaborator.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -201,6 +201,8 @@ class _RecordingLibraryTransport(HTTPTransportProtocol):
         self,
         task_id: str,
         request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         raise NotImplementedError("_RecordingLibraryTransport only stubs document upload")
 

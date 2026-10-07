@@ -10,12 +10,10 @@ Key features:
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Annotated, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 from uuid import UUID
-
-from pydantic import Field
 
 from dualeai.events.http_transport import HTTPTransportError
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
@@ -28,9 +26,7 @@ from dualeai.models.bridge import (
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
     BridgeTaskErrorResponse,
-    BridgeToolResultError,
     BridgeToolResultsRequest,
-    BridgeToolResultSuccess,
     BridgeToolUseResponse,
 )
 from dualeai.models.json_value import JsonValue
@@ -64,12 +60,6 @@ _MOCK_TENANT_ID = "tenant-default-001"
 
 if TYPE_CHECKING:
     from dualeai.sdk import DualeAISDK
-
-# Union type for tool results
-ToolResult = Annotated[
-    BridgeToolResultSuccess | BridgeToolResultError,
-    Field(discriminator="type"),
-]
 
 
 class RequestRecord(TypedDict, total=False):
@@ -114,6 +104,8 @@ class MockHTTPTransport(HTTPTransportProtocol):
         self._tool_result_event_queues: dict[str, asyncio.Queue[BridgeSSEEvent]] = {}
         self._event_counter = 0
         self._next_task_error: HTTPTransportError | None = None
+        self._next_acceptance_hold: asyncio.Event | None = None
+        self._next_stop_error: HTTPTransportError | None = None
         self._next_heartbeat_error: Exception | None = None
         self._next_tool_results_error: Exception | None = None
         now = datetime.now(timezone.utc)
@@ -165,6 +157,8 @@ class MockHTTPTransport(HTTPTransportProtocol):
         self,
         task_id: str,
         request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         """Record one typed task request and stream events to terminal.
 
@@ -173,7 +167,10 @@ class MockHTTPTransport(HTTPTransportProtocol):
         specific outcome should call ``inject_events()`` before
         invoking the SDK; tests that drive the future manually can
         leave the queue empty — the generator then suspends until
-        ``signal_stop`` fires.
+        ``signal_stop`` fires. A request that ``fail_next_task`` refuses is
+        never accepted; any other request waits for a hold from
+        ``hold_next_acceptance``, then calls ``accepted_callback`` before it
+        streams.
 
         Yields:
             BridgeSSEEvent objects from the injected queue.
@@ -191,6 +188,14 @@ class MockHTTPTransport(HTTPTransportProtocol):
             self._next_task_error = None
             raise error
 
+        if self._next_acceptance_hold is not None:
+            hold = self._next_acceptance_hold
+            self._next_acceptance_hold = None
+            await hold.wait()
+
+        if accepted_callback is not None:
+            accepted_callback()
+
         if task_id not in self._event_queues:
             self._event_queues[task_id] = asyncio.Queue()
 
@@ -198,7 +203,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
             yield event
 
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
-        """Record one stop request and accept it."""
+        """Record one stop request, then raise a ``fail_next_stop`` error once or accept it."""
         self._requests.append(
             {
                 "operation": "stop_task",
@@ -206,6 +211,10 @@ class MockHTTPTransport(HTTPTransportProtocol):
                 "request": request,
             }
         )
+        if self._next_stop_error is not None:
+            error = self._next_stop_error
+            self._next_stop_error = None
+            raise error
         return TaskStopAccepted(task_id=task_id, accepted_at=datetime.now(timezone.utc))
 
     async def submit_tool_results(
@@ -490,15 +499,25 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Fail the next task request after recording it."""
         self._next_task_error = error
 
+    def hold_next_acceptance(self) -> asyncio.Event:
+        """Hold the next task request's acceptance until the returned Event is set."""
+        hold = asyncio.Event()
+        self._next_acceptance_hold = hold
+        return hold
+
+    def fail_next_stop(self, error: HTTPTransportError) -> None:
+        """Fail the next stop request after recording it."""
+        self._next_stop_error = error
+
     def fail_next_tool_results(self, error: Exception) -> None:
         """Fail the next mock tool-results request after recording it."""
         self._next_tool_results_error = error
 
     def create_content_delta_event(self, delta: str) -> BridgeSSEEvent:
-        """Create content delta event.
+        """Create a generation-1 content delta whose sequence is the new event counter.
 
         Args:
-            delta: Content chunk to append.
+            delta: Content chunk.
 
         Returns:
             BridgeSSEEvent with content delta payload.
@@ -508,8 +527,9 @@ class MockHTTPTransport(HTTPTransportProtocol):
             id=f"{self._event_counter}:1",
             data=BridgeContentDeltaResponse(
                 type="content.delta",
-                timestamp=datetime.now(timezone.utc),
                 delta=delta,
+                generation=1,
+                sequence=self._event_counter,
             ),
             timestamp=datetime.now(timezone.utc),
         )
@@ -613,10 +633,6 @@ class MockHTTPTransport(HTTPTransportProtocol):
             Filtered list of request dicts.
         """
         return [r for r in self._requests if r.get("task_id") == task_id]
-
-    def clear_requests(self) -> None:
-        """Clear recorded requests (for multi-phase tests)."""
-        self._requests.clear()
 
     @property
     def stop_event(self) -> asyncio.Event:

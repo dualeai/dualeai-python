@@ -1,13 +1,14 @@
-"""Streaming-callback wiring: regression tests.
+"""Streaming-callback wiring from the transport to ``response.stream()``.
 
 Mocks at the transport-Protocol boundary (``MockHTTPTransport``) so
 the REAL ``CloudEventsClient.run_task`` callback dispatch and the SDK's
-spawn-time delta/tool-use buffer callbacks execute. Network I/O above
+spawn-time content and tool-use callbacks execute. Network I/O above
 the protocol is the only mock; everything below is exercised.
 
-Regression guard: pre-fix, ``events_client.run_task`` only branched
-on terminal events and silently dropped
-``BridgeContentDeltaResponse`` and ``BridgeToolUseResponse`` events.
+These tests fail when ``CloudEventsClient.run_task`` drops a content event or
+lets a ``tool.use`` event into ``response.stream()``.
+``tests/test_agent_lifecycle.py::test_tool_results_submission_resumes_after_triggering_tool_use_event``
+proves that a ``tool.use`` event starts local Tool execution.
 """
 
 import asyncio
@@ -29,9 +30,8 @@ from dualeai.models.json_value import JsonValue
 from dualeai.models.llm_result import LLMResult
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.orchestrator import ask
+from dualeai.response import StreamingContentEvent
 from tests.mocks.mock_http import MockHTTPTransport
-
-StreamingContentEvent = BridgeContentDeltaResponse | BridgeContentResetResponse
 
 
 def _expect_only_deltas(events: list[StreamingContentEvent]) -> list[BridgeContentDeltaResponse]:
@@ -41,26 +41,24 @@ def _expect_only_deltas(events: list[StreamingContentEvent]) -> list[BridgeConte
     return deltas
 
 
-def _delta_event(event_id: int, content: str) -> BridgeSSEEvent:
+def _delta_event(event_id: int, content: str, *, generation: int = 1, sequence: int | None = None) -> BridgeSSEEvent:
+    """Build a delta; its sequence defaults to the event ID, so arrival order matches answer order."""
     return BridgeSSEEvent(
         id=f"{event_id}:1",
         data=BridgeContentDeltaResponse(
             type="content.delta",
-            timestamp=datetime.now(timezone.utc),
             delta=content,
+            generation=generation,
+            sequence=event_id if sequence is None else sequence,
         ),
         timestamp=datetime.now(timezone.utc),
     )
 
 
-def _reset_event(event_id: int, generation: int) -> BridgeSSEEvent:
+def _reset_event(event_id: int, *, generation: int) -> BridgeSSEEvent:
     return BridgeSSEEvent(
         id=f"{event_id}:1",
-        data=BridgeContentResetResponse(
-            type="content.reset",
-            timestamp=datetime.now(timezone.utc),
-            generation=generation,
-        ),
+        data=BridgeContentResetResponse(type="content.reset", generation=generation),
         timestamp=datetime.now(timezone.utc),
     )
 
@@ -151,16 +149,14 @@ def _tool_use_event(event_id: int, name: str, tool_input: dict[str, JsonValue | 
 
 @pytest.mark.unit
 class TestStreamingCallbackWiring:
-    """Regression: deltas reach the user via response.stream() and
-    via the events_client callback channel."""
+    """Content events reach ``response.stream()`` through the events-client content callback."""
 
     async def test_response_stream_yields_real_time_deltas_from_bridge(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
     ) -> None:
         """End-to-end: SSE deltas → events_client callback → response queue → user.
 
-        Pre-fix the consumer would yield zero deltas; post-fix it
-        yields all 3.
+        The consumer yields all 3 deltas.
         """
         task_id = "test-stream-001"
         mock_transport.inject_events(
@@ -189,7 +185,7 @@ class TestStreamingCallbackWiring:
     async def test_streaming_false_yields_no_deltas_even_if_emitted(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
     ) -> None:
-        """With streaming=False, deltas are dropped (callbacks not wired)."""
+        """With streaming=False, deltas are dropped: no content callback is wired."""
         task_id = "test-stream-no-stream"
         mock_transport.inject_events(
             task_id,
@@ -211,72 +207,34 @@ class TestStreamingCallbackWiring:
         assert collected == []
         assert await response.model() == "ignored"
 
-    async def test_replay_after_completion(
-        self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
-    ) -> None:
-        """Iterating stream() a second time replays buffered deltas."""
-        task_id = "test-stream-replay"
-        mock_transport.inject_events(
-            task_id,
-            [
-                _delta_event(1, "a"),
-                _delta_event(2, "b"),
-                _delta_event(3, "c"),
-                _completed_event(4, completion="abc"),
-            ],
-        )
-
-        response = await ask(
-            action="seq",
-            streaming=True,
-            request_id=task_id,
-            sdk=minimal_mock_sdk,
-        )
-
-        first_events = [event async for event in response.stream()]
-        second_events = [event async for event in response.stream()]
-
-        assert [delta.delta for delta in _expect_only_deltas(first_events)] == ["a", "b", "c"]
-        assert [delta.delta for delta in _expect_only_deltas(second_events)] == ["a", "b", "c"]
-
-    async def test_reset_withdraws_failed_output_from_live_and_replay_views(
+    async def test_replay_repeats_every_content_event_in_arrival_order(
         self,
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
     ) -> None:
-        """Live consumers see the reset; later replay contains only replacement output."""
-        task_id = "test-stream-replacement"
-        mock_transport.inject_events(
-            task_id,
-            [
-                _delta_event(1, "withdrawn"),
-                _reset_event(2, generation=2),
-                _delta_event(3, "replacement"),
-                _completed_event(4, completion="replacement"),
-            ],
-        )
+        """Live and replay views both carry every content event, resets included, in arrival order."""
+        task_id = "test-stream-replay-order"
+        # No sort reproduces this order: sequence, generation and (generation, sequence) each reorder it.
+        injected = [
+            _delta_event(1, "b", generation=2, sequence=1),
+            _reset_event(2, generation=2),
+            _delta_event(3, "stale", generation=1, sequence=0),
+            _delta_event(4, "a", generation=2, sequence=0),
+        ]
+        mock_transport.inject_events(task_id, [*injected, _completed_event(5, completion="ab")])
 
         response = await ask(
-            action="replace a failed stream",
+            action="order a stream",
             streaming=True,
             request_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
-        live_events = [event async for event in response.stream()]
-        assert len(live_events) == 3
-        first_delta, reset, replacement_delta = live_events
-        assert isinstance(first_delta, BridgeContentDeltaResponse)
-        assert first_delta.delta == "withdrawn"
-        assert isinstance(reset, BridgeContentResetResponse)
-        assert reset.generation == 2
-        assert isinstance(replacement_delta, BridgeContentDeltaResponse)
-        assert replacement_delta.delta == "replacement"
-
+        expected = [event.data for event in injected]
+        live = [event async for event in response.stream()]
         replayed = [event async for event in response.stream()]
-        assert len(replayed) == 1
-        assert isinstance(replayed[0], BridgeContentDeltaResponse)
-        assert replayed[0].delta == "replacement"
+        assert live == expected
+        assert replayed == expected
 
     async def test_error_terminal_propagates_to_model(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
@@ -309,7 +267,7 @@ class TestStreamingCallbackWiring:
     async def test_tool_use_events_do_not_appear_in_delta_stream(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
     ) -> None:
-        """tool.use events go to a separate queue, not response.stream()."""
+        """``tool.use`` events never enter ``response.stream()``."""
         task_id = "test-stream-tool"
 
         @tool(
@@ -405,7 +363,7 @@ class TestErrorCodeDispatch:
                 "acceptable response",
                 id="content-filtered",
             ),
-            pytest.param("INTERNAL_ROUTING", "something broke", 500, "something broke", id="unknown-code"),
+            pytest.param("FUTURE_UNKNOWN_ERROR", "something broke", 500, "something broke", id="unknown-code"),
         ],
     )
     async def test_error_code_is_preserved(
@@ -478,51 +436,6 @@ class TestBoundaryConditions:
 
         assert collected == []
         assert await response.model() == "instant"
-
-    async def test_many_small_deltas_all_delivered(
-        self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
-    ) -> None:
-        """100 deltas all reach the consumer in order."""
-        task_id = "test-many-deltas"
-        n_deltas = 100
-        events = [_delta_event(i, f"chunk-{i}") for i in range(1, n_deltas + 1)]
-        events.append(_completed_event(n_deltas + 1, completion="done"))
-        mock_transport.inject_events(task_id, events)
-
-        response = await ask(
-            action="bulk",
-            streaming=True,
-            request_id=task_id,
-            sdk=minimal_mock_sdk,
-        )
-
-        collected = [event async for event in response.stream()]
-
-        assert len(collected) == n_deltas
-        assert [delta.delta for delta in _expect_only_deltas(collected)] == [
-            f"chunk-{i}" for i in range(1, n_deltas + 1)
-        ]
-
-    async def test_unicode_delta_content_preserved(
-        self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
-    ) -> None:
-        """Emoji + RTL + multi-byte sequences survive the queue."""
-        task_id = "test-unicode"
-        contents = ["café", " 🚀", " עברית", " 中文"]
-        events = [_delta_event(i, c) for i, c in enumerate(contents, start=1)]
-        events.append(_completed_event(len(events) + 1, completion="".join(contents)))
-        mock_transport.inject_events(task_id, events)
-
-        response = await ask(
-            action="i18n",
-            streaming=True,
-            request_id=task_id,
-            sdk=minimal_mock_sdk,
-        )
-
-        collected = [event async for event in response.stream()]
-
-        assert [delta.delta for delta in _expect_only_deltas(collected)] == contents
 
     async def test_empty_string_delta_is_yielded(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport

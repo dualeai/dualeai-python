@@ -1,8 +1,8 @@
 """Keep content, status, and metadata separate while streaming to a web UI.
 
-Streamed deltas are a replaceable preview. When the stream ends, replace the
-displayed text with `await response.model()` — that terminal answer is the
-authoritative one and can differ from the accumulated preview.
+Streamed deltas are a live view of the answer and can arrive out of order;
+order them by `generation` and `sequence`. When the stream ends, replace the
+displayed text with `await response.model()`, the final answer.
 
 Requires ``DUALEAI_TOKEN`` and access to a configured model. Run with
 ``python examples/streaming_web_ui_pattern.py``. This manual pattern prints the
@@ -15,7 +15,36 @@ import contextlib
 from dataclasses import dataclass, field
 from enum import Enum
 
-from dualeai import BridgeContentResetResponse, ask, create_sdk
+from dualeai import BridgeContentDeltaResponse, BridgeContentResetResponse, ask, create_sdk
+
+
+@dataclass
+class OrderedText:
+    """Current answer text under the client ordering rule."""
+
+    generation: int = 0
+    parts: dict[int, str] = field(default_factory=dict)
+
+    def apply(self, event: BridgeContentDeltaResponse | BridgeContentResetResponse) -> bool:
+        """Keep only the highest generation, and store each delta at its sequence.
+
+        Returns whether the event changed the text: a delta of the current generation, or any
+        event that starts a higher one. An older generation, or a late reset of the current one,
+        changes nothing.
+        """
+        if event.generation < self.generation:
+            return False
+        started = event.generation > self.generation
+        if started:
+            self.generation, self.parts = event.generation, {}
+        if isinstance(event, BridgeContentDeltaResponse):
+            self.parts[event.sequence] = event.delta
+            return True
+        return started
+
+    def text(self) -> str:
+        """Join the kept chunks in sequence order."""
+        return "".join(self.parts[sequence] for sequence in sorted(self.parts))
 
 
 class StreamState(str, Enum):
@@ -32,7 +61,8 @@ class UIState:
     """State sent to the frontend after each stream change."""
 
     # Content
-    content: list[str] = field(default_factory=list)
+    answer: OrderedText = field(default_factory=OrderedText)
+    final: str | None = None
 
     # Status
     state: StreamState = StreamState.IDLE
@@ -42,8 +72,8 @@ class UIState:
     chunk_count: int = 0
 
     def get_content_text(self) -> str:
-        """Join the current content buffer."""
-        return "".join(self.content)
+        """Return the final answer once known, otherwise the ordered streamed text."""
+        return self.final if self.final is not None else self.answer.text()
 
     def to_dict(self) -> dict[str, object]:
         """Serialize the state for a WebSocket or SSE payload."""
@@ -80,28 +110,26 @@ async def stream_with_ui_state_management() -> None:
             await simulate_websocket_send(ui_state)
 
             async for event in response.stream():
-                if isinstance(event, BridgeContentResetResponse):
-                    ui_state.content.clear()
-                    ui_state.chunk_count = 0
-                    ui_state.status_message = "Replacing response..."
-                    await simulate_websocket_send(ui_state)
+                if not ui_state.answer.apply(event):
                     continue
-                ui_state.content.append(event.delta)
-                ui_state.chunk_count += 1
-                ui_state.status_message = None
+                if isinstance(event, BridgeContentResetResponse):
+                    ui_state.status_message = "Replacing response..."
+                else:
+                    ui_state.chunk_count += 1
+                    ui_state.status_message = None
                 await simulate_websocket_send(ui_state)
 
-            # Replace the preview with the authoritative terminal answer before
-            # storing, indexing, or exporting it.
-            preview_text = ui_state.get_content_text()
-            ui_state.content = [f"{await response.model()}"]
+            # Replace the streamed text with the final answer before storing,
+            # indexing, or exporting it.
+            streamed_text = ui_state.get_content_text()
+            ui_state.final = f"{await response.model()}"
             ui_state.state = StreamState.COMPLETE
             ui_state.status_message = "Response complete"
             await simulate_websocket_send(ui_state)
 
             # Summary
             print("\nStream complete:")  # noqa: T201
-            print(f"   Preview length: {len(preview_text)} chars")  # noqa: T201
+            print(f"   Streamed length: {len(streamed_text)} chars")  # noqa: T201
             print(f"   Final length: {len(ui_state.get_content_text())} chars")  # noqa: T201
             print(f"   Chunks received: {ui_state.chunk_count}")  # noqa: T201
     except Exception as error:

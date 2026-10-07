@@ -6,10 +6,12 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
+import dualeai
+import dualeai.orchestrator
 from dualeai import DualeAISDK
 from dualeai.models.bridge import BridgeTaskContinueRequest
 from dualeai.models.response_format import JsonSchemaResponseFormat, PredefinedResponseFormat
-from dualeai.orchestrator import ask, continue_conversation
+from dualeai.orchestrator import ask
 from dualeai.response import AgentResponse
 from tests.mocks.mock_http import require_mock_http_transport
 
@@ -32,11 +34,18 @@ async def _completed_parent(sdk: DualeAISDK, task_id: str = "parent-task-123") -
 
 
 @pytest.mark.unit
-async def test_continue_conversation_builds_child_keyed_request(minimal_mock_sdk: DualeAISDK) -> None:
+def test_next_is_the_only_continuation_entry_point() -> None:
+    assert not hasattr(dualeai, "continue_conversation")
+    assert "continue_conversation" not in dualeai.__all__
+    assert not hasattr(dualeai.orchestrator, "continue_conversation")
+    assert "__or__" not in vars(AgentResponse)
+
+
+@pytest.mark.unit
+async def test_next_builds_child_keyed_request(minimal_mock_sdk: DualeAISDK) -> None:
     parent = await _completed_parent(minimal_mock_sdk, "parent-task_123")
 
-    response = await continue_conversation(
-        response=parent,
+    response = await parent.next(
         message="Continue with é漢🙂",
         deadline=DEADLINE,
     )

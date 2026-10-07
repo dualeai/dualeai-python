@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 _TOKEN = "dualeai_synthetic_credential_not_for_service_error_messages"
 _ENDPOINT = "https://api.example.test"
-_ISSUER = f"{_ENDPOINT}/profile/platform-token"
+_ISSUER = f"{_ENDPOINT}/profile/v1/raw/platform-token"
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 

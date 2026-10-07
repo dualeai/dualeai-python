@@ -1,13 +1,9 @@
-"""Convenience functions for Task submission and continuation.
+"""Convenience function for Task submission.
 
-Thin convenience wrappers around ``DualeAISDK.submit_task`` and
-``AgentResponse.next``. Both return ``AgentResponse`` directly; the
-orchestrator forwards arguments and applies capability→task_type derivation.
-
-Forwarding behavior is covered by ``tests/test_feature_ask.py`` and
-``tests/test_feature_multiturn.py``. ``tests/test_continuation_contract.py``
-covers child request fields; no dedicated automated test covers the helper's
-result-type default.
+One convenience function, ``ask``, forwards to ``DualeAISDK.submit_task`` and
+derives the observability ``task_type`` from the requested capabilities.
+``tests/test_feature_ask.py`` covers the forwarding; no dedicated automated
+test covers the helper's result-type default.
 """
 
 from datetime import datetime
@@ -23,45 +19,6 @@ if TYPE_CHECKING:
     from dualeai.sdk import DualeAISDK
 
 T = TypeVar("T")
-
-
-async def continue_conversation(
-    response: AgentResponse[T],
-    message: str,
-    *,
-    deadline: datetime | None = None,
-    response_format: ResponseFormat | None = None,
-) -> AgentResponse[T]:
-    """Continue a completed response with a new message.
-
-    The response owns both its public parent ID and its SDK instance. The
-    returned response carries the client-generated child ID. Waiting and sibling
-    behavior match :meth:`AgentResponse.next`.
-
-    Args:
-        response: Parent response, which must reach a completed outcome first.
-            This helper does not validate the parent result.
-        message: User message for the child Task.
-        deadline: Optional timezone-aware child deadline.
-        response_format: Explicit wire response format for the child.
-
-    Returns:
-        A non-streaming child response without local result validation. The
-        parent's expected result type is not inherited despite the generic
-        return annotation. Use ``response.next(res=YourModel)`` to select one.
-
-    Raises:
-        DualeAIError: If the parent ended with ``task.error``.
-        TaskStoppedError: If the parent ended with ``task.stopped``.
-        ValueError: If ``deadline`` is timezone-naive.
-        asyncio.CancelledError: If this waiter is cancelled; the shared parent
-            Task continues.
-    """
-    return await response.next(
-        message=message,
-        deadline=deadline,
-        response_format=response_format,
-    )
 
 
 @overload
@@ -144,6 +101,9 @@ async def ask(
         routing: Explicit routing policy. When present it takes precedence over
             the policy otherwise derived from ``capabilities``.
         streaming: Request content delta/reset events for ``response.stream()``.
+            The Platform streams only a free-text answer: no ``res`` or
+            ``response_format``, or the ``text`` or ``markdown`` format. No
+            test in this repository enforces this Platform behavior.
         deadline: Optional timezone-aware absolute deadline. Omission uses the
             SDK's default Task timeout.
         attachments: Prepared attachments already uploaded for the same Task id.
@@ -168,16 +128,12 @@ async def ask(
         response = await ask("Extract invoice", res=Invoice, sdk=sdk)
         invoice: Invoice = await response.model()
 
-        # Streaming
-        from dualeai import BridgeContentResetResponse
-
+        # Streaming: events can arrive out of order; order them by generation and sequence as
+        # https://github.com/dualeai/dualeai-python/blob/main/examples/README.md#order-and-replace-streamed-content
+        # shows.
         response = await ask("Generate story", streaming=True, sdk=sdk)
-        content: list[str] = []
         async for event in response.stream():
-            if isinstance(event, BridgeContentResetResponse):
-                content.clear()
-                continue
-            content.append(event.delta)
+            render(event)  # your ordering view
         story = await response.model()
     """
     # Capability→task_type derivation: observability metric only.
