@@ -226,36 +226,38 @@ async def _upload_part(
             reraise=True,
         ):
             with attempt:
-                async with semaphore:
-                    async with s3_session.put(
+                async with (
+                    semaphore,
+                    s3_session.put(
                         str(part.upload_url),
                         data=_stream_file_part(attachment.path, part.offset, part.length),
                         headers={"Content-Length": str(part.length)},
-                    ) as response:
-                        if response.status in {
-                            HTTPStatus.INTERNAL_SERVER_ERROR,
-                            HTTPStatus.BAD_GATEWAY,
-                            HTTPStatus.SERVICE_UNAVAILABLE,
-                            HTTPStatus.GATEWAY_TIMEOUT,
-                        }:
-                            raise S3UploadError(response.status, f"S3 returned {response.status}")
-                        if response.status != HTTPStatus.OK:
-                            raise LibraryUploadError(
-                                f"Object-store upload returned HTTP {response.status}",
-                                attachment_key=attachment.key,
-                                part_number=part.part_number,
-                            )
-                        etag = response.headers.get("ETag")
-                        if etag is None:
-                            raise LibraryUploadError(
-                                "Object-store upload response omitted ETag",
-                                attachment_key=attachment.key,
-                                part_number=part.part_number,
-                            )
-                        return LibraryDocumentCreatePartRef(
+                    ) as response,
+                ):
+                    if response.status in {
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        HTTPStatus.BAD_GATEWAY,
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        HTTPStatus.GATEWAY_TIMEOUT,
+                    }:
+                        raise S3UploadError(response.status, f"S3 returned {response.status}")
+                    if response.status != HTTPStatus.OK:
+                        raise LibraryUploadError(
+                            f"Object-store upload returned HTTP {response.status}",
+                            attachment_key=attachment.key,
                             part_number=part.part_number,
-                            etag=etag,
                         )
+                    etag = response.headers.get("ETag")
+                    if etag is None:
+                        raise LibraryUploadError(
+                            "Object-store upload response omitted ETag",
+                            attachment_key=attachment.key,
+                            part_number=part.part_number,
+                        )
+                    return LibraryDocumentCreatePartRef(
+                        part_number=part.part_number,
+                        etag=etag,
+                    )
     except (aiohttp.ClientError, TimeoutError, S3UploadError) as error:
         raise LibraryUploadError(
             "Object-store upload failed after five attempts",
@@ -379,6 +381,7 @@ async def upload_attachment_to_library(
 async def _upload_attachment_worker(
     work: Iterator[tuple[int, PreparedAttachment]],
     receipts: list[LibraryDocumentCreateResponse | None],
+    *,
     transport: _LibraryUploadTransport,
     s3_session: aiohttp.ClientSession,
     library_id: str,
@@ -426,10 +429,10 @@ async def upload_attachments_to_library(
                     _upload_attachment_worker(
                         work,
                         receipt_slots,
-                        transport,
-                        s3_session,
-                        library_id,
-                        part_semaphore,
+                        transport=transport,
+                        s3_session=s3_session,
+                        library_id=library_id,
+                        part_semaphore=part_semaphore,
                     )
                     for _ in range(min(_MAX_CONCURRENT_UPLOADS, len(attachments)))
                 ]

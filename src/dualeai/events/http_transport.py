@@ -828,8 +828,9 @@ class HTTPTransport:
         self,
         method: str,
         path: str,
+        *,
         task_id: str,
-        json_data: Mapping[str, object] | None = None,
+        json_data: Mapping[str, object],
         last_event_id: str | None = None,
         accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncGenerator[BridgeSSEEvent, None]:

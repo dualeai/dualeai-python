@@ -198,13 +198,14 @@ class DualeAISDK:
     local cache namespacing uses a SHA-256 fingerprint of the configured token.
     """
 
-    def __init__(  # Wide constructor: many independent field initializations
+    def __init__(
         self,
         config: DualeAIConfig | None = None,
+        *,
         agent_id: str | None = None,
         max_jobs: int = TimingDefaults.DEFAULT_MAX_JOBS,
         job_timeout: int = TimingDefaults.DEFAULT_TASK_TIMEOUT_SECONDS,
-        auto_start: bool = True,  # noqa: FBT001, FBT002
+        auto_start: bool = True,
         backpressure_config: BackpressureConfig | None = None,
         max_concurrent_tools: int | None = None,
         graceful_shutdown_timeout: float = 0.0,
@@ -955,10 +956,11 @@ class DualeAISDK:
         self,
         operation_name: str,
         operation_func: Callable[[], Awaitable[R]],
+        *,
         task_type: str,
-        streaming: bool,  # noqa: FBT001
+        streaming: bool,
         trace_attributes: dict[str, object],
-        rejection_context: str | None = None,
+        rejection_context: str,
     ) -> R:
         """Execute a task submission with tracing and circuit classification.
 
@@ -1108,11 +1110,12 @@ class DualeAISDK:
         self,
         action: str,
         capabilities: list[Capability],
+        *,
         routing_policy: RoutingPolicy | None = None,
         response_type: type[T] | None = None,
         response_schema: dict[str, JsonValue | None] | None = None,
         response_format: ResponseFormat | None = None,
-        streaming: bool = False,  # noqa: FBT001, FBT002
+        streaming: bool = False,
         deadline: datetime | None = None,
         request_id: str | None = None,
         task_type: str = "completion",
@@ -1166,15 +1169,14 @@ class DualeAISDK:
             return await self._submit_task_internal(
                 action,
                 capabilities,
-                routing_policy,
-                response_type,
-                response_schema,
-                response_format,
-                streaming,
-                deadline,
-                request_id,
-                task_type,
-                attachments,
+                routing_policy=routing_policy,
+                response_type=response_type,
+                response_schema=response_schema,
+                response_format=response_format,
+                streaming=streaming,
+                deadline=deadline,
+                request_id=request_id,
+                attachments=attachments,
             )
 
         return await self._execute_task_operation(
@@ -1601,15 +1603,15 @@ class DualeAISDK:
         self,
         action: str,
         capabilities: list[Capability],
-        routing_policy: RoutingPolicy | None = None,
-        response_type: type[T] | None = None,
-        response_schema: dict[str, JsonValue | None] | None = None,
-        response_format: ResponseFormat | None = None,
-        streaming: bool = False,  # noqa: FBT001, FBT002
-        deadline: datetime | None = None,
-        request_id: str | None = None,
-        _task_type: str = "completion",
-        attachments: list[PreparedAttachment] | None = None,
+        *,
+        routing_policy: RoutingPolicy | None,
+        response_type: type[T] | None,
+        response_schema: dict[str, JsonValue | None] | None,
+        response_format: ResponseFormat | None,
+        streaming: bool,
+        deadline: datetime | None,
+        request_id: str | None,
+        attachments: list[PreparedAttachment] | None,
     ) -> "AgentResponse[T]":
         """Internal task submission: spawn task, return AgentResponse."""
         routing_policy_obj = (

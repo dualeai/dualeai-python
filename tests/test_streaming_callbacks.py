@@ -368,6 +368,7 @@ class TestErrorCodeDispatch:
     )
     async def test_error_code_is_preserved(
         self,
+        *,
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
         error_code: str,
