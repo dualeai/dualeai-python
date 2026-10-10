@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated, Union
 
-from pydantic import GetJsonSchemaHandler
+from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, StrictFloat
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
-__all__: list[str] = ["Capability"]
+__all__: list[str] = ["Capability", "CapabilityScore"]
 
 
 class Capability(str, Enum):
@@ -50,3 +51,23 @@ class Capability(str, Enum):
             }
         )
         return json_schema
+
+
+class CapabilityScore(BaseModel):
+    """A capability percentage derived from the saved benchmark measurements of the complete enabled model pool."""
+
+    model_config = ConfigDict(extra="forbid", title="CapabilityScore", json_schema_extra=None)
+    capability: Annotated[
+        Capability, Field(description="Capability described by this score; general summarizes overall capability.")
+    ]
+    value: Annotated[
+        Union[
+            Annotated[
+                StrictFloat, Field(ge=-9007199254740991, le=9007199254740991, allow_inf_nan=False), Field(ge=0, le=100)
+            ],
+            None,
+        ],
+        Field(
+            description="Capability score as a percentage. Null means usable benchmark evidence is absent; zero is a known score. Scores depend on the configured pool and are neither task-success probabilities nor routing-selection probabilities."
+        ),
+    ]
