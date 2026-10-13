@@ -102,13 +102,37 @@ class LibrariesClient:
         """Update a Library path, replace its tag map, or both.
 
         Set ``request.patch.tags`` to ``{}`` to clear all tags. The method does
-        not merge keys with the current map.
+        not merge keys with the current map. A path change needs
+        ``library:write`` on both the current and the new path.
+
+        No automated test in this repository sends a 403, a 409 or a 503 to
+        this method, or calls it without a tenant ID.
+        ``tests/test_http_transport_v3.py::test_complete_logical_error_and_unchecked_failures_have_distinct_mapping``
+        checks that a Library request classifies HTTP 401 as an authentication
+        rejection and HTTP 410 as another client rejection.
+        ``tests/test_http_transport_v3.py::test_task_error_context_identifies_the_operation``
+        checks that the same status classification and translation turn HTTP
+        403 into ``DualeAIAuthError`` on Task calls.
+        ``tests/test_libraries_client.py::test_library_errors_are_translated_with_problem_details``
+        checks how each transport error class becomes the SDK error below.
 
         Args:
             request: Library id and replacement patch fields.
 
         Returns:
             The updated server representation.
+
+        Raises:
+            ConfigurationError: When the SDK configuration has no tenant ID
+                (``DualeAIConfig.tenant_id`` or ``DUALEAI_TENANT_ID``).
+            DualeAIAuthError: On HTTP 401, or on HTTP 403 when the service
+                refuses a permission the change needs.
+            BusinessError: On any other HTTP 4xx, including HTTP 409 when the
+                Library's path changed after the service authorized the request
+                ("Library changed; retry against the current path").
+            DualeAIConnectionError: On a transport or server failure, including
+                HTTP 503 when another write holds the Library longer than the
+                service waits for a path change.
         """
         events = await self._ensure_events_client()
         try:

@@ -121,7 +121,7 @@ class Library(BaseModel):
     current_path: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=300)],
         Field(
-            description="Current free-form folder path. It can contain slash-separated segments and can be changed. Paths are display metadata and are not unique."
+            description="Current free-form folder path. It can contain slash-separated segments and can be changed. Permissions name the path, and several Libraries can share one path and its permissions."
         ),
     ]
     current_tags: Annotated[
@@ -152,13 +152,13 @@ class Library(BaseModel):
 
 
 class LibraryCreateRequest(BaseModel):
-    """Creates a Library at the requested path, or returns a writable Library already using it. Paths are display metadata and are not unique."""
+    """Creates a Library at the requested path, or returns an active Library already using it, after IAM allows write on that path. Paths are not unique: Libraries at the same path share the permissions IAM gives that path."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     path: Annotated[
-        Annotated[StrictStr, Field(min_length=1, max_length=300)],
+        Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}*]*$")],
         Field(
-            description="Initial free-form folder path. It can contain slash-separated segments and does not require a prefix."
+            description="Initial free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *: IAM binds {self} and {tenant_id} in a path it checks, its resource contract refuses any other brace, and a policy pattern reads a trailing * as a wildcard."
         ),
     ]
 
@@ -576,7 +576,9 @@ class LibraryWithRevision(BaseModel):
     ]
     path: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=300)],
-        Field(description="Current free-form folder path. Paths are display metadata and are not unique."),
+        Field(
+            description="Current free-form folder path. Permissions name the path, and several Libraries can share one path and its permissions."
+        ),
     ]
     tags: Annotated[
         Annotated[
@@ -626,10 +628,10 @@ class LibraryPatchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra={"minProperties": 1})
     path: Annotated[
-        Union[Annotated[StrictStr, Field(min_length=1, max_length=300)], SkipJsonSchema[None]],
+        Union[Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}*]*$")], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="New free-form folder path. It can contain slash-separated segments and does not require a prefix."
+            description="New free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *: IAM binds {self} and {tenant_id} in a path it checks, its resource contract refuses any other brace, and a policy pattern reads a trailing * as a wildcard."
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     tags: Annotated[
@@ -667,7 +669,7 @@ LibraryPolicy = TypeAliasType(
     Annotated[
         authz_module.AuthzGrantInput,
         Field(
-            description="Resource-scoped access grant for one Library. Use library:read to read the Library, its revisions, its documents, and their previews; library:write to add documents, change metadata and tags, and restore trashed documents; library:delete to delete documents or the Library; and library:admin to manage its grants. library:* covers these four operations but not tenant-scoped library:upload."
+            description="Access grant on a Library's current path, shared by every Library at that path. Use library:read to read the Library, its revisions, its documents, and their previews; library:write to add documents, change metadata and tags, and restore trashed documents; library:delete to delete documents or the Library; and library:admin to manage its grants. library:* covers these four operations but not tenant-scoped library:upload."
         ),
     ],
 )

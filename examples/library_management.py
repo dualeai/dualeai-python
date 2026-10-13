@@ -1,9 +1,10 @@
 """Manage a persistent Library with a synthetic document.
 
 This live example requires ``DUALEAI_TOKEN`` and ``DUALEAI_TENANT_ID``, but no
-Agent identifier. The caller needs Tenant-scoped ``library:upload`` and access
-from which ``library:write`` and ``library:read`` can be derived for the new
-Library. Run it with ``python examples/library_management.py``.
+Agent identifier. The caller needs ``library:upload`` on the Tenant, and
+``library:write`` and ``library:read`` on ``library:examples/library-management/*``.
+Creating the Library grants nothing. Run it with
+``python examples/library_management.py``.
 
 The Library and its document remain until a Human Identity deletes the Library in the
 Dashboard with ``library:delete`` and valid ``aal3`` authentication. An SDK API-token

@@ -1035,9 +1035,10 @@ class DualeAISDK:
             task_id: Client-selected task identifier that will also be supplied
                 as ``request_id`` when the Task is submitted.
             attachments: Values returned by :meth:`prepare_attachments`.
-            agent_id: Agent identifier (keyword-only). Overrides the SDK's
-                configured Agent identity for this upload. Required when the SDK
-                has no configured Agent identity.
+            agent_id: Agent identifier for the Library path (keyword-only).
+                Overrides the configured Agent ID for path selection; credentials
+                still identify the caller. Required when the SDK has no configured
+                Agent ID.
 
         Returns:
             Queued Library document receipts keyed by prepared attachment key.

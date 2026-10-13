@@ -2,8 +2,9 @@
 
 Requires ``DUALEAI_TOKEN``, ``DUALEAI_TENANT_ID``, ``DUALEAI_AGENT_ID``,
 access to a configured model, and a synthetic input file. The caller also needs
-Tenant-scoped ``library:upload`` and access from which ``library:write`` and
-``library:read`` can be derived for the new Library. Run with
+``library:upload`` on the Tenant, and ``library:write`` and ``library:read`` on
+``library:agent/<DUALEAI_AGENT_ID>/task/*``. The supplied Agent default grants
+both on ``library:agent/{self}/*`` when the token belongs to that Agent Identity. Run with
 ``python examples/document_upload.py path/to/document.pdf``. The example creates
 a call-scoped Library and uploads the file. Arrange later Dashboard cleanup by
 a Human Identity with ``library:delete`` and valid ``aal3`` authentication; the SDK's AAL2

@@ -235,8 +235,10 @@ AuthzPolicyName = TypeAliasType(
 AuthzResourceId = TypeAliasType(
     "AuthzResourceId",
     Annotated[
-        Annotated[StrictStr, Field(min_length=1, max_length=300)],
-        Field(description="Identifier of the resource covered by a grant. Treat the value as opaque."),
+        Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}]*$")],
+        Field(
+            description="Identifier of the resource covered by a grant. Treat the value as opaque. It cannot contain { or }, which IAM reserves for placeholders."
+        ),
     ],
 )
 AuthzResourceType = TypeAliasType(

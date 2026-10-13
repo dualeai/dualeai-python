@@ -50,11 +50,13 @@ Run the smallest example from the repository root:
 python examples/streaming_minimal.py
 ```
 
-Before running either document workflow, obtain Tenant-scoped `library:upload`. Your existing access must let the
-Platform grant `library:write` on the new Library. Both examples also need `library:read` to poll ingestion and inspect
-documents.
-Creation does not grant permissions the caller lacks. See
-[Library access](https://duale.ai/en/docs/libraries/access) for the applicable policies and Grants.
+Before you run either document workflow, obtain `library:upload` on the Tenant to stage uploads. Also obtain
+`library:write` and `library:read` on the new Library's path, the resource `library:<path>`. `library:write` creates the
+Library and adds the document. `library:read` polls ingestion and reads documents. Creating a Library grants no
+permission. The supplied Agent default gives an Agent Identity both permissions on `library:agent/{self}/*`. That
+pattern covers the path `document_upload.py` uses when the token belongs to the Agent Identity named by
+`DUALEAI_AGENT_ID`. See [Library access](https://duale.ai/en/docs/libraries/access) for the applicable policies and
+Grants.
 
 Both examples leave a Library and its document in the configured environment. Arrange cleanup with a Human Identity who can
 delete that Library in the Dashboard: whole-Library deletion requires `library:delete` and valid `aal3` authentication.
