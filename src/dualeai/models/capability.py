@@ -29,6 +29,24 @@ class Capability(str, Enum):
     medical = "medical"
     legal = "legal"
 
+    @property
+    def description(self) -> str:
+        return {
+            Capability.general: "Broad language and knowledge work without one dominant specialization.",
+            Capability.reasoning: "Deriving conclusions through several logical or scientific steps.",
+            Capability.analysis: "Interpreting, comparing, and synthesizing supplied information.",
+            Capability.math: "Mathematical problem solving and formal proofs.",
+            Capability.code: "Generating, inspecting, modifying, debugging, or migrating software.",
+            Capability.instruction_following: "Following detailed instructions and output rubrics.",
+            Capability.agentic: "Completing multiple steps with available Tools and feedback.",
+            Capability.long_context: "Using information spread across extensive supplied material.",
+            Capability.finance: "Financial analysis, modeling, and banking workflows.",
+            Capability.cyber_defensive: "Reproducing and remediating software vulnerabilities.",
+            Capability.cyber_offensive: "Assessing whether a vulnerability can be exploited within an authorized scope.",
+            Capability.medical: "Medical work; task-performance evidence focuses on clinical documentation.",
+            Capability.legal: "Legal analysis and reviewable legal documents.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         json_schema = handler.resolve_ref_schema(handler(core_schema))
