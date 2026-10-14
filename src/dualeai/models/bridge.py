@@ -474,7 +474,7 @@ class BridgeTaskCreateRequest(BaseModel):
     routing_policy: Annotated[
         routing_policy_module.RoutingPolicy,
         Field(
-            description="Model-selection preferences for this request. The object is required; preferences left unset use the selected executor's defaults."
+            description="Model-selection preferences for this request. The object is required and may be empty. Omitted fields remain unspecified in the request."
         ),
     ]
     response_format: Annotated[

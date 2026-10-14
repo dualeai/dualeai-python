@@ -25,6 +25,7 @@ from uuid import uuid4
 from dualeai import (
     LibraryDocumentGetRequest,
     LibraryResponseDocumentStatus,
+    RoutingPolicy,
     ask,
     create_sdk,
 )
@@ -93,6 +94,10 @@ async def main() -> None:
         prompt = "Summarize the attached document and list its main sections."
         response = await ask(
             action=prompt,
+            routing=RoutingPolicy(
+                cost_sensitivity=1.0,
+                target_accuracy=0.3,
+            ),
             attachments=attachments,
             request_id=task_id,
             sdk=sdk,
