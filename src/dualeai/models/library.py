@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from re import fullmatch
@@ -99,6 +100,26 @@ def _reject_explicit_null(value: object) -> object:
     if value is None:
         raise ValueError("explicit null is not allowed; omit the field instead")
     return value
+
+
+@dataclass(frozen=True)
+class _EnumSchemaMetadata:
+    choices: tuple[tuple[str, Union[str, None], Union[str, None]], ...]
+
+    def __get_pydantic_json_schema__(self, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(core_schema)).copy()
+        json_schema.pop("enum", None)
+        json_schema.pop("const", None)
+        branches: list[JsonSchemaValue] = []
+        for value, title, description in self.choices:
+            branch: JsonSchemaValue = {"const": value}
+            if title is not None:
+                branch["title"] = title
+            if description is not None:
+                branch["description"] = description
+            branches.append(branch)
+        json_schema["oneOf"] = branches
+        return json_schema
 
 
 LibraryService = TypeAliasType(
@@ -295,9 +316,69 @@ class LibraryErrorCode(str, Enum):
     library_deleted = "LIBRARY_DELETED"
     library_access_revoked = "LIBRARY_ACCESS_REVOKED"
 
+    @property
+    def display_title(self) -> Union[str, None]:
+        return {
+            LibraryErrorCode.expired_upload: "Upload Session Expired",
+            LibraryErrorCode.hash_mismatch: None,
+            LibraryErrorCode.size_mismatch: None,
+            LibraryErrorCode.format_unsupported: None,
+            LibraryErrorCode.corrupt_document: None,
+            LibraryErrorCode.document_too_large: None,
+            LibraryErrorCode.encrypted_document: None,
+            LibraryErrorCode.extraction_failed: None,
+            LibraryErrorCode.processing_timeout: None,
+            LibraryErrorCode.document_processing_failed: "Document processing failed",
+            LibraryErrorCode.malware_detected: "Malware Detected",
+            LibraryErrorCode.library_deleted: "Library Deleted",
+            LibraryErrorCode.library_access_revoked: "Library access revoked",
+        }[self]
+
+    @property
+    def description(self) -> Union[str, None]:
+        return {
+            LibraryErrorCode.expired_upload: "Upload session expired before ingest could promote it",
+            LibraryErrorCode.hash_mismatch: "A new or corrected upload is required.",
+            LibraryErrorCode.size_mismatch: "A new or corrected upload is required.",
+            LibraryErrorCode.format_unsupported: None,
+            LibraryErrorCode.corrupt_document: None,
+            LibraryErrorCode.document_too_large: None,
+            LibraryErrorCode.encrypted_document: None,
+            LibraryErrorCode.extraction_failed: None,
+            LibraryErrorCode.processing_timeout: None,
+            LibraryErrorCode.document_processing_failed: "The document could not be processed. Upload it again.",
+            LibraryErrorCode.malware_detected: None,
+            LibraryErrorCode.library_deleted: "Choose an active Library.",
+            LibraryErrorCode.library_access_revoked: "The identity that uploaded the document lost write access to the library.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("EXPIRED_UPLOAD", "Upload Session Expired", "Upload session expired before ingest could promote it"),
+                ("HASH_MISMATCH", None, "A new or corrected upload is required."),
+                ("SIZE_MISMATCH", None, "A new or corrected upload is required."),
+                ("FORMAT_UNSUPPORTED", None, None),
+                ("CORRUPT_DOCUMENT", None, None),
+                ("DOCUMENT_TOO_LARGE", None, None),
+                ("ENCRYPTED_DOCUMENT", None, None),
+                ("EXTRACTION_FAILED", None, None),
+                ("PROCESSING_TIMEOUT", None, None),
+                (
+                    "DOCUMENT_PROCESSING_FAILED",
+                    "Document processing failed",
+                    "The document could not be processed. Upload it again.",
+                ),
+                ("MALWARE_DETECTED", "Malware Detected", None),
+                ("LIBRARY_DELETED", "Library Deleted", "Choose an active Library."),
+                (
+                    "LIBRARY_ACCESS_REVOKED",
+                    "Library access revoked",
+                    "The identity that uploaded the document lost write access to the library.",
+                ),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
                 "description": "Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."
@@ -368,21 +449,42 @@ class LibraryDocumentListRequest(BaseModel):
 
 
 class LibraryResponseDocumentStatus(str, Enum):
-    """Document ingestion status. queued means the document was accepted and is waiting to start; processing means ingestion has started; ready means ingestion completed; failed means ingestion ended unsuccessfully. Inspect failure for details when available."""
+    """Document ingestion status. Inspect failure for details when available."""
 
     queued = "queued"
     processing = "processing"
     ready = "ready"
     failed = "failed"
 
+    @property
+    def display_title(self) -> str:
+        return {
+            LibraryResponseDocumentStatus.queued: "Queued",
+            LibraryResponseDocumentStatus.processing: "Processing",
+            LibraryResponseDocumentStatus.ready: "Ready",
+            LibraryResponseDocumentStatus.failed: "Failed",
+        }[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            LibraryResponseDocumentStatus.queued: "The document was accepted and is waiting to start.",
+            LibraryResponseDocumentStatus.processing: "Document ingestion has started.",
+            LibraryResponseDocumentStatus.ready: "Document ingestion completed.",
+            LibraryResponseDocumentStatus.failed: "Document ingestion ended unsuccessfully.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
-        json_schema.update(
-            {
-                "description": "Document ingestion status. queued means the document was accepted and is waiting to start; processing means ingestion has started; ready means ingestion completed; failed means ingestion ended unsuccessfully. Inspect failure for details when available."
-            }
-        )
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("queued", "Queued", "The document was accepted and is waiting to start."),
+                ("processing", "Processing", "Document ingestion has started."),
+                ("ready", "Ready", "Document ingestion completed."),
+                ("failed", "Failed", "Document ingestion ended unsuccessfully."),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
+        json_schema.update({"description": "Document ingestion status. Inspect failure for details when available."})
         return json_schema
 
 

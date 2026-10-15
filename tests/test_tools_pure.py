@@ -12,6 +12,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from dualeai.models.bridge import BridgeToolUseResponse
+from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.tools._contract import (
     _compile_tool_callable,
@@ -174,6 +175,32 @@ def test_compiled_contract_keeps_strict_json_native_types() -> None:
     kwargs = _contract(gate).tool_kwargs(_tool_use(at=at.isoformat(), gate_id=str(gate_id), state="closed"))
 
     assert kwargs == {"at": at, "gate_id": gate_id, "state": GateState.closed}
+
+
+@pytest.mark.unit
+def test_compiled_contract_preserves_documented_nullable_choices() -> None:
+    """Generated choice annotations survive export without widening accepted inputs."""
+
+    async def choose(capability: Capability | None) -> str:
+        return "selected"
+
+    contract = _compile_tool_callable(choose)
+    schema = contract.parameters.model_dump(mode="json", by_alias=True)
+    assert schema["properties"] == {"capability": {"anyOf": [{"$ref": "#/$defs/Capability"}, {"type": "null"}]}}
+    assert schema["required"] == ["capability"]
+    assert {
+        "const": "general",
+        "title": "General",
+        "description": "Broad language and knowledge work without one dominant specialization.",
+    } in schema["$defs"]["Capability"]["oneOf"]
+
+    assert contract.tool_kwargs(_tool_use(capability="general"))["capability"] is Capability.general
+    assert contract.tool_kwargs(_tool_use(capability=None)) == {"capability": None}
+    for invalid in ("not-a-capability", 1):
+        with pytest.raises(ValueError, match="'capability'"):
+            contract.tool_kwargs(_tool_use(capability=invalid))
+    with pytest.raises(ValueError, match="Missing required tool input parameter: capability"):
+        contract.tool_kwargs(_tool_use())
 
 
 @pytest.mark.unit

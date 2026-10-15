@@ -160,10 +160,13 @@ class ScheduledToolUse:
 
 @lru_cache(maxsize=128)
 def _generate_json_schema_cached(response_type: type) -> dict[str, JsonValue | None]:
-    """Generate JSON Schema from a Python type for request validation.
+    """Generate response-format JSON Schema from a Python type.
 
     This is a module-level cached function to avoid memory leaks from instance-level caching.
     All SDK instances share this cache, preventing unbounded memory growth.
+
+    In ``tests/test_feature_structured_output.py``, ``test_json_schema_generation_for_model``
+    checks the exported shape and ``test_json_schema_cached_for_performance`` checks cache reuse.
 
     Args:
         response_type: Python type or Pydantic model

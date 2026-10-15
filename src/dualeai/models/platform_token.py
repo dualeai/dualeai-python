@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from re import fullmatch
@@ -46,6 +47,26 @@ _PortableJsonValue = TypeAliasType(
 )
 
 
+@dataclass(frozen=True)
+class _EnumSchemaMetadata:
+    choices: tuple[tuple[str, Union[str, None], Union[str, None]], ...]
+
+    def __get_pydantic_json_schema__(self, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(core_schema)).copy()
+        json_schema.pop("enum", None)
+        json_schema.pop("const", None)
+        branches: list[JsonSchemaValue] = []
+        for value, title, description in self.choices:
+            branch: JsonSchemaValue = {"const": value}
+            if title is not None:
+                branch["title"] = title
+            if description is not None:
+                branch["description"] = description
+            branches.append(branch)
+        json_schema["oneOf"] = branches
+        return json_schema
+
+
 def _validate_string_constraints_2(value: object) -> object:
     if not isinstance(value, str):
         if not isinstance(value, datetime):
@@ -69,18 +90,40 @@ PlatformToken = TypeAliasType(
 
 
 class AssuranceLevel(str, Enum):
-    """The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks. Product 'aal3' requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity."""
+    """The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks."""
 
     aal1 = "aal1"
     aal2 = "aal2"
     aal3 = "aal3"
 
+    @property
+    def display_title(self) -> Union[str, None]:
+        return {AssuranceLevel.aal1: None, AssuranceLevel.aal2: None, AssuranceLevel.aal3: None}[self]
+
+    @property
+    def description(self) -> Union[str, None]:
+        return {
+            AssuranceLevel.aal1: None,
+            AssuranceLevel.aal2: None,
+            AssuranceLevel.aal3: "Product aal3 requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("aal1", None, None),
+                ("aal2", None, None),
+                (
+                    "aal3",
+                    None,
+                    "Product aal3 requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity.",
+                ),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks. Product 'aal3' requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity."
+                "description": "The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks."
             }
         )
         return json_schema

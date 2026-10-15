@@ -1,10 +1,9 @@
 """Tests for structured output (res=MyModel) feature.
 
-Right-layer testing: every test exercises the production bridge
-round-trip via ``MockHTTPTransport``. The injected SSE event is a
-``BridgeTaskCompletedResponse`` wrapping an ``LLMResult``, so the
-real ``events_client.run_task`` callback dispatch and
-``_extract_result`` validation paths run end-to-end.
+Bridge cases inject a ``BridgeTaskCompletedResponse`` carrying an ``LLMResult``
+through ``MockHTTPTransport``, exercising ``events_client.run_task`` callback
+dispatch and ``_extract_result`` validation. Schema export and cache tests call
+``_generate_json_schema_cached`` directly.
 """
 
 import pytest
@@ -12,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from dualeai import DualeAISDK
 from dualeai.exceptions import ValidationError
+from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.orchestrator import ask
 from dualeai.response import AgentResponse
@@ -248,6 +248,27 @@ class TestUnitStructuredOutput:
             },
             "required": ["id", "name", "email", "address"],
         }
+
+    def test_json_schema_preserves_documented_nullable_choices(self) -> None:
+        """Response exports retain generated choice text and explicit nullability."""
+
+        class CapabilityResponse(BaseModel):
+            capability: Capability | None
+
+        schema = _generate_json_schema_cached(CapabilityResponse)
+        assert schema["properties"] == {"capability": {"anyOf": [{"$ref": "#/$defs/Capability"}, {"type": "null"}]}}
+        assert schema["required"] == ["capability"]
+        definitions = schema["$defs"]
+        assert isinstance(definitions, dict)
+        capability = definitions["Capability"]
+        assert isinstance(capability, dict)
+        choices = capability["oneOf"]
+        assert isinstance(choices, list)
+        assert {
+            "const": "general",
+            "title": "General",
+            "description": "Broad language and knowledge work without one dominant specialization.",
+        } in choices
 
     async def test_strict_type_validation(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport

@@ -31,6 +31,7 @@ from dualeai.models.bridge import (
     BridgeToolUseResponse,
     RegisteredTool,
 )
+from dualeai.models.capability import Capability
 from dualeai.orchestrator import ask
 from dualeai.sdk import DualeAISDK
 from dualeai.tools.errors import TOOL_ERROR_MESSAGE_MAX_CHARS, format_registered_tool_error
@@ -2026,6 +2027,49 @@ def test_config_hash_frozen_golden() -> None:
         auto_start=False,
     )
     assert reversed_lifecycle.config_hash() == "52782349f25a444e5a47f98c2cf1536ace538e7f2a50d9748f5119f1f4ccae41"
+
+
+@pytest.mark.unit
+def test_config_hash_changes_when_only_a_generated_choice_title_changes() -> None:
+    """Member annotations participate in the local validated manifest hash."""
+    from dualeai.events.client import CloudEventsClient
+    from dualeai.lifecycle import LifecycleManager
+    from dualeai.models.tool import Tool as WireTool
+    from dualeai.tools._contract import _compile_tool_callable
+
+    async def no_client() -> CloudEventsClient:
+        raise AssertionError("config_hash must not need the events client")
+
+    async def choose(capability: Capability | None) -> str:
+        return "selected"
+
+    registered = RegisteredTool(
+        tool=WireTool(
+            name="choose",
+            description="Choose a capability.",
+            parameters=_compile_tool_callable(choose).parameters,
+        ),
+        timeout_seconds=30,
+    )
+    manifest = [registered]
+    lifecycle = LifecycleManager(
+        ensure_events_client=no_client,
+        manifest=lambda: manifest,
+        agent_id=None,
+        auto_start=False,
+    )
+    original_hash = lifecycle.config_hash()
+    assert lifecycle.config_hash() == original_hash
+
+    changed = registered.model_dump(mode="json", by_alias=True)
+    choices = changed["tool"]["parameters"]["$defs"]["Capability"]["oneOf"]
+    general = next(choice for choice in choices if choice["const"] == "general")
+    general["title"] = "General alternative title"
+    manifest[0] = RegisteredTool.model_validate(changed)
+
+    changed_hash = lifecycle.config_hash()
+    assert changed_hash != original_hash
+    assert lifecycle.config_hash() == changed_hash
 
 
 @pytest.mark.unit

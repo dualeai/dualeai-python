@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from re import fullmatch
@@ -58,6 +59,26 @@ _PortableJsonValue = TypeAliasType(
 )
 
 
+@dataclass(frozen=True)
+class _EnumSchemaMetadata:
+    choices: tuple[tuple[str, Union[str, None], Union[str, None]], ...]
+
+    def __get_pydantic_json_schema__(self, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(core_schema)).copy()
+        json_schema.pop("enum", None)
+        json_schema.pop("const", None)
+        branches: list[JsonSchemaValue] = []
+        for value, title, description in self.choices:
+            branch: JsonSchemaValue = {"const": value}
+            if title is not None:
+                branch["title"] = title
+            if description is not None:
+                branch["description"] = description
+            branches.append(branch)
+        json_schema["oneOf"] = branches
+        return json_schema
+
+
 def _validate_string_constraints_2(value: object) -> object:
     if not isinstance(value, str):
         return value
@@ -111,17 +132,33 @@ AuthzGrantAction = TypeAliasType(
 
 
 class AuthzGrantDecision(str, Enum):
-    """Effect applied when a grant matches: `allow` permits the action and `deny` refuses it. A matching deny takes precedence over matching allows."""
+    """Effect applied when a grant matches. A matching deny takes precedence over matching allows."""
 
     allow = "allow"
     deny = "deny"
 
+    @property
+    def display_title(self) -> str:
+        return {AuthzGrantDecision.allow: "Allow", AuthzGrantDecision.deny: "Deny"}[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            AuthzGrantDecision.allow: "Permits the action when the grant matches.",
+            AuthzGrantDecision.deny: "Refuses the action when the grant matches.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("allow", "Allow", "Permits the action when the grant matches."),
+                ("deny", "Deny", "Refuses the action when the grant matches."),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "Effect applied when a grant matches: `allow` permits the action and `deny` refuses it. A matching deny takes precedence over matching allows."
+                "description": "Effect applied when a grant matches. A matching deny takes precedence over matching allows."
             }
         )
         return json_schema

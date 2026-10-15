@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from re import fullmatch
@@ -89,6 +90,26 @@ def _validate_string_constraints_3(value: object) -> object:
     return value
 
 
+@dataclass(frozen=True)
+class _EnumSchemaMetadata:
+    choices: tuple[tuple[str, Union[str, None], Union[str, None]], ...]
+
+    def __get_pydantic_json_schema__(self, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(core_schema)).copy()
+        json_schema.pop("enum", None)
+        json_schema.pop("const", None)
+        branches: list[JsonSchemaValue] = []
+        for value, title, description in self.choices:
+            branch: JsonSchemaValue = {"const": value}
+            if title is not None:
+                branch["title"] = title
+            if description is not None:
+                branch["description"] = description
+            branches.append(branch)
+        json_schema["oneOf"] = branches
+        return json_schema
+
+
 def _reject_explicit_null(value: object) -> object:
     if value is None:
         raise ValueError("explicit null is not allowed; omit the field instead")
@@ -140,18 +161,36 @@ class AgentDeregistrationMessage(BaseModel):
 
 
 class HeartbeatStatus(str, Enum):
-    """Whether this SDK process can serve registered Tool Calls. `healthy` and `degraded` renew Tool availability; `unhealthy` does not."""
+    """Whether this SDK process can serve registered Tool Calls."""
 
     healthy = "healthy"
     degraded = "degraded"
     unhealthy = "unhealthy"
 
+    @property
+    def display_title(self) -> Union[str, None]:
+        return {HeartbeatStatus.healthy: None, HeartbeatStatus.degraded: None, HeartbeatStatus.unhealthy: None}[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            HeartbeatStatus.healthy: "Renews Tool availability.",
+            HeartbeatStatus.degraded: "Renews Tool availability.",
+            HeartbeatStatus.unhealthy: "Does not renew Tool availability.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("healthy", None, "Renews Tool availability."),
+                ("degraded", None, "Renews Tool availability."),
+                ("unhealthy", None, "Does not renew Tool availability."),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "Whether this SDK process can serve registered Tool Calls. `healthy` and `degraded` renew Tool availability; `unhealthy` does not.",
+                "description": "Whether this SDK process can serve registered Tool Calls.",
                 "examples": ["healthy", "degraded", "unhealthy"],
             }
         )
