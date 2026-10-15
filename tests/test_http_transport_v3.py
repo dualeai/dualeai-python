@@ -600,7 +600,7 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
         type="create",
         action_prompt="do it",
         deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
-        routing_policy=RoutingPolicy(target_accuracy=0.9, required_capabilities=[Capability.analysis]),
+        routing_policy=RoutingPolicy(target_accuracy=0.9, required_capabilities=[Capability.long_context]),
         response_format=JsonSchemaResponseFormat(json_schema={"type": "object"}),
         response_stream=True,
         attachments=[Attachment(key="attachment-key", filename="report.pdf", description="Quarterly report")],
@@ -614,7 +614,7 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
     body = call.body
     assert isinstance(body, dict)
     assert body["response_stream"] is True
-    assert body["routing_policy"] == {"target_accuracy": 0.9, "required_capabilities": ["analysis"]}
+    assert body["routing_policy"] == {"target_accuracy": 0.9, "required_capabilities": ["long_context"]}
     assert body["response_format"] == {"json_schema": {"type": "object"}}
     assert body["attachments"] == [
         {"key": "attachment-key", "filename": "report.pdf", "description": "Quarterly report"}

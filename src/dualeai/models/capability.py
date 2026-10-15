@@ -9,8 +9,9 @@ from typing import Annotated, Union
 from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, StrictFloat
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
+from typing_extensions import TypeAliasType
 
-__all__: list[str] = ["Capability", "CapabilityScore"]
+__all__: list[str] = ["Capability", "CapabilityComparison", "CapabilityScore", "GeneralCapabilityComparison"]
 
 
 @dataclass(frozen=True)
@@ -36,12 +37,9 @@ class _EnumSchemaMetadata:
 class Capability(str, Enum):
     """Work capacity a task requires of whoever executes it, used to rank eligible routes"""
 
-    general = "general"
-    reasoning = "reasoning"
-    analysis = "analysis"
+    problem_solving = "problem_solving"
     math = "math"
     code = "code"
-    instruction_following = "instruction_following"
     agentic = "agentic"
     long_context = "long_context"
     finance = "finance"
@@ -53,12 +51,9 @@ class Capability(str, Enum):
     @property
     def display_title(self) -> str:
         return {
-            Capability.general: "General",
-            Capability.reasoning: "Reasoning",
-            Capability.analysis: "Analysis",
+            Capability.problem_solving: "Problem solving",
             Capability.math: "Math",
             Capability.code: "Code",
-            Capability.instruction_following: "Instruction following",
             Capability.agentic: "Agentic",
             Capability.long_context: "Long context",
             Capability.finance: "Finance",
@@ -71,14 +66,11 @@ class Capability(str, Enum):
     @property
     def description(self) -> str:
         return {
-            Capability.general: "Broad language and knowledge work without one dominant specialization.",
-            Capability.reasoning: "Deriving conclusions through several logical or scientific steps.",
-            Capability.analysis: "Interpreting, comparing, and synthesizing supplied information.",
+            Capability.problem_solving: "Deriving conclusions through several logical or scientific steps.",
             Capability.math: "Mathematical problem solving and formal proofs.",
             Capability.code: "Generating, inspecting, modifying, debugging, or migrating software.",
-            Capability.instruction_following: "Following detailed instructions and output rubrics.",
             Capability.agentic: "Completing multiple steps with available Tools and feedback.",
-            Capability.long_context: "Using information spread across extensive supplied material.",
+            Capability.long_context: "Retrieving and combining details across very long documents or conversation histories.",
             Capability.finance: "Financial analysis, modeling, and banking workflows.",
             Capability.cyber_defensive: "Reproducing and remediating software vulnerabilities.",
             Capability.cyber_offensive: "Assessing whether a vulnerability can be exploited within an authorized scope.",
@@ -90,18 +82,19 @@ class Capability(str, Enum):
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         json_schema = _EnumSchemaMetadata(
             (
-                ("general", "General", "Broad language and knowledge work without one dominant specialization."),
-                ("reasoning", "Reasoning", "Deriving conclusions through several logical or scientific steps."),
-                ("analysis", "Analysis", "Interpreting, comparing, and synthesizing supplied information."),
+                (
+                    "problem_solving",
+                    "Problem solving",
+                    "Deriving conclusions through several logical or scientific steps.",
+                ),
                 ("math", "Math", "Mathematical problem solving and formal proofs."),
                 ("code", "Code", "Generating, inspecting, modifying, debugging, or migrating software."),
-                (
-                    "instruction_following",
-                    "Instruction following",
-                    "Following detailed instructions and output rubrics.",
-                ),
                 ("agentic", "Agentic", "Completing multiple steps with available Tools and feedback."),
-                ("long_context", "Long context", "Using information spread across extensive supplied material."),
+                (
+                    "long_context",
+                    "Long context",
+                    "Retrieving and combining details across very long documents or conversation histories.",
+                ),
                 ("finance", "Finance", "Financial analysis, modeling, and banking workflows."),
                 ("cyber_defensive", "Defensive security", "Reproducing and remediating software vulnerabilities."),
                 (
@@ -117,21 +110,38 @@ class Capability(str, Enum):
             {
                 "title": "Capability",
                 "description": "Work capacity a task requires of whoever executes it, used to rank eligible routes",
-                "examples": [
-                    "code",
-                    "analysis",
-                    "math",
-                    "reasoning",
-                    "agentic",
-                    "finance",
-                    "cyber_defensive",
-                    "cyber_offensive",
-                    "medical",
-                    "legal",
-                ],
+                "examples": ["code", "problem_solving", "long_context"],
             }
         )
         return json_schema
+
+
+class GeneralCapabilityComparison(str, Enum):
+    general = "general"
+
+    @property
+    def display_title(self) -> str:
+        return {GeneralCapabilityComparison.general: "General"}[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            GeneralCapabilityComparison.general: "Broad language and knowledge work without one dominant specialization."
+        }[self]
+
+    @staticmethod
+    def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = _EnumSchemaMetadata(
+            (("general", "General", "Broad language and knowledge work without one dominant specialization."),)
+        ).__get_pydantic_json_schema__(core_schema, handler)
+        json_schema.update({"title": "GeneralCapabilityComparison"})
+        return json_schema
+
+
+CapabilityComparison = TypeAliasType(
+    "CapabilityComparison",
+    Annotated[Union["Capability", "GeneralCapabilityComparison"], Field(title="CapabilityComparison")],
+)
 
 
 class CapabilityScore(BaseModel):
@@ -139,7 +149,8 @@ class CapabilityScore(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title="CapabilityScore", json_schema_extra=None)
     capability: Annotated[
-        Capability, Field(description="Capability described by this score; general summarizes overall capability.")
+        CapabilityComparison,
+        Field(description="Capability described by this score; general summarizes overall capability."),
     ]
     value: Annotated[
         Union[

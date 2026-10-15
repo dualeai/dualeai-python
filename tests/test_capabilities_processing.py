@@ -15,7 +15,7 @@ class TestCapabilitiesProcessing:
         "capabilities",
         [
             pytest.param([Capability.code], id="one"),
-            pytest.param([Capability.code, Capability.analysis], id="two"),
+            pytest.param([Capability.code, Capability.long_context], id="two"),
             pytest.param(list(Capability), id="every-enum-value"),
         ],
     )

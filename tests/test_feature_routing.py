@@ -15,13 +15,13 @@ async def test_explicit_routing_policy_overrides_derived_capabilities(minimal_mo
     policy = RoutingPolicy(
         priority_level=0,
         cost_sensitivity=None,
-        required_capabilities=[Capability.reasoning],
+        required_capabilities=[Capability.problem_solving],
         preferred_capabilities=[Capability.long_context],
     )
 
     await ask(
         action="Route task",
-        capabilities=[Capability.instruction_following],
+        capabilities=[Capability.agentic],
         routing=policy,
         sdk=minimal_mock_sdk,
     )
@@ -33,13 +33,13 @@ async def test_explicit_routing_policy_overrides_derived_capabilities(minimal_mo
     assert routing is not None
     assert routing.priority_level == 0
     assert routing.cost_sensitivity is None
-    assert routing.required_capabilities == [Capability.reasoning]
+    assert routing.required_capabilities == [Capability.problem_solving]
     assert routing.preferred_capabilities == [Capability.long_context]
 
 
 @pytest.mark.unit
 async def test_capabilities_derive_only_required_routing_capabilities(minimal_mock_sdk: DualeAISDK) -> None:
-    capabilities = [Capability.instruction_following, Capability.analysis]
+    capabilities = [Capability.agentic, Capability.long_context]
 
     await ask(action="Route task", capabilities=capabilities, sdk=minimal_mock_sdk)
 
@@ -48,5 +48,5 @@ async def test_capabilities_derive_only_required_routing_capabilities(minimal_mo
     assert isinstance(request, BridgeTaskCreateRequest)
     routing = request.routing_policy
     assert routing is not None
-    assert routing.required_capabilities == [Capability.instruction_following, Capability.analysis]
+    assert routing.required_capabilities == [Capability.agentic, Capability.long_context]
     assert routing.model_fields_set == {"required_capabilities"}

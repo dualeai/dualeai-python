@@ -32,13 +32,13 @@ class RoutingPolicy(BaseModel):
                     "cost_sensitivity": 0.2,
                     "speed_preference": 0.7,
                     "priority_level": 5,
-                    "required_capabilities": ["code", "analysis"],
+                    "required_capabilities": ["code", "long_context"],
                 },
                 {
                     "target_accuracy": 0.95,
                     "cost_sensitivity": 0.9,
                     "priority_level": 0,
-                    "required_capabilities": ["reasoning", "analysis"],
+                    "required_capabilities": ["problem_solving", "long_context"],
                     "preferred_capabilities": ["agentic", "long_context"],
                 },
             ]

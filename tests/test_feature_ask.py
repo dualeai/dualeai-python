@@ -68,7 +68,7 @@ class TestUnitAskFunction:
 
     async def test_ask_includes_capabilities_in_request(self, minimal_mock_sdk: DualeAISDK):
         """The Task request passed to the transport carries the selected capabilities."""
-        capabilities = [Capability.instruction_following, Capability.analysis]
+        capabilities = [Capability.agentic, Capability.long_context]
         await ask(action="Extract and analyze", capabilities=capabilities, sdk=minimal_mock_sdk)
 
         requests = require_mock_http_transport(minimal_mock_sdk).get_requests()
@@ -77,8 +77,8 @@ class TestUnitAskFunction:
         assert isinstance(task_request, BridgeTaskCreateRequest)
         assert task_request.routing_policy is not None
         assert task_request.routing_policy.required_capabilities == [
-            Capability.instruction_following,
-            Capability.analysis,
+            Capability.agentic,
+            Capability.long_context,
         ]
 
     async def test_ask_with_streaming_flag(self, minimal_mock_sdk: DualeAISDK):
@@ -108,10 +108,10 @@ class TestUnitAskFunction:
     async def test_ask_with_multiple_capabilities(self, minimal_mock_sdk: DualeAISDK):
         """Test ask() with multiple capabilities includes all in payload."""
         capabilities = [
-            Capability.instruction_following,
-            Capability.analysis,
-            Capability.reasoning,
-            Capability.general,
+            Capability.agentic,
+            Capability.long_context,
+            Capability.problem_solving,
+            Capability.math,
         ]
 
         await ask(
@@ -126,10 +126,10 @@ class TestUnitAskFunction:
         assert isinstance(task_request, BridgeTaskCreateRequest)
         assert task_request.routing_policy is not None
         assert task_request.routing_policy.required_capabilities == [
-            Capability.instruction_following,
-            Capability.analysis,
-            Capability.reasoning,
-            Capability.general,
+            Capability.agentic,
+            Capability.long_context,
+            Capability.problem_solving,
+            Capability.math,
         ]
 
     async def test_ask_task_id_uniqueness(self, minimal_mock_sdk: DualeAISDK):

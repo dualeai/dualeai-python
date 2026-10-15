@@ -2063,8 +2063,8 @@ def test_config_hash_changes_when_only_a_generated_choice_title_changes() -> Non
 
     changed = registered.model_dump(mode="json", by_alias=True)
     choices = changed["tool"]["parameters"]["$defs"]["Capability"]["oneOf"]
-    general = next(choice for choice in choices if choice["const"] == "general")
-    general["title"] = "General alternative title"
+    general = next(choice for choice in choices if choice["const"] == "math")
+    general["title"] = "Math alternative title"
     manifest[0] = RegisteredTool.model_validate(changed)
 
     changed_hash = lifecycle.config_hash()

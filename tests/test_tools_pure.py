@@ -189,12 +189,12 @@ def test_compiled_contract_preserves_documented_nullable_choices() -> None:
     assert schema["properties"] == {"capability": {"anyOf": [{"$ref": "#/$defs/Capability"}, {"type": "null"}]}}
     assert schema["required"] == ["capability"]
     assert {
-        "const": "general",
-        "title": "General",
-        "description": "Broad language and knowledge work without one dominant specialization.",
+        "const": "math",
+        "title": "Math",
+        "description": "Mathematical problem solving and formal proofs.",
     } in schema["$defs"]["Capability"]["oneOf"]
 
-    assert contract.tool_kwargs(_tool_use(capability="general"))["capability"] is Capability.general
+    assert contract.tool_kwargs(_tool_use(capability="math"))["capability"] is Capability.math
     assert contract.tool_kwargs(_tool_use(capability=None)) == {"capability": None}
     for invalid in ("not-a-capability", 1):
         with pytest.raises(ValueError, match="'capability'"):

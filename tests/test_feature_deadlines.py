@@ -41,7 +41,7 @@ class TestUnitDeadlineHandling:
     ) -> None:
         """Preserve every supported deadline shape at the transport boundary."""
         await ask(
-            action="Task with deadline", capabilities=[Capability.analysis], deadline=deadline, sdk=minimal_mock_sdk
+            action="Task with deadline", capabilities=[Capability.long_context], deadline=deadline, sdk=minimal_mock_sdk
         )
 
         [record] = require_mock_http_transport(minimal_mock_sdk).get_requests()

@@ -141,9 +141,7 @@ async def ask(
     if capabilities:
         if Capability.code in capabilities:
             task_type = "generation"
-        elif Capability.analysis in capabilities:
-            task_type = "analysis"
-        elif Capability.reasoning in capabilities:
+        elif Capability.problem_solving in capabilities:
             task_type = "reasoning"
 
     return await sdk.submit_task(

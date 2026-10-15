@@ -265,9 +265,9 @@ class TestUnitStructuredOutput:
         choices = capability["oneOf"]
         assert isinstance(choices, list)
         assert {
-            "const": "general",
-            "title": "General",
-            "description": "Broad language and knowledge work without one dominant specialization.",
+            "const": "math",
+            "title": "Math",
+            "description": "Mathematical problem solving and formal proofs.",
         } in choices
 
     async def test_strict_type_validation(
