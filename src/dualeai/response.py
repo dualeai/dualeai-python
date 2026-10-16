@@ -39,6 +39,7 @@ from dualeai.models.bridge import (
     BridgeTaskStoppedResponse,
 )
 from dualeai.models.llm_result import LLMResult
+from dualeai.models.priority_class import PriorityClass
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.response_format import ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
@@ -462,6 +463,7 @@ class AgentResponse(Generic[T]):
         self,
         message: str,
         *,
+        priority: PriorityClass = PriorityClass.standard,
         res: type[T] | None = None,
         deadline: datetime | None = None,
         response_format: ResponseFormat | None = None,
@@ -479,7 +481,8 @@ class AgentResponse(Generic[T]):
         arrives before this Task finishes its first step waits for that step
         until its own deadline, then fails with ``PARENT_TASK_UNAVAILABLE``.
         The new Task has its own identifier (``request_id``, or a new UUID4),
-        deadline, result and stop. A setting left as None takes this Task's
+        deadline, priority, result and stop. Priority defaults to standard for
+        each new Task. A setting left as None takes this Task's
         value; attachments add documents. The new Task inherits only the
         conversation. The Platform accepts a continuation only while this
         immediate parent Task is within its own 30-day retention window.
@@ -512,6 +515,9 @@ class AgentResponse(Generic[T]):
 
         Args:
             message: New user turn for the continuation Task.
+            priority: This continuation's scheduling class. Omission selects
+                standard independently of this Task's class. Fast favors lower
+                waiting time for the same work and uses the Fast Task price.
             res: Optional continuation result type for local validation.
                 Omission does not inherit the parent's type. When
                 ``response_format`` is absent, the SDK also derives the type's
@@ -567,6 +573,7 @@ class AgentResponse(Generic[T]):
         return await self.sdk._continue_task(  # noqa: SLF001 - paired SDK response implementation
             parent_task_id=self.task_id,
             message=message,
+            priority=priority,
             response_type=res,
             deadline=deadline,
             response_format=response_format,

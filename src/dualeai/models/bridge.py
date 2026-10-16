@@ -30,6 +30,7 @@ from dualeai.models import agent_id as agent_id_module
 from dualeai.models import attachment as attachment_module
 from dualeai.models import json_value as json_value_module
 from dualeai.models import llm_result as llm_result_module
+from dualeai.models import priority_class as priority_class_module
 from dualeai.models import problem_details as problem_details_module
 from dualeai.models import response_format as response_format_module
 from dualeai.models import routing_policy as routing_policy_module
@@ -443,10 +444,18 @@ class BridgeSSEEvent(BaseModel):
 
 
 class BridgeTaskContinueRequest(BaseModel):
-    """Creates a new Task that continues the conversation of `parent_task_id`, a Task of the same Agent Identity. The new Task runs under that Agent Identity and inherits that conversation. A setting this request omits takes the parent Task's value; the deadline is always the new Task's own. The parent can have completed, failed, or stopped, or can still be running."""
+    """Creates a new Task that continues the conversation of `parent_task_id`, a Task of the same Agent Identity. The new Task runs under that Agent Identity and inherits that conversation. A setting this request omits takes the parent Task's value; the deadline and the priority are always the new Task's own. The parent can have completed, failed, or stopped, or can still be running."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["continue"], Field(description="Identifies this request as Task continuation.")]
+    priority: Annotated[
+        Union[priority_class_module.PriorityClass, SkipJsonSchema[None]],
+        BeforeValidator(_reject_explicit_null),
+        Field(
+            description="Scheduling class for this continuation Task. Omission selects standard even when the parent used fast. Fast reduces waiting time for the same work and uses the Fast Task price.",
+            json_schema_extra={"default": "standard"},
+        ),
+    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     parent_task_id: Annotated[
         task_id_module.TaskId,
         Field(
@@ -499,6 +508,14 @@ class BridgeTaskCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["create"], Field(description="Identifies this request as Task creation.")]
+    priority: Annotated[
+        Union[priority_class_module.PriorityClass, SkipJsonSchema[None]],
+        BeforeValidator(_reject_explicit_null),
+        Field(
+            description="Scheduling class for this Task. Omission selects standard. Fast reduces waiting time for the same work and uses the Fast Task price.",
+            json_schema_extra={"default": "standard"},
+        ),
+    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     action_prompt: Annotated[
         action_prompt_module.ActionPrompt, Field(description="Instruction and contextual material for the Task.")
     ]

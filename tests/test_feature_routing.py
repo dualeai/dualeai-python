@@ -13,7 +13,7 @@ from tests.mocks.mock_http import require_mock_http_transport
 @pytest.mark.unit
 async def test_explicit_routing_policy_overrides_derived_capabilities(minimal_mock_sdk: DualeAISDK) -> None:
     policy = RoutingPolicy(
-        priority_level=0,
+        speed_preference=0.0,
         cost_sensitivity=None,
         required_capabilities=[Capability.problem_solving],
         preferred_capabilities=[Capability.long_context],
@@ -31,7 +31,7 @@ async def test_explicit_routing_policy_overrides_derived_capabilities(minimal_mo
     assert isinstance(request, BridgeTaskCreateRequest)
     routing = request.routing_policy
     assert routing is not None
-    assert routing.priority_level == 0
+    assert routing.speed_preference == 0.0
     assert routing.cost_sensitivity is None
     assert routing.required_capabilities == [Capability.problem_solving]
     assert routing.preferred_capabilities == [Capability.long_context]

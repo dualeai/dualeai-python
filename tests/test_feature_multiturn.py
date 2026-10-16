@@ -212,7 +212,7 @@ class TestUnitMultiTurnConversation:
     async def test_next_sends_only_the_criteria_the_caller_sets(
         self, minimal_mock_sdk: DualeAISDK, criteria: str
     ) -> None:
-        """The policy object is required; omitted criteria stay absent and set criteria are sent as given."""
+        """Priority defaults independently; omitted inherited criteria stay absent and set criteria are sent."""
         parent = await ask(action="Initial", sdk=minimal_mock_sdk)
         transport = require_mock_http_transport(minimal_mock_sdk)
 
@@ -222,7 +222,8 @@ class TestUnitMultiTurnConversation:
             request = transport.get_requests()[-1]["request"]
             assert isinstance(request, BridgeTaskContinueRequest)
             body = dump_wire_model(request)
-            assert set(body) == {"type", "parent_task_id", "message", "deadline", "routing_policy"}
+            assert set(body) == {"type", "parent_task_id", "message", "deadline", "priority", "routing_policy"}
+            assert body["priority"] == "standard"
             assert body["routing_policy"] == {}
             return
 

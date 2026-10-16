@@ -74,6 +74,7 @@ from dualeai.models.library import (
     LibraryWithRevision,
     PublicIndexedDocument,
 )
+from dualeai.models.priority_class import PriorityClass
 from dualeai.models.response_format import ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.models.tool import Tool
@@ -219,6 +220,7 @@ __all__ = [
     "LibraryWithRevision",
     "MessagingError",
     "PreparedAttachment",
+    "PriorityClass",
     "PublicIndexedDocument",
     "RedisCacheBackend",
     "ResponseFormat",

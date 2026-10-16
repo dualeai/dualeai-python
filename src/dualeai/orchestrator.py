@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, TypeVar, overload
 
 from dualeai.models.capability import Capability
+from dualeai.models.priority_class import PriorityClass
 from dualeai.models.response_format import ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.response import AgentResponse
@@ -29,6 +30,7 @@ async def ask(
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
     *,
+    priority: PriorityClass = PriorityClass.standard,
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
@@ -45,6 +47,7 @@ async def ask(
     res: type[T],
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
+    priority: PriorityClass = PriorityClass.standard,
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
@@ -61,6 +64,7 @@ async def ask(
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
     *,
+    priority: PriorityClass = PriorityClass.standard,
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
@@ -76,6 +80,7 @@ async def ask(
     response_format: ResponseFormat | None = None,
     routing: RoutingPolicy | None = None,
     *,
+    priority: PriorityClass = PriorityClass.standard,
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
@@ -100,6 +105,8 @@ async def ask(
             schema derivation from ``res``.
         routing: Explicit routing policy. When present it takes precedence over
             the policy otherwise derived from ``capabilities``.
+        priority: Task scheduling class. Standard favors throughput; fast favors
+            lower waiting time for the same work and uses the Fast Task price.
         streaming: Request content delta/reset events for ``response.stream()``.
             The Platform streams only a free-text answer: no ``res`` or
             ``response_format``, or the ``text`` or ``markdown`` format. No
@@ -148,6 +155,7 @@ async def ask(
         action=action,
         capabilities=capabilities or [],
         routing_policy=routing,
+        priority=priority,
         response_type=res,
         response_format=response_format,
         streaming=streaming,

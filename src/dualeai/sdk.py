@@ -96,6 +96,7 @@ from dualeai.models.bridge import (
 from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.models.library import LibraryCreateRequest, LibraryDocumentCreateResponse
+from dualeai.models.priority_class import PriorityClass
 from dualeai.models.reserved_tool_names import ReservedToolName
 from dualeai.models.response_format import JsonSchemaResponseFormat, ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
@@ -1115,6 +1116,7 @@ class DualeAISDK:
         action: str,
         capabilities: list[Capability],
         *,
+        priority: PriorityClass = PriorityClass.standard,
         routing_policy: RoutingPolicy | None = None,
         response_type: type[T] | None = None,
         response_schema: dict[str, JsonValue | None] | None = None,
@@ -1137,6 +1139,8 @@ class DualeAISDK:
             action: Non-empty Task instruction.
             capabilities: Capabilities used to derive ``required_capabilities`` when
                 ``routing_policy`` is omitted.
+            priority: Task scheduling class. Fast favors lower waiting time for
+                the same work and uses the Fast Task price; standard is the default.
             routing_policy: Explicit routing policy. Takes precedence over the
                 policy derived from ``capabilities``.
             response_type: Optional type for local ``AgentResponse.model()``
@@ -1173,6 +1177,7 @@ class DualeAISDK:
             return await self._submit_task_internal(
                 action,
                 capabilities,
+                priority=priority,
                 routing_policy=routing_policy,
                 response_type=response_type,
                 response_schema=response_schema,
@@ -1209,6 +1214,7 @@ class DualeAISDK:
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
         *,
+        priority: PriorityClass,
         streaming: bool | None = None,
         local_streaming: bool,
         routing_policy: RoutingPolicy | None = None,
@@ -1220,7 +1226,8 @@ class DualeAISDK:
         The continuation's Task id is ``request_id``, or a new UUID4. The SDK
         sends that id in the HTTP task path and ``parent_task_id`` in the
         continuation body. It always sends a ``routing_policy`` object, empty
-        when the caller sets no policy fields. It sends ``response_format``,
+        when the caller sets no policy fields, and the new Task's ``priority``.
+        It sends ``response_format``,
         ``response_stream`` and ``attachments`` only when the caller set them;
         an omitted criterion takes the parent Task's value on the Platform.
         ``local_streaming`` selects the returned response's local buffering.
@@ -1240,6 +1247,7 @@ class DualeAISDK:
                 deadline,
                 response_type,
                 response_format,
+                priority=priority,
                 streaming=streaming,
                 local_streaming=local_streaming,
                 routing_policy=routing_policy,
@@ -1553,6 +1561,7 @@ class DualeAISDK:
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
         *,
+        priority: PriorityClass,
         streaming: bool | None = None,
         local_streaming: bool,
         routing_policy: RoutingPolicy | None = None,
@@ -1590,6 +1599,7 @@ class DualeAISDK:
                 "parent_task_id": parent_task_id,
                 "message": message,
                 "deadline": deadline,
+                "priority": priority,
                 "routing_policy": routing_policy if routing_policy is not None else RoutingPolicy(),
                 **criteria,
             }
@@ -1608,6 +1618,7 @@ class DualeAISDK:
         action: str,
         capabilities: list[Capability],
         *,
+        priority: PriorityClass,
         routing_policy: RoutingPolicy | None,
         response_type: type[T] | None,
         response_schema: dict[str, JsonValue | None] | None,
@@ -1658,6 +1669,7 @@ class DualeAISDK:
             type="create",
             action_prompt=action,
             deadline=deadline,
+            priority=priority,
             routing_policy=routing_policy_obj,
             response_format=resolved_response_format,
             response_stream=streaming,

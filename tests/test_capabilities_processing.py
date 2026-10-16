@@ -34,14 +34,14 @@ class TestCapabilitiesProcessing:
 
     def test_routing_policy_wire_preserves_explicit_zero_null_and_empty_lists(self) -> None:
         policy = RoutingPolicy(
-            priority_level=0,
+            speed_preference=0.0,
             cost_sensitivity=None,
             required_capabilities=[],
             preferred_capabilities=[],
         )
 
         assert dump_wire_model(policy) == {
-            "priority_level": 0,
+            "speed_preference": 0.0,
             "cost_sensitivity": None,
             "required_capabilities": [],
             "preferred_capabilities": [],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Union
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictFloat
 from pydantic.json_schema import SkipJsonSchema
 
 from dualeai.models import capability as capability_module
@@ -31,13 +31,11 @@ class RoutingPolicy(BaseModel):
                     "target_accuracy": 0.85,
                     "cost_sensitivity": 0.2,
                     "speed_preference": 0.7,
-                    "priority_level": 5,
                     "required_capabilities": ["code", "long_context"],
                 },
                 {
                     "target_accuracy": 0.95,
                     "cost_sensitivity": 0.9,
-                    "priority_level": 0,
                     "required_capabilities": ["problem_solving", "long_context"],
                     "preferred_capabilities": ["agentic", "long_context"],
                 },
@@ -104,17 +102,6 @@ class RoutingPolicy(BaseModel):
             json_schema_extra={"default": None},
         ),
     ] = None
-    priority_level: Annotated[
-        Union[
-            Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=-10, le=10)],
-            SkipJsonSchema[None],
-        ],
-        BeforeValidator(_reject_explicit_null),
-        Field(
-            description="Task priority from -10 to 10. Lower values reduce the preference for lower measured latency, 0 applies the normal balance, and higher values strengthen it. Cost preference is controlled separately by cost_sensitivity.",
-            json_schema_extra={"default": 0},
-        ),
-    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     required_capabilities: Annotated[
         Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
