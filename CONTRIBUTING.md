@@ -65,8 +65,10 @@ and attaches those same artifacts and SBOMs to the Release.
 ## Writing
 
 No marketing copy or superlatives. State behavior that exists in the current package.
-When prose names an invariant, name the test that enforces it or state that no
-automated test enforces it.
+A test that enforces an invariant names it in its name or docstring. Outside `tests/`,
+state the invariant in words and never name, link or mention a test; write "nothing
+enforces this" when nothing does. Never count tests, cases, or items that code already
+lists, not even in a test.
 
 Prefer the shorter word, cut what can be cut, and use `Duale AI` for the company and
 `dualeai` for the package and repository identifiers.

@@ -10,8 +10,6 @@ Usage in tests:
         sdk.set_mock_response("hello", "world")
         result = await sdk.mock_ask("hello")
         assert result == "world"
-
-Behavior is covered by ``tests/test_mock_sdk.py``.
 """
 
 from __future__ import annotations

@@ -10,8 +10,7 @@ pre-shared key to fetch the pre-shared key is circular. This platform API
 bootstrap runs outside the protected tunnel.
 
 THE DERIVATION MUST MATCH THE ISSUER BYTE FOR BYTE. A mismatch is silent — no
-tunnel opens and every request is refused, far from the cause — so
-`tests/test_platform_token.py` pins it against an independently calculated vector.
+tunnel opens and every request is refused, far from the cause.
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ class PlatformTokenIssueError(Exception):
 
 
 def _now() -> datetime:
-    """The current instant, as one name the rotation tests can hold still.
+    """The current instant, behind one name that a test can hold still.
 
     Every deadline in this module is compared against this call. Freezing a
     clock is the only way to observe the advisory and mandatory bands without
@@ -95,7 +94,7 @@ async def issue(
     BOTH BODIES GO THROUGH THE GENERATED CONTRACT. Issuance runs before any
     credential exists, so the answer is the least trusted body this client
     handles: parsing it makes a malformed one a raised error here instead of a
-    tunnel that never opens. `tests/test_platform_token_issuance.py` pins that.
+    tunnel that never opens.
     """
     private = X25519PrivateKey.generate()
     body = PlatformTokenIssueRequest(client_public_key=private.public_key().public_bytes_raw().hex())
@@ -155,9 +154,7 @@ class PlatformTokenProvider:
     token may have only seconds remaining when received. A fixed 15-minute
     advisory margin would reissue a short token on every call, and a 10-minute
     mandatory margin could never be satisfied. Fractions scale to the validity
-    the issuer returns.
-    ``test_the_bands_scale_to_a_short_lived_token`` covers short-token rotation;
-    ``test_a_delayed_issuance_schedules_from_receipt_time`` covers issuance latency.
+    the issuer returns, and the schedule starts at receipt time.
 
     :meth:`invalidate` requests replacement after a possible credential refusal.
     The stamped expiry does not reveal early withdrawal or distinguish it from
@@ -240,8 +237,5 @@ class PlatformTokenProvider:
         This drops only the provider's reusable reference; it does not establish
         whether the issuer still holds the record. The transport owns keyed
         clients separately and retains them while admitted responses use them.
-        ``test_invalidate_forces_the_next_call_to_reissue`` covers replacement;
-        ``test_retired_tunnels_keep_admitted_streams_until_the_last_response_finishes``
-        covers the transport's retention boundary.
         """
         self._held = None

@@ -5,10 +5,6 @@ HTTPS Gateway base. Library metadata requests use a separate protected
 endpoint with bearer authorization inside HPKE; ``tenant_id`` is part of their
 URL. Hosted-tool lifecycle operations require ``agent_id``. Attachment uploads
 use the configured Agent ID unless a per-call ID is supplied.
-
-Local validation and environment-loading behavior is covered by
-``tests/test_config.py``, and ``tests/test_api_token_prefix_contract.py`` pins
-the token prefix against the credential the platform mints.
 """
 
 from pathlib import Path
@@ -104,9 +100,9 @@ class DualeAIConfig(BaseSettings):
         Everything else about this credential's shape is the issuer's to
         choose, so a second bound here would go stale unnoticed.
 
-        ``tests/test_api_token_prefix_contract.py`` enforces the prefix in both
-        directions: a token the platform mints is accepted, and one carrying the
-        ``duale_`` package prefix instead is refused.
+        The prefix holds in both directions: a token the platform mints is
+        accepted, and one carrying the ``duale_`` package prefix instead is
+        refused.
         """
         if v is None:
             raise ValueError(

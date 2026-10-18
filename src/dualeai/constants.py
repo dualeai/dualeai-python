@@ -1,8 +1,4 @@
-"""Centralized timing, limit, and configuration values.
-
-Values used as public defaults are covered by ``tests/test_constants.py`` and
-the feature tests that consume them.
-"""
+"""Centralized timing, limit, and configuration values."""
 
 
 class TimingDefaults:

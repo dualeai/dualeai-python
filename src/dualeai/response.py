@@ -8,12 +8,8 @@ connection; it is not a platform stop request. ``response.stop()`` submits a
 stop request and returns its acceptance receipt, which does not by itself prove
 that the Task has stopped.
 
-Terminal, streaming, continuation, and stop behavior is covered by
-``tests/test_feature_results.py``, ``tests/test_streaming_callbacks.py``,
-``tests/test_feature_multiturn.py``, and ``tests/test_task_stop.py``.
-``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_next_sends_only_the_criteria_the_caller_sets``
-covers continuation defaults; no dedicated automated test covers parent result
-validation or stream-runner failures during streaming.
+Parent result validation and stream-runner failures during streaming are
+unproved.
 """
 
 import asyncio
@@ -384,8 +380,6 @@ class AgentResponse(Generic[T]):
         Replay: iterating ``stream()`` after the task is done yields every
         buffered content event, resets included, in arrival order — useful
         for re-rendering on UI re-mount.
-        ``tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_replay_repeats_every_content_event_in_arrival_order``
-        enforces this.
 
         With ``streaming=False`` this method just awaits the task and returns
         without yielding. Terminal ``task.error`` and ``task.stopped`` events
@@ -472,11 +466,11 @@ class AgentResponse(Generic[T]):
         attachments: "list[PreparedAttachment] | None" = None,
         request_id: str | None = None,
     ) -> "AgentResponse[T]":
-        """Start a continuation Task that carries this Task's conversation forward.
+        """Start a continuation Task that carries this Task's task history forward.
 
         Sends it as soon as the Platform has accepted this Task's request,
         without waiting for this Task's outcome: the Platform continues the
-        conversation of this Task's last finished step, whether this Task is
+        task history of this Task's last finished step, whether this Task is
         still running, completed, failed or stopped. A continuation that
         arrives before this Task finishes its first step waits for that step
         until its own deadline, then fails with ``PARENT_TASK_UNAVAILABLE``.
@@ -484,14 +478,15 @@ class AgentResponse(Generic[T]):
         deadline, priority, result and stop. Priority defaults to standard for
         each new Task. A setting left as None takes this Task's
         value; attachments add documents. The new Task inherits only the
-        conversation. The Platform accepts a continuation only while this
+        task history. The Platform accepts a continuation only while this
         immediate parent Task is within its own 30-day retention window.
         The continuation uses the inherited conversation context that remains
         available. Conversation content expires 30 days after the request that
         supplied it. System instructions may remain available for up to 90 days
         after the request that supplied them. Tool Calls of the last finished
         step that have no recorded reply appear to the model as 'status unknown'.
-        This Task's final answer text is not part of the conversation.
+        The inherited context does not carry this Task's final answer text;
+        the Agent Identity can recall that answer from its recorded history.
 
         Requires ``agent:continue_task`` and ``agent:read_task`` on this Task,
         plus ``agent:read_task`` on the new Task. The new Task runs under this
@@ -499,18 +494,8 @@ class AgentResponse(Generic[T]):
 
         This method never raises this Task's outcome; call ``model()`` for it.
         Cancelling this call before it sends the continuation sends nothing and
-        leaves this Task running.
+        leaves this Task and its other pending continuations running.
 
-        ``tests/test_feature_multiturn.py`` enforces the SDK side:
-        ``test_next_continues_a_running_parent_at_once``,
-        ``test_next_continues_after_any_parent_outcome``,
-        ``test_next_waits_only_for_the_parents_acceptance``,
-        ``test_cancelling_one_next_waiter_preserves_parent_and_sibling``,
-        ``test_next_sends_only_the_criteria_the_caller_sets``,
-        ``test_omitted_streaming_keeps_the_parents_local_buffering`` and
-        ``test_continuation_http_rejection_uses_continuation_translation``; so do
-        ``tests/test_http_transport_v3.py::test_task_error_context_identifies_the_operation``
-        and ``tests/test_http_transport_v3.py::test_run_task_reports_acceptance_when_the_stream_starts``.
         No test in this repository enforces the Platform behavior described here.
 
         Args:
@@ -558,10 +543,9 @@ class AgentResponse(Generic[T]):
         Task that expired and whose record the Platform still holds ends the
         continuation with ``PARENT_TASK_NOT_FOUND``. A ``request_id`` already
         used by this Agent Identity names that existing Task: the returned
-        response streams it, and no second Task starts.
-        ``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_continuation_child_error_preserves_problem_details``
-        enforces that ``model()`` raises the continuation's error code; no test
-        in this repository enforces these Platform answers.
+        response streams it, and no second Task starts. ``model()`` raises the
+        continuation's error code with its problem details. No test in this
+        repository enforces these Platform answers.
 
         Example:
             response = await ask(action="What's 2+2?", sdk=sdk)
@@ -598,9 +582,8 @@ class AgentResponse(Generic[T]):
         stop is accepted even when the Task already ended or the Platform does
         not know it; a stop of a Task that already ended changes nothing.
 
-        ``tests/test_task_stop.py::test_refused_stop_raises_the_authorization_error``
-        enforces the refusal. No test in this repository enforces that a
-        permitted stop of an ended or unknown Task is accepted.
+        No test in this repository enforces that a permitted stop of an ended
+        or unknown Task is accepted.
 
         Args:
             reason: Why the task is being stopped. Required, non-empty.

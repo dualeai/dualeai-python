@@ -23,7 +23,8 @@ Set your provisioned token in the current shell:
 export DUALEAI_TOKEN=dualeai_your_provisioned_token_here
 ```
 
-<!-- Provisioning, model eligibility, and service usage are Platform requirements; no automated SDK test enforces them. -->
+<!-- Provisioning, model eligibility, and service usage are Platform
+requirements, unproved in this SDK. -->
 
 Save this as `quickstart.py`:
 
@@ -61,7 +62,7 @@ Run `python quickstart.py`. A successful run prints the Task ID, then the valida
 
 Before retrying a failure, use [Errors and reliability](https://duale.ai/en/docs/sdk/errors) to identify its cause.
 
-<!-- Evidence: tests/test_feature_ask.py::TestUnitAskFunction::test_ask_returns_agent_response; tests/test_feature_results.py::TestUnitModelExtraction::test_model_validates_against_expected_type. No automated test executes this live quickstart or enforces its printed shape. -->
+<!-- No automated test executes this live quickstart or enforces its printed shape. -->
 
 ## Configuration
 
@@ -77,8 +78,6 @@ Before retrying a failure, use [Errors and reliability](https://duale.ai/en/docs
 Attachment uploads also accept `agent_id=` in place of `DUALEAI_AGENT_ID`.
 `dualeai[telemetry]` adds automatic instrumentation; configuration is still required to enable it.
 See the [configuration example](https://github.com/dualeai/dualeai-python/blob/main/.env.example) for all settings.
-
-<!-- Proof owners: tests/test_config.py, tests/test_attachments.py and tests/test_feature_observability.py. -->
 
 ## Examples and next steps
 
@@ -106,7 +105,7 @@ For application tests without a live connection, use the
   them. Optional telemetry instrumentation also acts across the process. Coordinate these settings with your host
   application.
 
-<!-- Proof owners: tests/test_streaming_callbacks.py, tests/test_task_stop.py, tests/test_tool_dispatch_invariants.py and tests/test_agent_lifecycle.py. Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings without dedicated automated tests. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; no test in this repository enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; no test in this repository enforces it. -->
+<!-- Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings without dedicated automated tests. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; no test in this repository enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; no test in this repository enforces it. -->
 
 ## Project links
 

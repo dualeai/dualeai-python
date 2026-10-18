@@ -4,9 +4,6 @@ Creating ``DualeAISDK`` calls :func:`configure_logging`. Applications that own
 their logging configuration should account for its root-handler replacement or
 reapply their desired configuration afterward. This module does not install an
 OpenTelemetry log exporter.
-
-Root-handler and structlog behavior is covered by
-``tests/test_logging_config.py``.
 """
 
 import logging

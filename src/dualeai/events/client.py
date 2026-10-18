@@ -3,9 +3,6 @@
 This client submits typed requests and consumes Server-Sent Events. The
 transport owns protected HTTP calls, reconnects, and ``Last-Event-ID`` handling.
 An injected transport provides the network boundary used by tests.
-
-Client dispatch and error translation are covered by
-``tests/test_feature_ask.py`` and ``tests/test_libraries_client.py``.
 """
 
 import types
@@ -55,7 +52,6 @@ def _lift_problem_details(sdk_error: DualeAIError, cause: HTTPTransportError) ->
     also identifies local failures without a service body; it does not establish
     a remote terminal outcome. ``_consume_terminal_stream`` labels the operation
     as ``task_run``, ``task_continue``, or ``tool_results`` before translation.
-    ``test_task_error_context_identifies_the_operation`` checks those labels.
     """
     sdk_error.problem_details = cause.problem_details
     if cause.context is not None:
@@ -131,9 +127,7 @@ class CloudEventsClient:
 
         The production transport obtains its initial platform token during
         connect. It discovers each service's public key and authenticates the
-        protected request when that request starts. Issuance errors are covered
-        by ``test_platform_token_errors.py``; lazy discovery is covered by
-        ``test_real_v3_tls_boundary_reuses_discovery_per_service``.
+        protected request when that request starts.
 
         Raises:
             DualeAIAuthError: If platform-token issuance or an injected transport
@@ -254,8 +248,6 @@ class CloudEventsClient:
             accepted_callback: Called once when the Platform accepts the
                 request, as its authenticated event stream starts; never called
                 for a refused request.
-                ``tests/test_http_transport_v3.py::test_run_task_reports_acceptance_when_the_stream_starts``
-                enforces this for the production transport.
 
         Returns:
             The terminal event: ``BridgeTaskCompletedResponse`` on success,
@@ -268,10 +260,6 @@ class CloudEventsClient:
             DualeAIConnectionError: If not connected, the stream ends
                 without a terminal event, or transport/server errors.
             asyncio.CancelledError: If the local Task runner is cancelled.
-
-        Stop and cancellation behavior is covered by
-        ``tests/test_task_stop.py::test_an_open_stream_ends_on_the_stop_and_raises_with_its_reason`` and
-        ``tests/test_streaming_callbacks.py::TestTaskCancellation::test_task_cancel_propagates_to_bridge_iteration``.
         """
         transport = self._ensure_connected()
         logger.debug(

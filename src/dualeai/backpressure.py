@@ -4,9 +4,6 @@ This module implements:
 1. Activity scheduler capacity configuration
 2. Process-local task circuit breaking
 3. Task lifecycle counters
-
-Behavior is covered by ``tests/test_backpressure_simple.py`` and
-``tests/test_task_circuit_breaker.py``.
 """
 
 import time

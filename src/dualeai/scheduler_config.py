@@ -17,8 +17,6 @@ def create_production_scheduler(
 
     Returns:
         Configured ``aiojobs.Scheduler``.
-
-    Configuration forwarding is exercised by ``tests/test_feature_caching.py``.
     """
     return aiojobs.Scheduler(
         limit=max_jobs,

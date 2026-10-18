@@ -1,7 +1,5 @@
 """Cache backends for distributed (Redis) and local (SQLite) caching.
 
-Backend behavior is covered by ``tests/test_cache.py``,
-``tests/test_cache_enhanced.py``, and ``tests/test_cache_cleanup.py``.
 No focused automated test currently covers the SDK's token-to-namespace
 selection or API-token rotation behavior.
 """

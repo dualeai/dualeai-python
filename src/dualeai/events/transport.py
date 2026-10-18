@@ -6,9 +6,6 @@ Protocol:
 - HTTPTransportProtocol: protected Bridge and Library HTTP transport
 
 Production uses HTTPTransport, tests use MockHTTPTransport.
-
-Protocol conformance is exercised through the production and mock transports in
-``tests/test_http_transport_v3.py`` and ``tests/mocks/mock_http.py``.
 """
 
 from collections.abc import AsyncIterator, Callable
@@ -100,8 +97,6 @@ class HTTPTransportProtocol(Protocol):
             accepted_callback: Called once when the Platform accepts the
                 request, as its authenticated event stream starts; never called
                 for a refused request.
-                ``tests/test_http_transport_v3.py::test_run_task_reports_acceptance_when_the_stream_starts``
-                enforces this for the production transport.
 
         Yields:
             BridgeSSEEvent objects from SSE stream.

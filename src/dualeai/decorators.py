@@ -2,9 +2,6 @@
 
 Tool registration state lives on the SDK instance; hosted-tool lifecycle
 registration publishes its Tool manifest through ``sdk.serve()``.
-
-Decorator registration and validation behavior is covered by
-``tests/test_decorators_unit.py``.
 """
 
 from __future__ import annotations
@@ -125,7 +122,7 @@ def tool(
     """Declare a customer-hosted tool on an SDK instance.
 
     The decorated callable runs in your process when the platform language model
-    calls the tool inside a conversation rooted at this agent.
+    calls the tool inside a Task that runs under this agent.
 
     - ``async def`` or a plain ``def`` — a sync tool runs in a worker thread so a
       blocking call never stalls the SDK event loop. Parameters are validated

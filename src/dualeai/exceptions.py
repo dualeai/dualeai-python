@@ -2,9 +2,6 @@
 
 Public SDK calls can also raise built-in exceptions, Pydantic validation
 errors, and ``asyncio.CancelledError`` as documented by each operation.
-
-Exception hierarchy and context behavior is covered by
-``tests/test_exceptions.py``.
 """
 
 from __future__ import annotations

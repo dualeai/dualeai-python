@@ -27,7 +27,7 @@ Examples that submit Tasks also need access to at least one configured model. To
 `DUALEAI_AGENT_ID`; document examples list their additional requirements below. Set `DUALEAI_ENDPOINT` only when your
 access instructions name another HTTPS Gateway base URL.
 
-<!-- Evidence: tests/test_config.py::TestConfigValidation::test_endpoint_format_validation; tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service. No automated test runs these examples against the service. -->
+<!-- No automated test runs these examples against the service. -->
 
 ## Choose an example
 
@@ -71,7 +71,8 @@ python examples/library_management.py
 
 These examples do not verify search, retrieval/RAG, or model interpretation.
 
-<!-- Evidence: tests/test_attachments.py::TestUploadAttachmentsAgentResolution::test_uses_configured_agent_id; tests/test_libraries_client.py::test_upload_targets_explicit_library_and_returns_keyed_receipt; tests/test_libraries_client.py::test_wait_for_document_uses_fixed_interval_and_returns_terminal_state. Library permissions and the AAL3 deletion requirement are Platform contracts; no automated SDK test enforces them. -->
+<!-- Library permissions and the AAL3 deletion requirement are Platform
+contracts, unproved in this SDK. -->
 
 ## Tool execution boundary
 
@@ -80,8 +81,6 @@ functions before startup. Use the constructor for dependency injection and advan
 
 `serve()` opens no Task stream. A registered Tool executes when the same SDK instance receives its `tool.use` event
 on a Task stream.
-
-<!-- Evidence: tests/test_tool_dispatch_invariants.py::TestServeOpensNoTaskStream::test_serve_makes_lifecycle_requests_only; tests/test_tool_dispatch_invariants.py::TestToolUseCarriesNoTaskIdentity::test_tool_use_event_has_no_task_id_field; tests/test_agent_lifecycle.py::test_tool_results_submission_resumes_after_triggering_tool_use_event. -->
 
 ## Order and replace streamed content
 
@@ -101,7 +100,7 @@ format or the `text` format, it is the only copy that can carry the
 [`streaming_minimal.py`](streaming_minimal.py) prints the corrected text again when a late chunk or a reset changes text
 it already printed.
 
-<!-- Evidence: tests/test_sse_parser.py::TestSSEParserEvents::test_parser_accepts_the_frozen_content_delta_wire_event; tests/test_sse_parser.py::TestSSEParserEvents::test_parse_sse_preserves_content_replacement; tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_replay_repeats_every_content_event_in_arrival_order. No automated test runs the ordering rule in these examples. Out-of-order arrival, the free-text rule and the content mark are Platform behavior; no test in this repository enforces them. -->
+<!-- No automated test runs the ordering rule in these examples. Out-of-order arrival, the free-text rule and the content mark are Platform behavior; no test in this repository enforces them. -->
 
 ## Project links
 

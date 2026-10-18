@@ -10,9 +10,6 @@ Transient client errors, timeouts, and HTTP 500/502/503/504 responses receive up
 to five attempts. Other object-store failures raise ``LibraryUploadError``
 immediately. A batch is not transactional; the error exposes receipts that
 completed before a sibling failed.
-
-The local file, retry, concurrency, and partial-receipt behavior is covered by
-``tests/test_attachments.py`` and ``tests/test_attachments_s3.py``.
 """
 
 import asyncio

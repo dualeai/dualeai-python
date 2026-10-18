@@ -15,15 +15,8 @@ providers and optional instrumentors. See :mod:`dualeai.logging_config` and
 :mod:`dualeai.observability` before embedding the SDK in an application that
 already owns either subsystem.
 
-The local behaviors summarized here are covered across
-``tests/test_feature_ask.py``, ``tests/test_feature_caching.py``,
-``tests/test_agent_lifecycle.py``, ``tests/test_attachments.py``, and
-``tests/test_feature_health.py``. Service-side authorization and execution
-outcomes are not enforced by this repository's tests.
-
-The transport boundaries are exercised by
-``tests/test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service``
-and ``tests/test_attachments_s3.py::test_public_upload_preserves_bytes_and_document_metadata``.
+Service-side authorization and execution outcomes are not enforced by this
+repository's tests.
 """
 
 import asyncio
@@ -165,9 +158,6 @@ def _generate_json_schema_cached(response_type: type) -> dict[str, JsonValue | N
 
     This is a module-level cached function to avoid memory leaks from instance-level caching.
     All SDK instances share this cache, preventing unbounded memory growth.
-
-    In ``tests/test_feature_structured_output.py``, ``test_json_schema_generation_for_model``
-    checks the exported shape and ``test_json_schema_cached_for_performance`` checks cache reuse.
 
     Args:
         response_type: Python type or Pydantic model
@@ -400,7 +390,7 @@ class DualeAISDK:
         if self._scheduler is None or self._scheduler.closed:
             self._scheduler = create_production_scheduler(
                 max_jobs=self._backpressure_config.max_concurrent_activities,
-                close_timeout=5.0,  # Increased for CI environments - was 1.0s
+                close_timeout=5.0,  # Long enough for cancelled activities to finish on slow CI runners
                 pending_limit=self._backpressure_config.max_pending_activities,
             )
         return self._scheduler
@@ -561,10 +551,6 @@ class DualeAISDK:
         Returns:
             The terminal event from the same public ``task_id`` stream.
         """
-        # Public Task identity is covered by
-        # tests/test_agent_lifecycle.py::test_submit_tool_results_passes_generated_request_to_transport;
-        # root Task results are covered by
-        # tests/test_agent_lifecycle.py::test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool.
         request = BridgeToolResultsRequest(type="tool_results", tool_results=results)
         client = await self._ensure_events_client()
         return await client.submit_tool_results(task_id=task_id, request=request, last_event_id=last_event_id)
@@ -770,8 +756,8 @@ class DualeAISDK:
                     attempt=attempt.retry_state.attempt_number,
                     deadline_at=deadline_at,
                 )
-                # One OTel GenAI execute_tool span per attempt (semantic-conventions
-                # v1.37 — the client-side "function" tool case).
+                # One OTel GenAI execute_tool span per attempt (the OTel GenAI semantic
+                # conventions' client-side "function" tool case).
                 tool_name = registered_tool.tool.tool.name
                 with (
                     self._observability.trace_operation(
@@ -1088,9 +1074,8 @@ class DualeAISDK:
         stop is accepted even when the Task already ended or the Platform does
         not know it; a stop of a Task that already ended changes nothing.
 
-        ``tests/test_task_stop.py::test_refused_stop_raises_the_authorization_error``
-        enforces the refusal. No test in this repository enforces that a
-        permitted stop of an ended or unknown Task is accepted.
+        No test in this repository enforces that a permitted stop of an ended
+        or unknown Task is accepted.
 
         Args:
             task_id: A Task of the API token's Agent Identity.
@@ -1231,9 +1216,8 @@ class DualeAISDK:
         ``response_stream`` and ``attachments`` only when the caller set them;
         an omitted criterion takes the parent Task's value on the Platform.
         ``local_streaming`` selects the returned response's local buffering.
-        ``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_next_sends_only_the_criteria_the_caller_sets``
-        enforces the sent fields; no test in this repository enforces the
-        Platform's inheritance of an omitted field.
+        No test in this repository enforces the Platform's inheritance of an
+        omitted field.
         """
         if deadline is not None and (deadline.tzinfo is None or deadline.utcoffset() is None):
             raise ValueError("Continuation deadline must be timezone-aware")
@@ -1338,13 +1322,9 @@ class DualeAISDK:
         writes. The replay list keeps every content event, resets included, in
         arrival order: events can arrive out of order, so only the consumer can
         apply a reset.
-        ``tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_replay_repeats_every_content_event_in_arrival_order``
-        enforces this.
 
         With ``streaming=False`` the buffers and the content callback are
-        ``None``, so content events are dropped;
-        ``tests/test_streaming_callbacks.py::TestStreamingCallbackWiring::test_streaming_false_yields_no_deltas_even_if_emitted``
-        enforces this. The tool-use callback still schedules registered SDK
+        ``None``, so content events are dropped. The tool-use callback still schedules registered SDK
         tool execution, because bridge ``tool.use`` events are delivery events
         rather than user-visible content streaming.
         """
@@ -1383,12 +1363,9 @@ class DualeAISDK:
         again when this runner ends, so a runner that ends before acceptance (a
         refused request, a stream failure, a local cancellation) never leaves a
         continuation waiting.
-        ``tests/test_feature_multiturn.py::TestUnitMultiTurnConversation::test_next_waits_only_for_the_parents_acceptance``
-        enforces both paths.
 
-        ``test_local_failure_does_not_count_a_remote_failure`` and
-        ``test_stream_failure_survives_metric_views_as_a_local_outcome`` enforce
-        the separation between local observation and remote result accounting.
+        A local failure never counts as a remote failure, and a stream failure
+        stays a local outcome in every metric view.
         """
         controller = self._backpressure_controller
 

@@ -11,10 +11,6 @@ OpenTelemetry providers and instrumentors are process-global. Existing host
 providers take precedence where the OpenTelemetry API exposes them, while a
 provider installed here can be reused by later SDK instances. SDK cleanup does
 not flush or shut down global providers.
-
-Provider, instrumentor, and redaction behavior is covered by
-``tests/test_feature_observability.py`` and
-``tests/test_observability_tool_error_redaction.py``.
 """
 
 import functools

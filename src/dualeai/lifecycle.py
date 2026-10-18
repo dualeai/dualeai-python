@@ -3,10 +3,6 @@
 ``LifecycleManager`` owns process id, clock offset, heartbeat tasks, and
 registration bookkeeping. It depends on the SDK through injected client and
 Tool-manifest accessors, avoiding a back-reference to ``DualeAISDK``.
-
-Lifecycle and Tool-dispatch behavior is covered by
-``tests/test_agent_lifecycle.py`` and
-``tests/test_tool_dispatch_invariants.py``.
 """
 
 from __future__ import annotations

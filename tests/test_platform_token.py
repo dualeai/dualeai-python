@@ -7,7 +7,7 @@ SDK ships on its own cycle. A mismatch is silent — no tunnel opens and every
 request is refused — so the shared value is what makes a divergence fail
 loudly here.
 
-The browser client pins the same vector. Three implementations, one number.
+The browser client pins the same vector.
 The expected value was independently calculated with Node's X25519 and
 RFC 5869's HMAC-SHA-256 construction, using empty salt and the UTF-8 context
 `dualeai-platform-token/1`.

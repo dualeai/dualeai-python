@@ -2,8 +2,7 @@
 
 Task and Agent calls use the Bridge hpke-http/3 endpoint. Library metadata
 uses the Library endpoint. Both authenticate with the issued platform token.
-Presigned object-store uploads are separate. Transport behavior is covered by
-``tests/test_http_transport_v3.py``.
+Presigned object-store uploads are separate.
 """
 
 import asyncio
@@ -83,8 +82,6 @@ Library list request:
 - Request inside the encrypted message: GET /v1/hpke/tenants/{tenant_id}.
 
 Each service decrypts the message, then runs the request it contains.
-`test_real_v3_tls_boundary_reuses_discovery_per_service` checks the HTTP paths
-and the request paths read from the decrypted messages.
 """
 
 
@@ -120,7 +117,6 @@ def _resolve_retry_method(
 
     An inherited Tool cursor does not establish the Tool Results POST; before
     its own START, retry the original method and body with the same Task ID.
-    `test_tool_result_retry_uses_its_own_start_not_inherited_cursor` covers this.
     """
     if stream_established and method == "POST":
         return "GET", None
@@ -139,8 +135,7 @@ class HTTPTransportError(Exception):
     selected logical method, and last checked event ID in `metadata`. Selection
     does not prove that the request was sent: credential renewal can fail first.
     The client supplies `context.operation` during translation. Other operations
-    can leave `context` unset. `test_task_exhaustion_reports_the_last_failure`
-    checks the final stream diagnostics.
+    can leave `context` unset.
     """
 
     def __init__(
@@ -227,7 +222,6 @@ def _transient_network_error(error: BaseException | None) -> bool:
             aiohttp.ClientPayloadError,
             ConnectionError,
             # Python 3.10 has distinct timeout classes; 3.11 aliases them.
-            # Covered by test_task_asyncio_timeout_recovers_or_reports_final_context.
             asyncio.TimeoutError,
             TimeoutError,
         ),
@@ -237,9 +231,8 @@ def _transient_network_error(error: BaseException | None) -> bool:
 def _retryable_stream_error(error: BaseException, *, stream_established: bool) -> bool:
     """Select HTTP 5xx, explicit retry hints, and typed interruptions for retry.
 
-    `HTTPTransport._stream_request` owns the shared attempt budget.
-    `test_task_retry_flag_and_http_status_are_independent` checks that a problem
-    body's status or false hint cannot override the received HTTP 5xx status.
+    `HTTPTransport._stream_request` owns the shared attempt budget. A problem
+    body's status or false retry hint never overrides a received HTTP 5xx status.
     """
     if isinstance(error, (HTTPTransportError, TransportError)):
         if error.status_code in range(HTTPStatus.INTERNAL_SERVER_ERROR, 600):
@@ -256,7 +249,7 @@ def _retryable_stream_error(error: BaseException, *, stream_established: bool) -
             return error.__cause__ is None or _transient_network_error(error.__cause__)
     # NOTE: CRC32-specific exception handling and mismatch retries were removed
     # with the redundant application checksum. hpke-http verifies block integrity;
-    # authentication failures remain terminal, as tested by test_real_tls_task_recovery[sse_integrity].
+    # authentication failures remain terminal.
     return (
         _is_expired_lease(error)
         or _transient_network_error(error)
@@ -289,13 +282,10 @@ def _is_refused_credential(error: BaseException) -> bool:
 
 
 def make_connector() -> aiohttp.TCPConnector:
-    """The one pool :meth:`HTTPTransport.connect` hands to all three sessions.
+    """The one pool :meth:`HTTPTransport.connect` hands to every session.
 
     A function rather than an inline call because it is the seam a test
-    substitutes: patching it hands the transport a connector the test owns,
-    which is how `test_http_transport_v3.py`'s
-    `test_real_v3_tls_boundary_reuses_discovery_per_service` counts the pools
-    the transport builds and proves there is exactly one.
+    substitutes: patching it hands the transport a connector the test owns.
     """
     return aiohttp.TCPConnector()
 
@@ -457,8 +447,7 @@ class HTTPTransport:
     async def _current_token(self) -> PlatformToken:
         """Translate issuance failures before binding a tunnel.
 
-        Initial and mandatory renewal errors share the public contract enforced
-        by ``test_platform_token_errors.py``.
+        Initial and mandatory renewal errors share one public contract.
         """
         assert self._tokens is not None, "connect() did not run"
         try:
@@ -482,8 +471,6 @@ class HTTPTransport:
         Closing a client also closes its active responses, so `_session_for`
         retains it until completion, iterator close, or cancellation. Idle
         replacements close immediately, without retaining credential history.
-        Covered by `test_http_transport_v3.py`'s
-        `test_retired_tunnels_keep_admitted_streams_until_the_last_response_finishes`.
         """
         idle = self._retired.difference(self._tunnel_users)
         self._retired.difference_update(idle)
@@ -849,11 +836,8 @@ class HTTPTransport:
         `accepted_callback` runs once, at the first authenticated SSE 200 START;
         a finite answer, an error status, a failure before that START, and a
         later reconnect never call it.
-        `test_run_task_reports_acceptance_when_the_stream_starts` checks this.
 
-        `test_task_mixed_budget_counts_renewal_without_an_http_request` checks
-        the shared budget; `test_task_terminal_does_not_read_or_retry_past_the_result`
-        checks that a terminal ends recovery even when its problem is retryable.
+        A terminal ends recovery even when its problem is retryable.
         """
         current_last_event_id = last_event_id
         stream_established = False

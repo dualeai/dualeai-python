@@ -12,9 +12,6 @@ Async Tool deadlines cancel the coroutine through ``asyncio.wait_for``. A
 synchronous Tool runs in a worker thread and cannot be preempted, so this context
 also lets it cooperate by checking time before side effects through
 :meth:`ToolContext.remaining_seconds` and :meth:`ToolContext.is_expiring`.
-
-Context propagation and deadline helpers are covered by
-``tests/test_tool_context.py`` and ``tests/test_agent_lifecycle.py``.
 """
 
 from __future__ import annotations

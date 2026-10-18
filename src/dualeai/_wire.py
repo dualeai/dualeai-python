@@ -12,9 +12,9 @@ def dump_wire_model(model: BaseModel) -> dict[str, JsonValue | None]:
     and the generator gives every `int` and `float` field the same safe-integer
     bound `JsonValue` carries, so re-validating the dump through
     `tools._json.json_schema_adapter` would walk the whole structure to hand
-    back exactly what it was given. `tests/test_wire.py` compares representative
-    alias, null, nested-model and JSON-leaf serialization against that adapter;
-    it does not cover every generated model or future field.
+    back exactly what it was given. Representative alias, null, nested-model and
+    JSON-leaf serialization matches that adapter; agreement for every generated
+    model and future field is unproved.
     """
     # exclude_unset keeps an explicitly-set null on the wire. A null-dropping reader
     # on the other side of a shared content hash (e.g. the registered-tool config

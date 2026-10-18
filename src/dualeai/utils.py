@@ -1,7 +1,4 @@
-"""Utility functions for the Duale AI SDK.
-
-Behavior is covered by ``tests/test_utils.py``.
-"""
+"""Utility functions for the Duale AI SDK."""
 
 import hashlib
 

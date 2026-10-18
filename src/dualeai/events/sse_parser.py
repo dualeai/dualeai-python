@@ -8,9 +8,6 @@ cursor. This is not a general-purpose SSE reader.
 ``hpke-http`` authenticates each complete SSE block before ``iter_sse()``
 releases it. This parser validates the event shape and payload; comments have
 no application integrity semantics.
-
-Parsing and exact-text preservation are covered by ``tests/test_sse_parser.py``
-and ``tests/test_marked_answer_parsing.py``.
 """
 
 import json
@@ -154,7 +151,7 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
                 data_bytes = next_data_bytes
             elif field == "retry":
                 # Ignore server retry values; HTTPTransport uses its own retry policy.
-                # test_parse_sse_skips_events_without_payload covers retry-only frames.
+                # A retry-only frame carries no payload, so it yields no event.
                 pass
             # Unknown fields are ignored per spec
 

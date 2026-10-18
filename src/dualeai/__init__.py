@@ -144,9 +144,8 @@ def create_sdk(**kwargs: Unpack[SDKConfigKwargs]) -> DualeAISDK:
     :func:`configure_logging` before using the factory in a host that owns its
     root logging setup.
 
-    Constructor-argument coercion is covered by
-    ``tests/test_agent_lifecycle.py::test_create_sdk_coerces_constructor_arguments_with_pydantic``.
-    No focused automated test currently covers ignored unknown factory keys.
+    Pydantic coerces the constructor arguments. No focused automated test
+    currently covers ignored unknown factory keys.
 
     Args:
         **kwargs: Keys declared by ``SDKConfigKwargs``. ``max_jobs``,

@@ -1,6 +1,6 @@
-"""Multi-turn conversation feature tests.
+"""Multi-turn continuation feature tests.
 
-Tests multi-turn conversations with the real SDK and a transport-protocol test double.
+Tests multi-turn continuations with the real SDK and a transport-protocol test double.
 
 Architecture:
 - Uses minimal_mock_sdk fixture which creates REAL DualeAISDK

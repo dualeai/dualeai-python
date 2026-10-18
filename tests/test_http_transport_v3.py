@@ -332,6 +332,10 @@ async def test_public_library_routes_use_platform_token_without_api_token_header
 
 @pytest.mark.unit
 async def test_complete_logical_error_and_unchecked_failures_have_distinct_mapping() -> None:
+    """A Library request maps HTTP 401 to an authentication rejection and HTTP 410 to a client rejection.
+
+    An outer 503 or an HPKE authentication failure stays an unchecked connection failure without ProblemDetails.
+    """
     problem = {"title": "Denied", "status": 401, "detail": "Synthetic denial", "error_code": "DENIED"}
     transport, _ = await _with_session([_response(401, problem)])
     with pytest.raises(HTTPTransportAuthError) as raised:
@@ -1023,6 +1027,7 @@ async def test_task_checked_eof_resumes_without_repeating_post(monkeypatch, has_
 @pytest.mark.unit
 @pytest.mark.parametrize("operation", ["task_run", "task_continue", "tool_results"])
 async def test_task_error_context_identifies_the_operation(operation: str) -> None:
+    """An HTTP 403 on a Task call raises ``DualeAIAuthError`` whose context names the operation and the Task."""
     problem = {"title": "Denied", "status": 403, "detail": "synthetic", "error_code": "DENIED", "retryable": False}
     transport, session = await _with_stream_session(
         [_StreamReply([json.dumps(problem).encode()], status=403, mode="finite")]
@@ -1296,7 +1301,10 @@ async def test_task_cancellation_during_backoff_closes_the_stream(monkeypatch: p
 async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercises the native HPKE adapter
     monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    """The native adapter maps actual wire failures into bounded task recovery."""
+    """The native adapter maps actual wire failures into bounded task recovery.
+
+    An altered encrypted record, finite or SSE, fails authentication before delivery and is not retried.
+    """
     pair = generate_key_pair()
     recipient = b"recovery-key"
     server = Server(pair.private_key, recipient)
@@ -1446,7 +1454,8 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
 
     The network endpoints include each service name; encrypted operations use
     /v1/hpke paths without that name. Discovery is leased per service, while
-    issuance and both tunnels share the connector `make_connector` returns.
+    issuance and both tunnels share the connector `make_connector` returns. The
+    Task result carries no application checksum.
     """
     keypair = generate_key_pair()
     recipient_id = b"synthetic-key-1"

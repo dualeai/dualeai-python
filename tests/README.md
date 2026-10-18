@@ -19,12 +19,8 @@ tests/
   mocks/                   # Network-boundary mocks (MockHTTPTransport)
   helpers/                 # Assertion utilities
   fixtures/                # Static test data
-  test_*.py                # Unit tests (@pytest.mark.unit)
+  test_*.py                # Unit (@pytest.mark.unit) and local integration (@pytest.mark.integration) tests
   benchmarks/              # CodSpeed benchmarks (@pytest.mark.benchmark)
-    test_bench_sdk.py      # Config, SSE parsing, cache, utilities
-  test_attachments.py      # Upload unit tests and a local HTTP integration test
-  test_attachments_s3.py   # Local S3 integration test (@pytest.mark.integration)
-  test_http_transport_v3.py # Local TLS integration and transport unit tests
 ```
 
 ## Unit Tests
@@ -65,12 +61,8 @@ make test-bench  # Runs via --codspeed, serial execution, no coverage
 
 The integration suite checks signed uploads against local S3, bounded part
 scheduling against a loopback object store, and protected Bridge and Library
-calls against a local TLS endpoint. The enforcing tests are
-`test_public_upload_preserves_bytes_and_document_metadata`,
-`test_public_upload_preserves_true_multipart_bytes_and_opaque_etags`,
-`test_many_parts_keep_pending_upload_tasks_bounded`, and
-`test_real_v3_tls_boundary_reuses_discovery_per_service`. These
-tests do not contact external services.
+calls against a local TLS endpoint. These tests do not contact external
+services.
 
 ## Verify Task stream integrity
 
@@ -82,18 +74,13 @@ comments: they add no required protection inside this authenticated transport
 and provide no keyed authentication. The parser still validates JSON, event
 schemas, matching event types, and size limits.
 
-- `test_sse_parser.py::TestSSEParserEvents::test_parser_accepts_the_frozen_content_delta_wire_event`
-  accepts a CRC-free typed event. The parser suite also covers malformed payloads,
-  limits, cursor handling, and ordinary SSE comments.
-- `test_http_transport_v3.py::test_real_v3_tls_boundary_reuses_discovery_per_service`
-  delivers a CRC-free Task result over real TLS and HPKE.
-- `test_http_transport_v3.py::test_real_tls_task_recovery[sse_integrity]`
-  rejects an altered encrypted SSE record before event delivery and does not retry
-  the authentication failure.
-
-`test_task_recovers_from_missing_end_with_the_last_delivered_cursor` checks the
-resume cursor after an interrupted stream. Per-event authentication does not
-prove full transport completion, which requires END and outer EOF.
-`test_task_terminal_does_not_read_or_retry_past_the_result` pins the SDK's return
-at an application terminal without draining the transport. Both tests are in
-`test_http_transport_v3.py`.
+- The parser accepts a CRC-free typed event, and rejects malformed payloads and
+  oversized events while handling cursors and ordinary SSE comments.
+- A CRC-free Task result reaches the caller over real TLS and HPKE.
+- An altered encrypted SSE record is rejected before event delivery, and the
+  authentication failure is not retried.
+- After a stream ends without END, the Task resumes from the last delivered
+  cursor. Per-event authentication does not prove full transport completion,
+  which requires END and outer EOF.
+- The SDK returns at an application terminal without reading or retrying past
+  the result, so it does not drain the transport.

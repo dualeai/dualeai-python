@@ -2,8 +2,7 @@
 
 One convenience function, ``ask``, forwards to ``DualeAISDK.submit_task`` and
 derives the observability ``task_type`` from the requested capabilities.
-``tests/test_feature_ask.py`` covers the forwarding; no dedicated automated
-test covers the helper's result-type default.
+The helper's result-type default is unproved.
 """
 
 from datetime import datetime

@@ -4,9 +4,6 @@ Pure functions: a raised exception → the truncated ``message`` string the lang
 model sees. The truncation length is read from the bridge
 ``BridgeToolResultError.message`` ``maxLength`` (the wire contract), never a
 hand-picked literal.
-
-Rendering and truncation are covered by ``tests/test_tools_pure.py`` and
-``tests/test_agent_lifecycle.py``.
 """
 
 from __future__ import annotations

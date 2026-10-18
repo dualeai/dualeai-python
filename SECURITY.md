@@ -69,11 +69,11 @@ released against the latest `0.x` only. The supported runtimes are CPython 3.10 
   API token for the `dualeai:sdk:{token_fingerprint}:` prefix; it does not use the
   configured Library Tenant ID. `clear()` scans and deletes only that prefix, and
   rotating the API token selects a new namespace.
-  <!-- Evidence: tests/test_cache.py::TestRedisCacheCommands holds the caller-supplied namespace and Redis command boundary. src/dualeai/cache.py states that no focused automated test covers the SDK's token-to-namespace selection or token-rotation behavior. -->
+  <!-- The SDK's token-to-namespace selection and token-rotation behavior
+  are unproved. -->
 - **Redis credentials stay out of initialization logs.** Both `redis://` and
   `rediss://` reach redis-py, while the connection URL and its userinfo do not reach
   the initialization event.
-  <!-- Evidence: tests/test_cache.py::TestRedisCacheCommands::test_tls_url_reaches_redis_without_reaching_logs; tests/test_config.py::TestConfigValidation::test_redis_url_accepts_plain_and_tls_schemes. -->
 - **Tests use no external network.** The default pytest configuration enables
   `pytest-socket`; only loopback hosts used by test-owned services are allowed. CI
   runs the same unit and local integration suites without a Duale AI credential.
@@ -82,11 +82,9 @@ released against the latest `0.x` only. The supported runtimes are CPython 3.10 
   are committed and reviewed as package source. Do not report an expected validation
   error as code execution; report any input that bypasses the declared model and
   reaches a privileged SDK action.
-  <!-- Evidence: tests/test_sse_parser.py::TestSSEParserEdges::test_parse_sse_rejects_added_fields_on_a_known_event; tests/test_sse_parser.py::TestSSEParserEdges::test_parse_sse_rejects_added_fields_in_a_known_nested_result. -->
 - **Customer Tool exception text is sensitive.** Uncaught exception messages can be
   presented to a model provider. Tool authors must keep credentials and personal data
   out of exception text.
-  <!-- Evidence: tests/test_agent_lifecycle.py::test_registered_tool_error_is_module_class_prefixed_and_bounded; tests/test_agent_lifecycle.py::test_tool_error_transform_redacts_model_facing_message. -->
 
 ## Supply chain
 

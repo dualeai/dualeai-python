@@ -1,9 +1,7 @@
 """Core Library and document management for the Python SDK.
 
-Public CRUD dispatch through the protected transport is covered by
-``tests/test_http_transport_v3.py``. Upload request construction, polling, and
-error translation are covered by ``tests/test_libraries_client.py``. Service-side
-storage and retention behavior is not exercised by this repository's tests.
+Service-side storage and retention behavior is not exercised by this
+repository's tests.
 """
 
 from __future__ import annotations
@@ -106,15 +104,12 @@ class LibrariesClient:
         ``library:write`` on both the current and the new path.
 
         No automated test in this repository sends a 403, a 409 or a 503 to
-        this method, or calls it without a tenant ID.
-        ``tests/test_http_transport_v3.py::test_complete_logical_error_and_unchecked_failures_have_distinct_mapping``
-        checks that a Library request classifies HTTP 401 as an authentication
-        rejection and HTTP 410 as another client rejection.
-        ``tests/test_http_transport_v3.py::test_task_error_context_identifies_the_operation``
-        checks that the same status classification and translation turn HTTP
-        403 into ``DualeAIAuthError`` on Task calls.
-        ``tests/test_libraries_client.py::test_library_errors_are_translated_with_problem_details``
-        checks how each transport error class becomes the SDK error below.
+        this method, or calls it without a tenant ID. A Library request
+        classifies HTTP 401 as an authentication rejection and HTTP 410 as
+        another client rejection. The same status classification and
+        translation turn HTTP 403 into ``DualeAIAuthError`` on Task calls. Each
+        transport error class becomes the SDK error below, with its problem
+        details.
 
         Args:
             request: Library id and replacement patch fields.
