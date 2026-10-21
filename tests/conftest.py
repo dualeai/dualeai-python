@@ -147,8 +147,7 @@ def unstarted_sdk_factory(config_factory: Callable[..., DualeAIConfig]) -> Unsta
 # ============================================================================
 
 
-# NOTE: create_test_streaming_update was removed in favor of Task-stream models.
-# Use BridgeContentDeltaResponse for streaming tests instead
+# Streaming tests build Task-stream models such as BridgeContentDeltaResponse.
 
 
 def create_mock_scheduler(

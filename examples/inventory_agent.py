@@ -8,8 +8,7 @@ model. Run it with::
 Set ``DUALEAI_ENDPOINT`` only when your access instructions name a non-default
 environment.
 
-This is a live, manually run example; the automated test suite does not execute
-it.
+Nothing runs this example automatically.
 
 ``sdk.serve()`` publishes the Tool manifest and heartbeats until shutdown; it
 does not receive Tool calls. The demo Tasks opened by the same SDK instance own
@@ -32,7 +31,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dualeai import DualeAISDK, ask, current_tool_context, tool
+from dualeai import DualeAISDK, PriorityClass, ask, current_tool_context, tool
 
 # A stand-in "warehouse" so the example runs with no external system. Both the
 # stock and replay ledger are process-local; production code must persist the
@@ -190,7 +189,7 @@ async def _run_demo(sdk: DualeAISDK) -> None:
         "Reprice sku-gadget to 90000 cents.",  # Trips the guardrail; error_transform redacts the secret.
     ]
     for prompt in prompts:
-        response = await ask(prompt, sdk=sdk)
+        response = await ask(prompt, sdk=sdk, priority=PriorityClass.fast)
         answer = await response.model()
         print(f"\n> {prompt}\n{answer}")  # noqa: T201
 

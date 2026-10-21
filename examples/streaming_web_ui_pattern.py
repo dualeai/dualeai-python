@@ -6,8 +6,7 @@ displayed text with `await response.model()`, the final answer.
 
 Requires ``DUALEAI_TOKEN`` and access to a configured model. Run with
 ``python examples/streaming_web_ui_pattern.py``. This manual pattern prints the
-state that a real application would send; the automated test suite does not
-execute it.
+state that a real application would send; CI does not execute it.
 """
 
 import asyncio

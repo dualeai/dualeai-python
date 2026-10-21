@@ -1,4 +1,4 @@
-"""Priority 1 tests for ask() function.
+"""Tests for the ask() function.
 
 Tests ask() orchestration with the real SDK and a transport boundary double.
 

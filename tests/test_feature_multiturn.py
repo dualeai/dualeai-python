@@ -57,7 +57,7 @@ def _terminal_event(transport: MockHTTPTransport, outcome: str) -> BridgeSSEEven
 
 
 @pytest.mark.unit
-class TestUnitMultiTurnConversation:
+class TestUnitMultiTurnContinuation:
     """Test SDK orchestration against its typed transport protocol boundary."""
 
     async def test_chained_continuations_link_each_child_to_previous_task(self, minimal_mock_sdk: DualeAISDK):

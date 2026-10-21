@@ -89,9 +89,9 @@ async def parse_sse_stream(  # noqa: PLR0912, PLR0915  # Complex but clear SSE s
                 # An empty payload is ignored; non-empty whitespace is invalid Task JSON.
                 data_str = "\n".join(data_lines) if data_lines else ""
                 if data_str:
-                    # NOTE: CRC32 validation and required checksum comments were
-                    # removed because hpke-http authenticates each complete block
-                    # before iter_sse() releases it. Payload validation stays here.
+                    # NOTE: no CRC32 validation or checksum comment: hpke-http
+                    # authenticates each complete block before iter_sse() releases
+                    # it. Payload validation stays here.
                     try:
                         data = json.loads(data_str)
                     except json.JSONDecodeError as e:

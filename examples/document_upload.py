@@ -8,8 +8,8 @@ both on ``library:agent/{self}/*`` when the token belongs to that Agent Identity
 ``python examples/document_upload.py path/to/document.pdf``. The example creates
 a call-scoped Library and uploads the file. Arrange later Dashboard cleanup by
 a Human Identity with ``library:delete`` and valid ``aal3`` authentication; the SDK's AAL2
-API-token session cannot delete the whole Library. The automated test suite
-does not execute this example.
+API-token session cannot delete the whole Library. CI does not execute this
+example.
 
 Set ``DUALEAI_ENDPOINT`` only when your access instructions name a non-default
 environment.

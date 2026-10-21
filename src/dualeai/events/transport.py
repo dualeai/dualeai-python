@@ -1,11 +1,11 @@
 """Structural protocol for SDK HTTP and SSE communication.
 
-Provides a dependency injection boundary for testing.
+Provides a dependency injection boundary.
 
 Protocol:
 - HTTPTransportProtocol: protected Bridge and Library HTTP transport
 
-Production uses HTTPTransport, tests use MockHTTPTransport.
+HTTPTransport is the production implementation.
 """
 
 from collections.abc import AsyncIterator, Callable
@@ -45,10 +45,10 @@ if TYPE_CHECKING:
 
 
 class HTTPTransportProtocol(Protocol):
-    """Protocol implemented by production and test HTTP/SSE transports.
+    """Protocol implemented by every HTTP/SSE transport.
 
     Abstracts protected Bridge and Library operations for dependency injection.
-    Production uses HTTPTransport, tests use MockHTTPTransport.
+    HTTPTransport is the production implementation.
 
     See: https://peps.python.org/pep-0544/
     """
@@ -72,7 +72,7 @@ class HTTPTransportProtocol(Protocol):
         The receipt confirms that the caller may stop the Task. It proves
         neither that the Task exists nor that it stopped: a permitted stop of a
         Task that already ended, or that the Platform does not know, is also
-        accepted. No test in this repository enforces this Platform behavior.
+        accepted. Nothing in this SDK enforces this Platform behavior.
         """
         ...
 

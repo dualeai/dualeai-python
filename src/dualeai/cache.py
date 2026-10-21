@@ -1,7 +1,7 @@
 """Cache backends for distributed (Redis) and local (SQLite) caching.
 
-No focused automated test currently covers the SDK's token-to-namespace
-selection or API-token rotation behavior.
+Nothing enforces the SDK's token-to-namespace selection or its behavior
+across API-token rotation.
 """
 
 import asyncio

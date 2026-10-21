@@ -306,13 +306,10 @@ class TestUnitHealthFeature:
             sdk._update_health_metrics()  # no args → auto path, exactly as __init__ does
 
         recorded = {call.kwargs["component"]: (call.args[1], call.kwargs["value"]) for call in spy.call_args_list}
-        # Absent optional components record healthy(+1); pre-fix wrongly
-        # recorded unhealthy(-1) here while the status reader said healthy.
+        # Absent optional components record healthy(+1), the same state the status reader reports.
         assert recorded["scheduler"] == ("healthy", 1)
         assert recorded["cache"] == ("healthy", 1)
         assert recorded["sdk"] == ("healthy", 1)
 
-    # Component-metric recording is pinned exactly (all four components,
-    # call_count == 4) in test_feature_observability.py::
-    # test_get_health_status_records_component_metrics — the weaker duplicate
-    # that lived here was deleted.
+    # test_feature_observability.py::test_get_health_status_records_component_metrics
+    # pins one component-metric recording per component.

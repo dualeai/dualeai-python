@@ -1,7 +1,6 @@
 """Core Library and document management for the Python SDK.
 
-Service-side storage and retention behavior is not exercised by this
-repository's tests.
+Nothing in this SDK enforces service-side storage and retention behavior.
 """
 
 from __future__ import annotations
@@ -103,8 +102,8 @@ class LibrariesClient:
         not merge keys with the current map. A path change needs
         ``library:write`` on both the current and the new path.
 
-        No automated test in this repository sends a 403, a 409 or a 503 to
-        this method, or calls it without a tenant ID. A Library request
+        Nothing enforces this method's handling of HTTP 403, 409 or 503, or of
+        a missing tenant ID. A Library request
         classifies HTTP 401 as an authentication rejection and HTTP 410 as
         another client rejection. The same status classification and
         translation turn HTTP 403 into ``DualeAIAuthError`` on Task calls. Each

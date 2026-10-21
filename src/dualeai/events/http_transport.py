@@ -247,9 +247,8 @@ def _retryable_stream_error(error: BaseException, *, stream_established: bool) -
             # HPKEClientSession._open_stream can raise network_error without a
             # cause when the request ends before its protected END.
             return error.__cause__ is None or _transient_network_error(error.__cause__)
-    # NOTE: CRC32-specific exception handling and mismatch retries were removed
-    # with the redundant application checksum. hpke-http verifies block integrity;
-    # authentication failures remain terminal.
+    # NOTE: no application checksum, so no CRC32 handling or mismatch retry:
+    # hpke-http verifies block integrity, and authentication failures stay terminal.
     return (
         _is_expired_lease(error)
         or _transient_network_error(error)
@@ -284,8 +283,8 @@ def _is_refused_credential(error: BaseException) -> bool:
 def make_connector() -> aiohttp.TCPConnector:
     """The one pool :meth:`HTTPTransport.connect` hands to every session.
 
-    A function rather than an inline call because it is the seam a test
-    substitutes: patching it hands the transport a connector the test owns.
+    A function rather than an inline call because it is a substitution seam:
+    patching it hands the transport a connector that the patching code owns.
     """
     return aiohttp.TCPConnector()
 

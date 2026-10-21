@@ -10,7 +10,7 @@ The Library and its document remain until a Human Identity deletes the Library i
 Dashboard with ``library:delete`` and valid ``aal3`` authentication. An SDK API-token
 session has AAL2 and cannot perform whole-Library deletion.
 
-The automated test suite does not execute this example.
+Nothing runs this example automatically.
 """
 
 import asyncio

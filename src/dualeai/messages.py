@@ -42,7 +42,7 @@ class ErrorContext(BaseModel):
     version: str | None = Field(default=None, description="Service version")
     environment: str | None = Field(default=None, description="Environment (dev/staging/prod)")
 
-    # Validation error context (from test usage)
+    # Validation error context
     field: str | None = Field(default=None, description="Field name that caused validation error")
     value: str | None = Field(default=None, description="Invalid value that caused error")
     expected_type: str | None = Field(default=None, description="Expected type for validation")

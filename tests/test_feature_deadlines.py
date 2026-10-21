@@ -1,4 +1,4 @@
-"""Priority 9 tests for deadline/timeout handling feature.
+"""Tests for deadline and timeout handling.
 
 Tests deadline parameter propagation and timeout handling with REAL SDK (minimal mocking).
 

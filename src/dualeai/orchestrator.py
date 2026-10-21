@@ -108,8 +108,8 @@ async def ask(
             lower waiting time for the same work and uses the Fast Task price.
         streaming: Request content delta/reset events for ``response.stream()``.
             The Platform streams only a free-text answer: no ``res`` or
-            ``response_format``, or the ``text`` or ``markdown`` format. No
-            test in this repository enforces this Platform behavior.
+            ``response_format``, or the ``text`` or ``markdown`` format.
+            Nothing in this SDK enforces this Platform behavior.
         deadline: Optional timezone-aware absolute deadline. Omission uses the
             SDK's default Task timeout.
         attachments: Prepared attachments already uploaded for the same Task id.

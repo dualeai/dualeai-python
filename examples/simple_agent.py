@@ -4,8 +4,8 @@ This serve-only process opens no Task stream, so it cannot execute Tool calls
 by itself. See ``tool_execution.py`` for the smallest same-SDK execution path.
 
 Requires ``DUALEAI_TOKEN`` and ``DUALEAI_AGENT_ID``. Run with
-``python examples/simple_agent.py`` and interrupt it to stop heartbeats. This
-manual example is not executed by the automated test suite.
+``python examples/simple_agent.py`` and interrupt it to stop heartbeats. CI
+does not execute this manual example.
 """
 
 import asyncio

@@ -449,7 +449,7 @@ def _non_finite_adversarial_cases() -> list[tuple[str, object, bool]]:
     ids=[label for label, _value, _expected in _non_finite_adversarial_cases()],
 )
 def test_contains_non_finite_number_equivalence(value: object, expected: bool) -> None:
-    """Pin the shared non-finite predicate; twin test guards the platform copy."""
+    """Pin the non-finite predicate on every adversarial case."""
     assert _contains_non_finite_number(value) is expected
 
 

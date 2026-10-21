@@ -63,12 +63,12 @@ class PlatformTokenIssueError(Exception):
 
 
 def _now() -> datetime:
-    """The current instant, behind one name that a test can hold still.
+    """The current instant, behind one name that a caller can freeze.
 
-    Every deadline in this module is compared against this call. Freezing a
-    clock is the only way to observe the advisory and mandatory bands without
-    a test that sleeps, and a sleeping test would have to pick a duration that
-    is either flaky or slow.
+    Every deadline in this module is compared against this call. Freezing it
+    is the only way to observe the advisory and mandatory bands without
+    sleeping, and a sleep would have to pick a duration that is either flaky
+    or slow.
     """
     return datetime.now(timezone.utc)
 

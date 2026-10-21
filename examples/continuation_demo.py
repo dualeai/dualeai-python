@@ -1,8 +1,8 @@
 """Continue one live Task and validate the continuation as structured output.
 
 Requires ``DUALEAI_TOKEN`` and access to a configured model. Run with
-``python examples/conversation_demo.py``. This manual example is not executed by
-the automated test suite.
+``python examples/continuation_demo.py``. Nothing runs this example
+automatically.
 """
 
 # ruff: noqa: T201

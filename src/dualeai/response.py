@@ -478,13 +478,13 @@ class AgentResponse(Generic[T]):
         deadline, priority, result and stop. Priority defaults to standard for
         each new Task. A setting left as None takes this Task's
         value; attachments add documents. The new Task inherits only the
-        task history. The Platform accepts a continuation only while this
-        immediate parent Task is within its own 30-day retention window.
-        The continuation uses the inherited conversation context that remains
-        available. Conversation content expires 30 days after the request that
-        supplied it. System instructions may remain available for up to 90 days
-        after the request that supplied them. Tool Calls of the last finished
-        step that have no recorded reply appear to the model as 'status unknown'.
+        task history. The description of
+        ``dualeai.BridgeTaskContinueRequest.parent_task_id`` states which
+        parent the Platform accepts and how long the inherited context stays
+        available. The Agent Identity can separately search and read the
+        requests and final answers of its earlier Tasks for a limited period.
+        Tool Calls of the last finished step that have no recorded reply
+        appear to the model as 'status unknown'.
         The inherited context does not carry this Task's final answer text;
         the Agent Identity can recall that answer from its recorded history.
 
@@ -496,7 +496,7 @@ class AgentResponse(Generic[T]):
         Cancelling this call before it sends the continuation sends nothing and
         leaves this Task and its other pending continuations running.
 
-        No test in this repository enforces the Platform behavior described here.
+        Nothing in this SDK enforces the Platform behavior described here.
 
         Args:
             message: New user turn for the continuation Task.
@@ -544,8 +544,8 @@ class AgentResponse(Generic[T]):
         continuation with ``PARENT_TASK_NOT_FOUND``. A ``task_id`` already
         used by this Agent Identity names that existing Task: the returned
         response streams it, and no second Task starts. ``model()`` raises the
-        continuation's error code with its problem details. No test in this
-        repository enforces these Platform answers.
+        continuation's error code with its problem details. Nothing in this
+        SDK enforces these Platform answers.
 
         Example:
             response = await ask(action="What's 2+2?", sdk=sdk)
@@ -582,8 +582,8 @@ class AgentResponse(Generic[T]):
         stop is accepted even when the Task already ended or the Platform does
         not know it; a stop of a Task that already ended changes nothing.
 
-        No test in this repository enforces that a permitted stop of an ended
-        or unknown Task is accepted.
+        Nothing in this SDK enforces that the Platform accepts a permitted
+        stop of an ended or unknown Task.
 
         Args:
             reason: Why the task is being stopped. Required, non-empty.

@@ -15,8 +15,8 @@ providers and optional instrumentors. See :mod:`dualeai.logging_config` and
 :mod:`dualeai.observability` before embedding the SDK in an application that
 already owns either subsystem.
 
-Service-side authorization and execution outcomes are not enforced by this
-repository's tests.
+Nothing in this SDK enforces service-side authorization and execution
+outcomes.
 """
 
 import asyncio
@@ -261,9 +261,8 @@ class DualeAISDK:
         resolved_agent_id = agent_id if agent_id is not None else self.config.agent_id
         self.agent_id = _agent_id_adapter.validate_python(resolved_agent_id) if resolved_agent_id is not None else None
         self._tools: dict[str, RegisteredToolCallable] = {}
-        # In-flight task runners keyed by task_id. Used by cleanup() for
-        # cancel-on-shutdown and by tests for assertion. Each runner removes
-        # itself when its terminal task ends.
+        # In-flight task runners keyed by task_id. cleanup() cancels them on
+        # shutdown. Each runner removes itself when its terminal task ends.
         self._inflight_tasks: dict[str, asyncio.Task[TerminalEvent]] = {}
         self.max_jobs = max_jobs
         self.job_timeout = job_timeout
@@ -718,9 +717,8 @@ class DualeAISDK:
         docstring); a per-attempt timeout cancels the coroutine mid-run, so a
         retried side effect may have partially applied.
         """
-        # A future retry-ratio budget could further limit fan-out amplification.
-        # Today retries are bounded by the per-call attempt count and absolute
-        # deadline only.
+        # Only the per-call attempt count and the absolute deadline bound retries;
+        # no retry-ratio budget limits fan-out amplification.
         deadline_budget = max(0.0, (deadline_at - self._estimated_server_time()).total_seconds())
         # Surface when the deadline is too short for the configured retries to fire —
         # otherwise `retries=N` silently degrades to fewer (or zero) real attempts.
@@ -1074,8 +1072,8 @@ class DualeAISDK:
         stop is accepted even when the Task already ended or the Platform does
         not know it; a stop of a Task that already ended changes nothing.
 
-        No test in this repository enforces that a permitted stop of an ended
-        or unknown Task is accepted.
+        Nothing in this SDK enforces that the Platform accepts a permitted
+        stop of an ended or unknown Task.
 
         Args:
             task_id: A Task of the API token's Agent Identity.
@@ -1217,8 +1215,8 @@ class DualeAISDK:
         ``response_stream`` and ``attachments`` only when the caller set them;
         an omitted criterion takes the parent Task's value on the Platform.
         ``local_streaming`` selects the returned response's local buffering.
-        No test in this repository enforces the Platform's inheritance of an
-        omitted field.
+        Nothing in this SDK enforces the Platform's inheritance of an omitted
+        field.
         """
         if deadline is not None and (deadline.tzinfo is None or deadline.utcoffset() is None):
             raise ValueError("Continuation deadline must be timezone-aware")
@@ -1743,7 +1741,7 @@ class DualeAISDK:
             "registered_tools": len(self._tools),
         }
 
-    # Public properties for test and introspection access
+    # Public properties for introspection and dependency injection
     @property
     def observability(self) -> SDKObservability:
         """SDK observability instance."""
@@ -1756,7 +1754,7 @@ class DualeAISDK:
 
     @events_client.setter
     def events_client(self, value: CloudEventsClient | None) -> None:
-        """Set the cloud events client (used for DI in tests)."""
+        """Set the cloud events client (dependency injection)."""
         self._events_client = value
 
     @property

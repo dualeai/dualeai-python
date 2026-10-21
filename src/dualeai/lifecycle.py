@@ -252,7 +252,7 @@ class LifecycleManager:
         return snapshot
 
     def _jittered_interval_seconds(self, *, base_seconds: float, jitter_seconds: float) -> float:
-        """Return a bounded jittered interval; zero base remains zero for tests."""
+        """Return a bounded jittered interval; a zero base stays zero."""
         if base_seconds <= 0:
             return 0.0
         jitter = self._lifecycle_jitter_random.uniform(-jitter_seconds, jitter_seconds)

@@ -2,7 +2,7 @@
 
 This client submits typed requests and consumes Server-Sent Events. The
 transport owns protected HTTP calls, reconnects, and ``Last-Event-ID`` handling.
-An injected transport provides the network boundary used by tests.
+An injected transport replaces that network boundary.
 """
 
 import types
@@ -135,7 +135,7 @@ class CloudEventsClient:
             DualeAIConnectionError: If transport initialization fails.
         """
         try:
-            # If transport was injected (e.g., MockHTTPTransport for testing), use it
+            # An injected transport is used as given.
             if self._transport is not None:
                 if not self._transport.is_connected:
                     await self._transport.connect()

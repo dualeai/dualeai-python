@@ -13,7 +13,7 @@ cd dualeai-python
 python -m pip install -e .
 ```
 
-<!-- No automated test verifies the wheel's example-file inventory or executes these examples against the service. -->
+<!-- Nothing checks the wheel's example-file inventory, and nothing runs these examples against the service automatically. -->
 
 ## Configure access
 
@@ -27,7 +27,7 @@ Examples that submit Tasks also need access to at least one configured model. To
 `DUALEAI_AGENT_ID`; document examples list their additional requirements below. Set `DUALEAI_ENDPOINT` only when your
 access instructions name another HTTPS Gateway base URL.
 
-<!-- No automated test runs these examples against the service. -->
+<!-- Nothing runs these examples against the service automatically. -->
 
 ## Choose an example
 
@@ -35,7 +35,7 @@ The table lists requirements beyond the token and, for Tasks, configured-model a
 
 | Example | Extra requirement | Purpose |
 | --- | --- | --- |
-| [`conversation_demo.py`](conversation_demo.py) | None | Basic: continue one response and validate the continuation as a Pydantic model |
+| [`continuation_demo.py`](continuation_demo.py) | None | Basic: continue one response and validate the continuation as a Pydantic model |
 | [`simple_agent.py`](simple_agent.py) | Agent ID | Basic: publish a Tool manifest and maintain heartbeats; no Tool call executes |
 | [`tool_execution.py`](tool_execution.py) | Agent ID | Basic: register one Tool and execute it on a Task stream opened by the same SDK |
 | [`inventory_agent.py`](inventory_agent.py) | Agent ID | Advanced: sync and async Tools, side-effect safety, and error redaction |
@@ -100,7 +100,7 @@ format or the `text` format, it is the only copy that can carry the
 [`streaming_minimal.py`](streaming_minimal.py) prints the corrected text again when a late chunk or a reset changes text
 it already printed.
 
-<!-- No automated test runs the ordering rule in these examples. Out-of-order arrival, the free-text rule and the content mark are Platform behavior; no test in this repository enforces them. -->
+<!-- Nothing runs the ordering rule in these examples automatically. Out-of-order arrival, the free-text rule and the content mark are Platform behavior; nothing in this SDK enforces them. -->
 
 ## Project links
 

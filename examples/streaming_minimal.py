@@ -1,8 +1,8 @@
 """Minimal live streaming example.
 
 Requires ``DUALEAI_TOKEN`` and access to a configured model. Run with
-``python examples/streaming_minimal.py``. This manual example is not executed by
-the automated test suite.
+``python examples/streaming_minimal.py``. CI does not execute this manual
+example.
 
 Streamed chunks can arrive out of order. The example keeps the highest
 ``generation``, orders its chunks by ``sequence``, and prints the text again

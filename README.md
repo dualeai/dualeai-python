@@ -62,7 +62,7 @@ Run `python quickstart.py`. A successful run prints the Task ID, then the valida
 
 Before retrying a failure, use [Errors and reliability](https://duale.ai/en/docs/sdk/errors) to identify its cause.
 
-<!-- No automated test executes this live quickstart or enforces its printed shape. -->
+<!-- Nothing executes this live quickstart or enforces its printed shape. -->
 
 ## Configuration
 
@@ -105,7 +105,7 @@ For application tests without a live connection, use the
   them. Optional telemetry instrumentation also acts across the process. Coordinate these settings with your host
   application.
 
-<!-- Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings without dedicated automated tests. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; no test in this repository enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; no test in this repository enforces it. -->
+<!-- Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings; nothing enforces them. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; nothing in this SDK enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; nothing in this SDK enforces it. -->
 
 ## Project links
 

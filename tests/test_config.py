@@ -13,9 +13,9 @@ class TestObservabilityEndpoints:
     """Per-signal OTLP/HTTP endpoint construction.
 
     OTLP exporter spec: an endpoint passed explicitly to an exporter is used
-    AS-IS (no per-signal path appended) — verified against the installed
-    opentelemetry-exporter-otlp-proto-http source (1.41.0 and 1.44.0). The SDK
-    must therefore build ``{base}/v1/<signal>`` itself.
+    AS-IS (no per-signal path appended), per the
+    opentelemetry-exporter-otlp-proto-http source. The SDK must therefore build
+    ``{base}/v1/<signal>`` itself.
     """
 
     def test_default_observability_endpoint_uses_otlp_http_port(self):

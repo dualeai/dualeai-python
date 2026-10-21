@@ -17,7 +17,7 @@ Run static, unit, and integration checks with `make test`.
 tests/
   conftest.py              # Shared fixtures (minimal_mock_sdk, config_factory)
   mocks/                   # Network-boundary mocks (MockHTTPTransport)
-  helpers/                 # Assertion utilities
+  helpers/                 # Bridge round-trip helpers
   fixtures/                # Static test data
   test_*.py                # Unit (@pytest.mark.unit) and local integration (@pytest.mark.integration) tests
   benchmarks/              # CodSpeed benchmarks (@pytest.mark.benchmark)

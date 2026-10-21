@@ -136,16 +136,16 @@ def create_sdk(**kwargs: Unpack[SDKConfigKwargs]) -> DualeAISDK:
     controls in ``SDKConfigKwargs`` but not dependency injection, nested
     observability configuration, Tool concurrency, graceful shutdown, or
     backpressure; use ``DualeAISDK`` with ``DualeAIConfig`` for those cases.
-    Runtime keys not declared by ``DualeAIConfig`` are currently ignored by its
-    Pydantic ``extra="ignore"`` policy, so use type checking to catch misspelled
-    keyword names.
+    Runtime keys not declared by ``DualeAIConfig`` are ignored by its Pydantic
+    ``extra="ignore"`` policy, so use type checking to catch misspelled keyword
+    names.
 
     Construction reconfigures process-global logging. See
     :func:`configure_logging` before using the factory in a host that owns its
     root logging setup.
 
-    Pydantic coerces the constructor arguments. No focused automated test
-    currently covers ignored unknown factory keys.
+    Pydantic coerces the constructor arguments. Nothing enforces that the
+    factory ignores unknown keys.
 
     Args:
         **kwargs: Keys declared by ``SDKConfigKwargs``. ``max_jobs``,

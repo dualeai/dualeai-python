@@ -136,8 +136,8 @@ class TestUnitObservabilityFeature:
         """Span and metric exporters are wired to their per-signal OTLP paths.
 
         The OTLP/HTTP exporters use an explicitly passed endpoint AS-IS
-        (no path appended — verified against the installed 1.41.0 and 1.44.0
-        source), so the SDK must hand each exporter its own ``/v1/<signal>``
+        (no path appended, per the exporter source), so the SDK must hand each
+        exporter its own ``/v1/<signal>``
         URL, never the bare base.
         """
         captured: dict[str, str] = {}

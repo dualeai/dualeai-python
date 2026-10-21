@@ -2,8 +2,7 @@
 
 Requires ``DUALEAI_TOKEN``, ``DUALEAI_AGENT_ID``, and access to a configured
 model. Run with ``python examples/tool_execution.py``. The Tool returns synthetic
-data and has no external side effect. This live example is not executed by the
-automated test suite.
+data and has no external side effect. CI does not execute this live example.
 """
 
 import asyncio
