@@ -248,7 +248,7 @@ class AgentHeartbeatResponse(BaseModel):
     ]
     client_sent_at: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="Client timestamp echoed from the accepted heartbeat."),
+        Field(description="SDK timestamp echoed from the accepted heartbeat."),
     ]
 
 
@@ -439,12 +439,12 @@ class BridgeSSEEvent(BaseModel):
     ]
     timestamp: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="Time when the client parsed this event."),
+        Field(description="Time when the SDK parsed this event."),
     ]
 
 
 class BridgeTaskContinueRequest(BaseModel):
-    """Creates a new Task that continues the conversation of `parent_task_id`, a Task of the same Agent Identity. The new Task runs under that Agent Identity and inherits that conversation. A setting this request omits takes the parent Task's value; the deadline and the priority are always the new Task's own. The parent can have completed, failed, or stopped, or can still be running."""
+    """Creates a new Task that continues the task history of `parent_task_id`, a Task of the same Agent Identity. The new Task runs under that Agent Identity and inherits that task history. A setting this request omits takes the parent Task's value; the deadline and the priority are always the new Task's own. The parent can have completed, failed, or stopped, or can still be running."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["continue"], Field(description="Identifies this request as Task continuation.")]
@@ -459,25 +459,25 @@ class BridgeTaskContinueRequest(BaseModel):
     parent_task_id: Annotated[
         task_id_module.TaskId,
         Field(
-            description="Task of the same Agent Identity whose conversation this continuation Task continues. A Task identifier names a Task only within its tenant and Agent Identity. The parent can have completed, failed, or stopped, or can still be running; a running parent is continued from its last completed step. A public continuation must name an immediate parent Task admitted less than 30 days ago. Conversation content expires 30 days after the request that supplied it; instructions may remain available for up to 90 days after the request that supplied them. The continuation uses the inherited context that remains available."
+            description="Task of the same Agent Identity whose task history this continuation Task continues. A Task identifier names a Task only within its tenant and Agent Identity. The parent can have completed, failed, or stopped, or can still be running; a running parent is continued from its last completed step. A continuation must name an immediate parent Task admitted less than 30 days ago. Task history content leaves the inherited context 30 days after the request that supplied it; instructions may remain available for up to 90 days after the request that supplied them. The continuation uses the inherited context that remains available."
         ),
     ]
     message: Annotated[
         Annotated[StrictStr, Field(max_length=100000, pattern="^[^\\u0000]*$")],
-        Field(description="User message that continues the conversation. It is the continuation Task's instruction."),
+        Field(description="User message that continues the task history. It is the continuation Task's instruction."),
     ]
     attachments: Annotated[
         Union[Annotated[list[attachment_module.Attachment], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Documents to add for the continuation Task. Upload each document before submitting, then send the matching client-side key, filename, and description here. The parent Task's documents stay available.",
+            description="Documents to add for the continuation Task. Upload each document before submitting, then send the matching attachment key, filename, and description here. The parent Task's documents stay available.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     routing_policy: Annotated[
         routing_policy_module.RoutingPolicy,
         Field(
-            description="Model-selection preferences for this request. The object is required; preferences left unset inherit the parent Task's values at public admission."
+            description="Model-selection preferences for this request. The object is required. At public admission, a preference left unset takes the parent Task's admitted value: the parent request's preference, resolved with Platform defaults at admission. Capabilities the Platform inferred for the parent Task are not inherited."
         ),
     ]
     response_format: Annotated[
@@ -497,14 +497,14 @@ class BridgeTaskContinueRequest(BaseModel):
     deadline: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(
-            description="Requested absolute UTC deadline for the continuation Task. The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
+            description="Requested absolute deadline for the continuation Task, as a date-time with an offset (`Z` or `±hh:mm`). The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
             examples=["2025-08-30T15:00:00Z", "2025-08-30T15:00:00.000Z"],
         ),
     ]
 
 
 class BridgeTaskCreateRequest(BaseModel):
-    """Creates a new Task with a client-selected task identifier. The `type` field is `create`."""
+    """Creates a new Task with a task identifier that the developer selects. The `type` field is `create`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["create"], Field(description="Identifies this request as Task creation.")]
@@ -523,7 +523,7 @@ class BridgeTaskCreateRequest(BaseModel):
         Union[Annotated[list[attachment_module.Attachment], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Documents associated with this Task. Upload each document before submitting the Task, then send the matching client-side key, filename, and description here.",
+            description="Documents associated with this Task. Upload each document before submitting the Task, then send the matching attachment key, filename, and description here.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
@@ -548,7 +548,7 @@ class BridgeTaskCreateRequest(BaseModel):
     deadline: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(
-            description="Requested absolute UTC deadline for the Task. The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
+            description="Requested absolute deadline for the Task, as a date-time with an offset (`Z` or `±hh:mm`). The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
             examples=["2025-08-30T15:00:00Z", "2025-08-30T15:00:00.000Z"],
         ),
     ]

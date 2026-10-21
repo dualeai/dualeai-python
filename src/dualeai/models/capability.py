@@ -70,7 +70,7 @@ class Capability(str, Enum):
             Capability.math: "Mathematical problem solving and formal proofs.",
             Capability.code: "Generating, inspecting, modifying, debugging, or migrating software.",
             Capability.agentic: "Completing multiple steps with available Tools and feedback.",
-            Capability.long_context: "Retrieving and combining details across very long documents or conversation histories.",
+            Capability.long_context: "Retrieving and combining details across very long documents or message histories.",
             Capability.finance: "Financial analysis, modeling, and banking workflows.",
             Capability.cyber_defensive: "Reproducing and remediating software vulnerabilities.",
             Capability.cyber_offensive: "Assessing whether a vulnerability can be exploited within an authorized scope.",
@@ -93,7 +93,7 @@ class Capability(str, Enum):
                 (
                     "long_context",
                     "Long context",
-                    "Retrieving and combining details across very long documents or conversation histories.",
+                    "Retrieving and combining details across very long documents or message histories.",
                 ),
                 ("finance", "Finance", "Financial analysis, modeling, and banking workflows."),
                 ("cyber_defensive", "Defensive security", "Reproducing and remediating software vulnerabilities."),

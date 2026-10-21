@@ -617,7 +617,7 @@ class LibraryDocumentUploadPart(BaseModel):
         Field(description="1-indexed part number."),
     ]
     upload_url: Annotated[
-        AnyUrl, Field(description="URL to which the client uploads this part with an HTTP PUT request.")
+        AnyUrl, Field(description="URL to which the caller uploads this part with an HTTP PUT request.")
     ]
     offset: Annotated[
         Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=0)],
@@ -771,7 +771,7 @@ LibraryPolicy = TypeAliasType(
     Annotated[
         authz_module.AuthzGrantInput,
         Field(
-            description="Access grant on a Library's current path, shared by every Library at that path. Use library:read to read the Library, its revisions, its documents, and their previews; library:write to add documents, change metadata and tags, and restore trashed documents; library:delete to delete documents or the Library; and library:admin to manage its grants. library:* covers these four operations but not tenant-scoped library:upload."
+            description="Access grant on a Library's current path, shared by every Library at that path. Use library:read to read the Library, its revisions, its documents, and their previews; library:write to add documents, change metadata and tags, and restore trashed documents; library:delete to delete documents or the Library; and library:admin to manage its grants. library:* covers these operations but not tenant-scoped library:upload."
         ),
     ],
 )

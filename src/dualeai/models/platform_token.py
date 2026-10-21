@@ -182,6 +182,6 @@ class PlatformTokenIssueResponse(BaseModel):
     valid_until: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_2)],
         Field(
-            description="When the token stops resolving. Revocation deletes the record and takes effect before this instant, so a client must handle a refusal at any time."
+            description="When the token stops resolving. Revocation deletes the record and takes effect before this instant, so a caller must handle a refusal at any time."
         ),
     ]

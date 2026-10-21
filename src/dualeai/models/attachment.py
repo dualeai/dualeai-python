@@ -10,12 +10,14 @@ __all__: list[str] = ["Attachment"]
 
 
 class Attachment(BaseModel):
-    """Document attached to a Task: the client-side key of an uploaded document, its filename, and its description for the model."""
+    """Document attached to a Task: the key that links it to an uploaded document, its filename, and its description for the model."""
 
     model_config = ConfigDict(extra="forbid", title="Attachment", json_schema_extra=None)
     key: Annotated[
         StrictStr,
-        Field(description="Client-generated correlation key that links this Task attachment to its upload receipt."),
+        Field(
+            description="Correlation key, chosen by the developer or the SDK, that links this Task attachment to its upload receipt."
+        ),
     ]
     filename: Annotated[StrictStr, Field(description="Original filename.")]
     description: Annotated[
