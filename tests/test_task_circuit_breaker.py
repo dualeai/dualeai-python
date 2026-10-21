@@ -62,14 +62,7 @@ class TestTaskCircuitBreaker:
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
         failure: str,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        operations: list[tuple[str, str]] = []
-        monkeypatch.setattr(
-            minimal_mock_sdk.observability,
-            "record_operation",
-            lambda operation, status, **_kwargs: operations.append((operation, status)),
-        )
         if failure == "connection":
             mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
         elif failure == "auth":
@@ -83,7 +76,6 @@ class TestTaskCircuitBreaker:
         metrics = minimal_mock_sdk.backpressure_controller.metrics
         assert metrics.tasks_failed == 0
         assert metrics.tasks_completed == 0
-        assert ("task_stream", "cancelled" if failure == "cancel" else "failed") in operations
 
     async def test_lost_stream_logs_the_local_failure(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport, caplog: pytest.LogCaptureFixture

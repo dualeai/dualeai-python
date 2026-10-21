@@ -4,6 +4,7 @@ import asyncio
 import json
 import secrets
 import ssl
+import weakref
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -188,22 +189,46 @@ class _HeldToken:
         self.refusals += 1
 
 
-def _as_connected(transport: HTTPTransport, *, bridge: object, library: object) -> _HeldToken:
-    """Put `transport` in the state `connect()` leaves, with stub tunnels.
+@asynccontextmanager
+async def _source(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+    """Stands in for `DiscoveredEndpoint`, so connecting reaches no network."""
+    yield object()
 
-    `_session_for` refuses a transport that never connected, and re-keys its
-    tunnels whenever the owner hands back a different token — so `_held` must be
-    the very object `get()` returns, or every request would rebuild.
+
+_TOKENS_OF: "weakref.WeakKeyDictionary[HTTPTransport, _HeldToken]" = weakref.WeakKeyDictionary()
+"""The credential owner each transport `_as_connected` opened was given, for the cases that observe it."""
+
+_OPENED: list[HTTPTransport] = []
+"""Every transport `_as_connected` opened, disconnected after each case."""
+
+
+@pytest.fixture(autouse=True)
+async def _disconnect_opened_transports() -> AsyncIterator[None]:
+    yield
+    while _OPENED:
+        await _OPENED.pop().disconnect()
+
+
+def _tokens_of(transport: HTTPTransport) -> _HeldToken:
+    return _TOKENS_OF[transport]
+
+
+async def _as_connected(transport: HTTPTransport, *, bridge: object, library: object) -> _HeldToken:
+    """Open `transport` through `connect()`, its network substitution points standing in for the peers.
+
+    `connect()` binds the first tunnel pair from the token the owner holds, so a later request reuses
+    `bridge` and `library` unless the owner hands back a different token.
     """
     tokens = _HeldToken()
-    transport.__dict__.update(
-        _resources=AsyncExitStack(),
-        _tunnels=AsyncExitStack(),
-        _tokens=tokens,
-        _held=_STUB_TOKEN,
-        _bridge_session=bridge,
-        _library_session=library,
-    )
+    sessions = [bridge, library]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(transport_module, "make_connector", aiohttp.TCPConnector)
+        patch.setattr(transport_module, "PlatformTokenProvider", lambda *_args: tokens)
+        patch.setattr(transport_module, "DiscoveredEndpoint", _source)
+        patch.setattr(transport_module, "HPKEClientSession", lambda *_args: sessions.pop(0))
+        await transport.connect()
+    _OPENED.append(transport)
+    _TOKENS_OF[transport] = tokens
     return tokens
 
 
@@ -213,7 +238,7 @@ async def _with_session(
     transport = HTTPTransport("https://api.example.test", _TOKEN, _TENANT)
     session = _FiniteSession(responses)
     other = _FiniteSession([])
-    _as_connected(
+    await _as_connected(
         transport,
         bridge=other if library else session,
         library=session if library else other,
@@ -554,7 +579,7 @@ class _StreamSession(_FiniteSession):
 async def _with_stream_session(results: list[_StreamReply | BaseException]) -> tuple[HTTPTransport, _StreamSession]:
     transport = HTTPTransport("https://api.example.test", _TOKEN)
     session = _StreamSession(results)
-    _as_connected(transport, bridge=session, library=_FiniteSession([]))
+    await _as_connected(transport, bridge=session, library=_FiniteSession([]))
     return transport, session
 
 
@@ -941,8 +966,7 @@ async def test_task_retry_flag_and_http_status_are_independent(monkeypatch, stat
             assert error.value.context.metadata["http_status"] == status
         assert [call.method for call in session.calls] == (["POST", "GET", "GET"] if retry else ["POST", "GET"])
         assert all(call.body is None and call.headers["Last-Event-ID"] == "7:1" for call in session.calls[1:])
-        assert isinstance(transport._tokens, _HeldToken)
-        assert transport._tokens.refusals == 0
+        assert _tokens_of(transport).refusals == 0
     finally:
         await client.disconnect()
 
@@ -1125,7 +1149,7 @@ async def test_task_mixed_budget_counts_renewal_without_an_http_request(monkeypa
             raise PlatformTokenIssueError(503, None)
         return _STUB_TOKEN
 
-    monkeypatch.setattr(transport._tokens, "get", renew)
+    monkeypatch.setattr(_tokens_of(transport), "get", renew)
     try:
         if fifth_succeeds:
             assert [event.id async for event in transport.run_task("task-budget", _task_request())] == ["9:1", "9:2"]
@@ -1205,7 +1229,7 @@ async def test_task_renewal_classifies_its_original_cause(monkeypatch, failure: 
             raise failure
         return _STUB_TOKEN
 
-    monkeypatch.setattr(transport._tokens, "get", renew)
+    monkeypatch.setattr(_tokens_of(transport), "get", renew)
     try:
         if retry:
             assert [event.id async for event in transport.run_task("task-renew", _task_request())] == ["6:1", "6:2"]
@@ -1657,7 +1681,7 @@ def _refused_credential() -> TransportError:
     return TransportError("outer_status", "protected endpoint returned outer status 400", status_code=400)
 
 
-def _refusing_transport(
+async def _refusing_transport(
     monkeypatch: pytest.MonkeyPatch,
     first: Sequence[HPKEResponse | BaseException],
     replacement: Sequence[HPKEResponse | BaseException] = (),
@@ -1673,8 +1697,7 @@ def _refusing_transport(
     transport = HTTPTransport("https://api.example.test", _TOKEN, _TENANT)
     live = _FiniteSession(first)
     rebuilt = _FiniteSession(replacement)
-    tokens = _as_connected(transport, bridge=_FiniteSession([]), library=live)
-    transport.__dict__.update(_bridge_source=object(), _library_source=object())
+    tokens = await _as_connected(transport, bridge=_FiniteSession([]), library=live)
 
     keyed_with: list[bytes] = []
     queue = [_FiniteSession([]), rebuilt]
@@ -1698,7 +1721,7 @@ async def test_a_refused_credential_is_replaced_and_the_call_completes(
     why the first request failed; a repeated refusal or the reissuance floor can
     still leave the caller with an error.
     """
-    transport, live, rebuilt, tokens, keyed_with = _refusing_transport(
+    transport, live, rebuilt, tokens, keyed_with = await _refusing_transport(
         monkeypatch,
         [_refused_credential()],
         [_response(200, {"libraries": []})],
@@ -1725,7 +1748,7 @@ async def test_a_credential_refused_twice_reaches_the_caller(
     client retrying an unresolvable identifier forever is how one revoked agent
     becomes load on its issuer.
     """
-    transport, live, rebuilt, tokens, _keyed = _refusing_transport(
+    transport, live, rebuilt, tokens, _keyed = await _refusing_transport(
         monkeypatch,
         [_refused_credential()],
         [_refused_credential()],
@@ -1749,7 +1772,7 @@ async def test_a_failure_that_is_not_a_refusal_never_touches_the_credential(
     network blip, mint a record for each one, and hide the real error behind a
     second attempt.
     """
-    transport, live, _rebuilt, tokens, keyed_with = _refusing_transport(
+    transport, live, _rebuilt, tokens, keyed_with = await _refusing_transport(
         monkeypatch,
         [TransportError("network_error", "connection reset")],
     )
@@ -1795,8 +1818,10 @@ class _SwitchableTokens:
 
 
 @asynccontextmanager
-async def _real_tunnels(token: PlatformToken) -> AsyncIterator[tuple[HTTPTransport, _SwitchableTokens]]:
-    """A connected transport whose tunnels are real `HPKEClientSession`s.
+async def _real_tunnels(
+    token: PlatformToken,
+) -> AsyncIterator[tuple[HTTPTransport, _SwitchableTokens, list[HPKEClientSession]]]:
+    """A transport `connect()` opened, whose tunnels are real `HPKEClientSession`s, each one recorded.
 
     Nothing reaches the network: a `DiscoveredEndpoint` fetches the service key
     only when a request needs it, and these cases send none. Real sessions are
@@ -1804,40 +1829,38 @@ async def _real_tunnels(token: PlatformToken) -> AsyncIterator[tuple[HTTPTranspo
     `hpke_http` binds at construction, not one a stub could pretend to hold.
     """
     transport = HTTPTransport("https://api.example.test", _TOKEN, _TENANT)
-    resources = AsyncExitStack()
     tokens = _SwitchableTokens(token)
-    try:
-        transport.__dict__.update(
-            _resources=resources,
-            _tokens=tokens,
-            _bridge_source=await resources.enter_async_context(
-                DiscoveredEndpoint("https://api.example.test/http-bridge/v1/hpke")
-            ),
-            _library_source=await resources.enter_async_context(
-                DiscoveredEndpoint("https://api.example.test/libraries/v1/hpke")
-            ),
-        )
-        await transport._bind_tunnels()
-        yield transport, tokens
-    finally:
-        await transport.disconnect()
-        await resources.aclose()
+    sessions: list[HPKEClientSession] = []
+
+    def _recorded(source: DiscoveredEndpoint, psk: bytes, psk_id: bytes) -> HPKEClientSession:
+        session = HPKEClientSession(source, psk, psk_id)
+        sessions.append(session)
+        return session
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(transport_module, "PlatformTokenProvider", lambda *_args: tokens)
+        patch.setattr(transport_module, "HPKEClientSession", _recorded)
+        try:
+            await transport.connect()
+            yield transport, tokens, sessions
+        finally:
+            await transport.disconnect()
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("token", [_EXPIRED_TOKEN, _STUB_TOKEN])
 async def test_idle_retired_tunnels_close_at_replacement(token: PlatformToken) -> None:
     """A replaced client with no active response has no remaining lifetime."""
-    async with _real_tunnels(token) as (transport, tokens):
-        retired = [transport._bridge_session, transport._library_session]
-        assert all(session is not None for session in retired)
+    async with _real_tunnels(token) as (transport, tokens, sessions):
+        retired = list(sessions)
+        assert len(retired) == 2
 
         tokens.current = _REPLACEMENT_TOKEN
+        # Kept private: every request runs `_bind_tunnels` first, and a request would need the network.
         await transport._bind_tunnels()
 
-        assert transport._bridge_session not in retired, "the tunnels were not re-keyed at all"
+        assert len(sessions) == 4, "the tunnels were not re-keyed at all"
         for session in retired:
-            assert session is not None
             assert session.closed, "the retired tunnel was left open"
 
 
@@ -2075,15 +2098,14 @@ class _MonotonicClock:
         return self.at
 
 
-def _rebuilding_transport(
+async def _rebuilding_transport(
     monkeypatch: pytest.MonkeyPatch,
     library: object,
     rebuilds: list[object],
 ) -> tuple[HTTPTransport, list[bytes], _HeldToken]:
     """A connected transport that hands out `rebuilds` as its tunnels are re-keyed."""
     transport = HTTPTransport("https://api.example.test", _TOKEN, _TENANT)
-    tokens = _as_connected(transport, bridge=_FiniteSession([]), library=library)
-    transport.__dict__.update(_bridge_source=object(), _library_source=object())
+    tokens = await _as_connected(transport, bridge=_FiniteSession([]), library=library)
 
     keyed_with: list[bytes] = []
     queue = list(rebuilds)
@@ -2112,7 +2134,7 @@ async def test_a_repeated_non_credential_400_does_not_mint_a_token_per_request(
     """
     clock = _MonotonicClock()
     monkeypatch.setattr(transport_module, "monotonic", clock)
-    transport, keyed_with, tokens = _rebuilding_transport(
+    transport, keyed_with, tokens = await _rebuilding_transport(
         monkeypatch,
         _RefusingSession(),
         [_FiniteSession([]), _RefusingSession(), _FiniteSession([]), _RefusingSession()],
@@ -2150,7 +2172,7 @@ async def test_a_burst_refused_on_one_withdrawn_token_finishes_on_one_replacemen
     floor instead would fail seven requests a valid credential could serve.
     """
     monkeypatch.setattr(transport_module, "monotonic", _MonotonicClock())
-    transport, keyed_with, tokens = _rebuilding_transport(
+    transport, keyed_with, tokens = await _rebuilding_transport(
         monkeypatch,
         _RefusingSession(arrivals=8),
         [_FiniteSession([]), _FiniteSession([_response(200, {"libraries": []})] * 8)],
@@ -2184,9 +2206,7 @@ async def test_a_finite_request_survives_one_expired_discovery_lease() -> None:
 
     assert (await transport.list_libraries()).libraries == []
     assert [call.method for call in session.calls] == ["GET", "GET"]
-    tokens = transport._tokens
-    assert isinstance(tokens, _HeldToken)
-    assert tokens.refusals == 0, "an expired lease was mistaken for a refused credential"
+    assert _tokens_of(transport).refusals == 0, "an expired lease was mistaken for a refused credential"
 
     # One further attempt, not a loop: a lease that keeps ending reaches the caller.
     transport, session = await _with_session([expired, expired, expired])

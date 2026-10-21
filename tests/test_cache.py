@@ -18,10 +18,7 @@ from tests.conftest import CacheFactory
 
 
 @pytest.mark.unit
-def test_cache_config_has_no_ineffective_capacity_settings() -> None:
-    assert not {"max_entries", "max_size_bytes", "lru_eviction_enabled", "eviction_batch_size"} & set(
-        CacheConfig.model_fields
-    )
+def test_cache_config_refuses_a_capacity_setting_it_cannot_honor() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
         CacheConfig.model_validate({"max_size_bytes": 10_000_000})
 

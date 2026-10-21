@@ -2030,27 +2030,26 @@ def test_config_hash_frozen_golden() -> None:
 
 
 @pytest.mark.unit
-def test_config_hash_changes_when_only_a_generated_choice_title_changes() -> None:
+def test_config_hash_changes_when_only_a_generated_choice_title_changes(
+    config_factory,
+    mock_http_transport: MockHTTPTransport,
+) -> None:
     """Member annotations participate in the local validated manifest hash."""
     from dualeai.events.client import CloudEventsClient
     from dualeai.lifecycle import LifecycleManager
-    from dualeai.models.tool import Tool as WireTool
-    from dualeai.tools._contract import _compile_tool_callable
 
     async def no_client() -> CloudEventsClient:
         raise AssertionError("config_hash must not need the events client")
 
+    sdk = DualeAISDK(
+        config=config_factory(agent_id="agent_capability_choice"), transport=mock_http_transport, auto_start=False
+    )
+
+    @tool(sdk=sdk, description="Choose a capability.", timeout=timedelta(seconds=30))
     async def choose(capability: Capability | None) -> str:
         return "selected"
 
-    registered = RegisteredTool(
-        tool=WireTool(
-            name="choose",
-            description="Choose a capability.",
-            parameters=_compile_tool_callable(choose).parameters,
-        ),
-        timeout_seconds=30,
-    )
+    registered = sdk.registered_tools[0]
     manifest = [registered]
     lifecycle = LifecycleManager(
         ensure_events_client=no_client,

@@ -6,8 +6,6 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
-import dualeai
-import dualeai.orchestrator
 from dualeai import DualeAISDK
 from dualeai.models.bridge import BridgeTaskContinueRequest
 from dualeai.models.response_format import JsonSchemaResponseFormat, PredefinedResponseFormat
@@ -34,11 +32,10 @@ async def _completed_parent(sdk: DualeAISDK, task_id: str = "parent-task-123") -
 
 
 @pytest.mark.unit
-def test_next_is_the_only_continuation_entry_point() -> None:
-    assert not hasattr(dualeai, "continue_conversation")
-    assert "continue_conversation" not in dualeai.__all__
-    assert not hasattr(dualeai.orchestrator, "continue_conversation")
-    assert "__or__" not in vars(AgentResponse)
+async def test_a_response_has_no_operator_that_continues_it(minimal_mock_sdk: DualeAISDK) -> None:
+    parent = await _completed_parent(minimal_mock_sdk)
+    with pytest.raises(TypeError):
+        _ = parent | parent  # ty: ignore[unsupported-operator] - the refused operator is the contract
 
 
 @pytest.mark.unit

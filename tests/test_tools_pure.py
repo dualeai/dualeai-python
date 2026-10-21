@@ -188,10 +188,11 @@ def test_compiled_contract_preserves_documented_nullable_choices() -> None:
     schema = contract.parameters.model_dump(mode="json", by_alias=True)
     assert schema["properties"] == {"capability": {"anyOf": [{"$ref": "#/$defs/Capability"}, {"type": "null"}]}}
     assert schema["required"] == ["capability"]
+    # The generated enum is the exporter's input, so its text stays independent of the exporter under test.
     assert {
         "const": "math",
-        "title": "Math",
-        "description": "Mathematical problem solving and formal proofs.",
+        "title": Capability.math.display_title,
+        "description": Capability.math.description,
     } in schema["$defs"]["Capability"]["oneOf"]
 
     assert contract.tool_kwargs(_tool_use(capability="math"))["capability"] is Capability.math

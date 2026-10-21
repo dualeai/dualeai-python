@@ -267,11 +267,9 @@ class TestToolDecorator:
 class TestDecoratorErrorHandling:
     """Test error handling in decorators."""
 
-    async def test_activity_decorator_invalid_cache_ttl(self, test_sdk: DualeAISDK) -> None:
-        """Test @activity with invalid cache_ttl type."""
+    async def test_activity_decorator_forwards_a_timedelta_cache_ttl(self, test_sdk: DualeAISDK) -> None:
+        """@activity accepts a timedelta cache_ttl and forwards it to execute_activity."""
 
-        # This test actually should pass as negative timedelta is valid in Python
-        # Testing the decorator accepts timedelta objects
         @activity(cache_ttl=timedelta(seconds=1), sdk=test_sdk)
         async def good_activity():
             pass
@@ -283,9 +281,8 @@ class TestDecoratorErrorHandling:
         assert execute_mock.call_args[0][1] == timedelta(seconds=1)
 
     async def test_activity_decorator_negative_retries(self, test_sdk: DualeAISDK) -> None:
-        """Test @activity with negative max_retries."""
+        """@activity forwards a negative max_retries to execute_activity unvalidated."""
 
-        # This should work - SDK should handle validation
         @activity(max_retries=-1, sdk=test_sdk)
         async def negative_retries_activity():
             pass
