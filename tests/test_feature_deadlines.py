@@ -57,7 +57,7 @@ class TestUnitDeadlineHandling:
         """Test continue_task accepts and propagates deadline parameter."""
         sdk = minimal_mock_sdk
         deadline = datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc)
-        parent = await ask(action="Start", request_id="original-task-123", sdk=sdk)
+        parent = await ask(action="Start", task_id="original-task-123", sdk=sdk)
         transport = require_mock_http_transport(sdk)
         transport.inject_event(parent.task_id, transport.create_task_completed_event())
         await parent.task

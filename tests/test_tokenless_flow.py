@@ -37,7 +37,7 @@ class TestTokenlessTaskFlow:
         response = await ask(
             action="Test tokenless task",
             streaming=False,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -65,7 +65,7 @@ class TestTokenlessTaskFlow:
         response = await ask(
             action="Test tokenless streaming",
             streaming=True,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -101,7 +101,7 @@ class TestTokenlessTaskFlow:
             *(
                 ask(
                     action=f"Concurrent task {index}",
-                    request_id=task_id,
+                    task_id=task_id,
                     sdk=minimal_mock_sdk,
                 )
                 for index, task_id in enumerate(task_ids)

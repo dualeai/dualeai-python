@@ -33,7 +33,7 @@ async def ask(
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
-    request_id: str | None = None,
+    task_id: str | None = None,
     sdk: "DualeAISDK",
 ) -> "AgentResponse[T]": ...
 
@@ -50,7 +50,7 @@ async def ask(
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
-    request_id: str | None = None,
+    task_id: str | None = None,
     sdk: "DualeAISDK",
 ) -> "AgentResponse[T]": ...
 
@@ -67,7 +67,7 @@ async def ask(
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
-    request_id: str | None = None,
+    task_id: str | None = None,
     sdk: "DualeAISDK",
 ) -> "AgentResponse[object]": ...
 
@@ -83,7 +83,7 @@ async def ask(
     streaming: bool = False,
     deadline: datetime | None = None,
     attachments: "list[PreparedAttachment] | None" = None,
-    request_id: str | None = None,
+    task_id: str | None = None,
     sdk: "DualeAISDK",
 ) -> "AgentResponse[T] | AgentResponse[object]":
     """Submit a root Task and return its response handle.
@@ -114,8 +114,9 @@ async def ask(
             SDK's default Task timeout.
         attachments: Prepared attachments already uploaded for the same Task id.
             This function does not upload or verify their remote state.
-        request_id: Optional client-selected root Task id. When attachments are
-            used, pass the same id used for upload. Omission generates UUID4.
+        task_id: Optional root Task id, the Task identifier that the developer or
+            the SDK selects. When attachments are used, pass the same id used for
+            upload. Omission generates UUID4.
         sdk: SDK instance that owns the Task stream.
 
     Returns:
@@ -161,5 +162,5 @@ async def ask(
         deadline=deadline,
         task_type=task_type,
         attachments=attachments,
-        request_id=request_id,
+        task_id=task_id,
     )

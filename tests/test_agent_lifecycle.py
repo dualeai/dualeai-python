@@ -848,7 +848,7 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
     )
     mock_http_transport.inject_event("task_dedup", tool_event)
 
-    response = await ask(action="Close the gate", request_id="task_dedup", sdk=sdk)
+    response = await ask(action="Close the gate", task_id="task_dedup", sdk=sdk)
 
     # First delivery: callable runs, result cached, submission fails.
     await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
@@ -911,7 +911,7 @@ async def test_concurrent_tool_executions_are_bounded(
     events.append(mock_http_transport.create_task_completed_event())
     mock_http_transport.inject_events("task_burst", events)
 
-    response = await ask(action="Run the tool burst", request_id="task_burst", sdk=sdk)
+    response = await ask(action="Run the tool burst", task_id="task_burst", sdk=sdk)
     await asyncio.wait_for(limit_reached.wait(), timeout=1)
 
     assert peak == 2  # bounded at max_jobs (RED: peak == 5 without the semaphore)
@@ -2361,7 +2361,7 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
         [tool_event, tool_event, mock_http_transport.create_task_completed_event()],
     )
 
-    response = await ask(action="Close the security gate", request_id="task_replay", sdk=sdk)
+    response = await ask(action="Close the security gate", task_id="task_replay", sdk=sdk)
     await response.model()
     await asyncio.wait_for(both_submissions_finished.wait(), timeout=1)
 
@@ -2390,7 +2390,7 @@ async def test_per_task_tool_use_is_not_auto_executed_as_registered_tool(
     response = await ask(
         action="Use the per-task lookup",
         streaming=True,
-        request_id="task_per_task",
+        task_id="task_per_task",
         sdk=sdk,
     )
     await response.model()
@@ -2453,7 +2453,7 @@ async def test_tool_results_submission_resumes_after_triggering_tool_use_event(
 
     response = await ask(
         action="Close the security gate",
-        request_id="task_replay_after_result",
+        task_id="task_replay_after_result",
         sdk=sdk,
     )
     await response.model()
@@ -2504,7 +2504,7 @@ async def test_continuation_tool_use_and_results_stay_keyed_to_public_child(
         return {"gate_id": gate_id, "state": "closed"}
 
     parent_task_id = "parent-public-task"
-    parent = await ask(action="Start", request_id=parent_task_id, sdk=sdk)
+    parent = await ask(action="Start", task_id=parent_task_id, sdk=sdk)
     mock_http_transport.inject_event(parent_task_id, mock_http_transport.create_task_completed_event())
     await parent.model()
     response = await parent.next(message="Close the gate", deadline=datetime.now(timezone.utc) + timedelta(minutes=1))

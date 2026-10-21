@@ -74,7 +74,7 @@ class TestTaskCircuitBreaker:
             mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
         elif failure == "auth":
             mock_transport.fail_next_task(HTTPTransportAuthError("denied"))
-        response = await ask(action="synthetic", request_id="local-failure", sdk=minimal_mock_sdk)
+        response = await ask(action="synthetic", task_id="local-failure", sdk=minimal_mock_sdk)
         if failure == "cancel":
             response.task.cancel()
         expected = {"connection": DualeAIConnectionError, "auth": DualeAIAuthError, "cancel": asyncio.CancelledError}
@@ -89,7 +89,7 @@ class TestTaskCircuitBreaker:
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport, caplog: pytest.LogCaptureFixture
     ) -> None:
         mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
-        response = await ask(action="synthetic", request_id="lost-stream-log", sdk=minimal_mock_sdk)
+        response = await ask(action="synthetic", task_id="lost-stream-log", sdk=minimal_mock_sdk)
         for _ in range(2):
             with pytest.raises(DualeAIConnectionError):
                 await response.model()
@@ -109,14 +109,14 @@ class TestTaskCircuitBreaker:
         for event_id in (1, 2):
             task_id = f"retryable-{event_id}"
             mock_transport.inject_event(task_id, _task_error(event_id, retryable=True, status=status))
-            response = await ask(action="retryable", request_id=task_id, sdk=minimal_mock_sdk)
+            response = await ask(action="retryable", task_id=task_id, sdk=minimal_mock_sdk)
             with pytest.raises(DualeAIError):
                 await response.model()
 
         request_count = len(mock_transport.get_requests())
         assert minimal_mock_sdk.backpressure_controller.metrics.tasks_failed == 2
         with pytest.raises(RuntimeError, match="task dependency is unavailable"):
-            await ask(action="rejected", request_id="retryable-3", sdk=minimal_mock_sdk)
+            await ask(action="rejected", task_id="retryable-3", sdk=minimal_mock_sdk)
         assert len(mock_transport.get_requests()) == request_count
 
     @pytest.mark.parametrize("status", [400, 503])
@@ -131,7 +131,7 @@ class TestTaskCircuitBreaker:
             "business-error",
             _task_error(1, retryable=False, status=status, error_code="CONTENT_FILTERED"),
         )
-        response = await ask(action="business", request_id="business-error", sdk=minimal_mock_sdk)
+        response = await ask(action="business", task_id="business-error", sdk=minimal_mock_sdk)
         with pytest.raises(DualeAIError) as exc_info:
             await response.model()
         assert exc_info.value.problem_details is not None
@@ -139,7 +139,7 @@ class TestTaskCircuitBreaker:
         assert exc_info.value.problem_details.retryable is False
 
         mock_transport.inject_event("healthy", mock_transport.create_task_completed_event())
-        healthy = await ask(action="healthy", request_id="healthy", sdk=minimal_mock_sdk)
+        healthy = await ask(action="healthy", task_id="healthy", sdk=minimal_mock_sdk)
         assert await healthy.model() == "Task completed"
         assert minimal_mock_sdk.backpressure_controller.metrics.tasks_failed == 1
         assert minimal_mock_sdk.backpressure_controller.metrics.tasks_completed == 1
@@ -171,13 +171,13 @@ class TestTaskCircuitBreaker:
                 error_category=error_category,
             ),
         )
-        response = await ask(action="terminal", request_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(action="terminal", task_id=task_id, sdk=minimal_mock_sdk)
         with pytest.raises(DualeAIError):
             await response.model()
 
         healthy_id = f"healthy-after-{task_id}"
         mock_transport.inject_event(healthy_id, mock_transport.create_task_completed_event())
-        healthy = await ask(action="healthy", request_id=healthy_id, sdk=minimal_mock_sdk)
+        healthy = await ask(action="healthy", task_id=healthy_id, sdk=minimal_mock_sdk)
         assert await healthy.model() == "Task completed"
 
     async def test_connection_failure_counts_as_dependency_failure(
@@ -187,13 +187,13 @@ class TestTaskCircuitBreaker:
     ) -> None:
         _use_threshold(minimal_mock_sdk, failures=1)
 
-        response = await ask(action="missing stream", request_id="no-events", sdk=minimal_mock_sdk)
+        response = await ask(action="missing stream", task_id="no-events", sdk=minimal_mock_sdk)
         mock_transport.signal_stop()
         with pytest.raises(DualeAIConnectionError):
             await response.model()
 
         with pytest.raises(RuntimeError, match="task dependency is unavailable"):
-            await ask(action="rejected", request_id="after-connection-error", sdk=minimal_mock_sdk)
+            await ask(action="rejected", task_id="after-connection-error", sdk=minimal_mock_sdk)
         assert len(mock_transport.get_requests_for_task("after-connection-error")) == 0
 
     async def test_non_retryable_http_problem_does_not_open(
@@ -211,13 +211,13 @@ class TestTaskCircuitBreaker:
         )
         mock_transport.fail_next_task(HTTPTransportConnectionError("HTTP 422", problem_details=problem))
 
-        response = await ask(action="invalid", request_id="invalid-http", sdk=minimal_mock_sdk)
+        response = await ask(action="invalid", task_id="invalid-http", sdk=minimal_mock_sdk)
         with pytest.raises(DualeAIConnectionError) as error:
             await response.model()
         assert error.value.problem_details is problem
 
         mock_transport.inject_event("healthy-after-http", mock_transport.create_task_completed_event())
-        healthy = await ask(action="healthy", request_id="healthy-after-http", sdk=minimal_mock_sdk)
+        healthy = await ask(action="healthy", task_id="healthy-after-http", sdk=minimal_mock_sdk)
         assert await healthy.model() == "Task completed"
 
     async def test_cancelled_admission_does_not_become_a_dependency_failure(
@@ -250,5 +250,5 @@ class TestTaskCircuitBreaker:
 
         assert controller.metrics.tasks_failed == 0
         mock_transport.inject_event("healthy-after-cancel", mock_transport.create_task_completed_event())
-        healthy = await ask(action="healthy", request_id="healthy-after-cancel", sdk=minimal_mock_sdk)
+        healthy = await ask(action="healthy", task_id="healthy-after-cancel", sdk=minimal_mock_sdk)
         assert await healthy.model() == "Task completed"

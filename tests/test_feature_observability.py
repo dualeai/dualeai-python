@@ -19,8 +19,8 @@ from opentelemetry.trace import ProxyTracerProvider
 
 from dualeai import DualeAIConfig, DualeAISDK
 from dualeai.cache import MockCacheBackend
-from dualeai.events.http_transport import HTTPTransportConnectionError
-from dualeai.exceptions import DualeAIConnectionError, DualeAIError
+from dualeai.events.http_transport import HTTPTransportAuthError, HTTPTransportConnectionError
+from dualeai.exceptions import DualeAIAuthError, DualeAIConnectionError, DualeAIError
 from dualeai.observability import SDKObservability
 from dualeai.orchestrator import ask
 from tests.helpers.lifecycle import inject_llm_completion
@@ -64,23 +64,39 @@ class TestUnitObservabilityFeature:
                 for provider in [*tracers, *meters]:
                     provider.shutdown()
 
-    async def test_stream_failure_survives_metric_views_as_a_local_outcome(
+    @pytest.mark.parametrize(
+        ("failure", "status"), [("connection", "failed"), ("auth", "failed"), ("cancel", "cancelled")]
+    )
+    async def test_a_task_without_a_terminal_stays_a_local_outcome_in_every_metric_view(
         self,
+        *,
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
         observability_config_factory,
         isolated_otel_providers: InMemoryMetricReader,
+        failure: str,
+        status: str,
     ) -> None:
         """Read the real instruments after the SDK's production attribute filter."""
         previous = minimal_mock_sdk.observability
         minimal_mock_sdk._observability = SDKObservability(observability_config_factory())
         try:
-            mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
-            lost = await ask(action="synthetic", request_id="metric-lost", sdk=minimal_mock_sdk)
-            with pytest.raises(DualeAIConnectionError):
+            if failure == "connection":
+                mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
+            elif failure == "auth":
+                mock_transport.fail_next_task(HTTPTransportAuthError("denied"))
+            lost = await ask(action="synthetic", task_id="metric-lost", sdk=minimal_mock_sdk)
+            if failure == "cancel":
+                lost.task.cancel()
+            expected = {
+                "connection": DualeAIConnectionError,
+                "auth": DualeAIAuthError,
+                "cancel": asyncio.CancelledError,
+            }
+            with pytest.raises(expected[failure]):
                 await lost.model()
             mock_transport.inject_event("metric-done", mock_transport.create_task_completed_event())
-            done = await ask(action="synthetic", request_id="metric-done", sdk=minimal_mock_sdk)
+            done = await ask(action="synthetic", task_id="metric-done", sdk=minimal_mock_sdk)
             assert await done.model() == "Task completed"
             exported = isolated_otel_providers.get_metrics_data()
             assert exported is not None
@@ -93,7 +109,7 @@ class TestUnitObservabilityFeature:
                 for point in metric.data.data_points
                 if point.attributes is not None
             }
-            assert outcomes[("task_stream", "failed")] == 1
+            assert outcomes[("task_stream", status)] == 1
             assert outcomes[("task_completion", "success")] == 1
             assert ("task_completion", "failed") not in outcomes
         finally:
@@ -278,7 +294,7 @@ class TestUnitObservabilityWiring:
         inject_llm_completion(mock_transport, task_id, completion="ok")
 
         with patch.object(minimal_mock_sdk._observability, "task_completed") as spy:
-            response = await ask(action="hello", request_id=task_id, sdk=minimal_mock_sdk)
+            response = await ask(action="hello", task_id=task_id, sdk=minimal_mock_sdk)
             await response.model()
             # Yield so the task's done callback runs.
             await asyncio.sleep(0)
@@ -296,7 +312,7 @@ class TestUnitObservabilityWiring:
         """The child runner labels a successful continuation separately from a root task."""
         parent_task_id = "parent-task-123"
         inject_llm_completion(mock_transport, parent_task_id, completion="parent")
-        parent = await ask(action="Start", request_id=parent_task_id, sdk=minimal_mock_sdk)
+        parent = await ask(action="Start", task_id=parent_task_id, sdk=minimal_mock_sdk)
         await parent.model()
 
         with patch.object(minimal_mock_sdk._observability, "task_completed") as spy:
@@ -318,7 +334,7 @@ class TestUnitObservabilityWiring:
         """The child runner labels a failed continuation separately from a root task."""
         parent_task_id = "parent-task-123"
         inject_llm_completion(mock_transport, parent_task_id, completion="parent")
-        parent = await ask(action="Start", request_id=parent_task_id, sdk=minimal_mock_sdk)
+        parent = await ask(action="Start", task_id=parent_task_id, sdk=minimal_mock_sdk)
         await parent.model()
 
         with patch.object(minimal_mock_sdk._observability, "task_failed") as spy:
@@ -344,7 +360,7 @@ class TestUnitObservabilityWiring:
         inject_llm_completion(mock_transport, task_id, completion="ok")
 
         with patch.object(minimal_mock_sdk._observability, "task_submitted") as spy:
-            response = await ask(action="hello", request_id=task_id, sdk=minimal_mock_sdk)
+            response = await ask(action="hello", task_id=task_id, sdk=minimal_mock_sdk)
             await response.model()
 
         spy.assert_called()

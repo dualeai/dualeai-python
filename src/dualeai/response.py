@@ -464,7 +464,7 @@ class AgentResponse(Generic[T]):
         streaming: bool | None = None,
         routing: RoutingPolicy | None = None,
         attachments: "list[PreparedAttachment] | None" = None,
-        request_id: str | None = None,
+        task_id: str | None = None,
     ) -> "AgentResponse[T]":
         """Start a continuation Task that carries this Task's task history forward.
 
@@ -474,7 +474,7 @@ class AgentResponse(Generic[T]):
         still running, completed, failed or stopped. A continuation that
         arrives before this Task finishes its first step waits for that step
         until its own deadline, then fails with ``PARENT_TASK_UNAVAILABLE``.
-        The new Task has its own identifier (``request_id``, or a new UUID4),
+        The new Task has its own identifier (``task_id``, or a new UUID4),
         deadline, priority, result and stop. Priority defaults to standard for
         each new Task. A setting left as None takes this Task's
         value; attachments add documents. The new Task inherits only the
@@ -520,15 +520,15 @@ class AgentResponse(Generic[T]):
             routing: Routing Policy of the continuation Task. None keeps this
                 Task's value.
             attachments: Prepared attachments already uploaded under
-                ``request_id``. None adds no document.
-            request_id: Task identifier of the continuation Task; upload its
-                attachments under it with
-                ``upload_attachments(request_id, attachments)``; None generates
+                ``task_id``. None adds no document.
+            task_id: Task identifier of the continuation Task, never this
+                Task's; upload its attachments under it with
+                ``upload_attachments(task_id, attachments)``; None generates
                 a UUID4.
 
         Returns:
-            An ``AgentResponse`` whose ``task_id`` is ``request_id``, or a new
-            UUID4.
+            An ``AgentResponse`` whose ``task_id`` is the ``task_id`` argument,
+            or a new UUID4.
 
         Raises:
             ValueError: If ``deadline`` is timezone-naive.
@@ -541,7 +541,7 @@ class AgentResponse(Generic[T]):
         or that does not exist, waits until its own deadline; ``model()`` then
         raises ``DualeAIError`` with ``PARENT_TASK_UNAVAILABLE``. A known parent
         Task that expired and whose record the Platform still holds ends the
-        continuation with ``PARENT_TASK_NOT_FOUND``. A ``request_id`` already
+        continuation with ``PARENT_TASK_NOT_FOUND``. A ``task_id`` already
         used by this Agent Identity names that existing Task: the returned
         response streams it, and no second Task starts. ``model()`` raises the
         continuation's error code with its problem details. No test in this
@@ -565,7 +565,7 @@ class AgentResponse(Generic[T]):
             local_streaming=streaming if streaming is not None else self.streaming,
             routing_policy=routing,
             attachments=attachments,
-            request_id=request_id,
+            task_id=task_id,
         )
 
     async def stop(self, reason: str) -> TaskStopAccepted:

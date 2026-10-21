@@ -111,7 +111,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get user",
             res=ComplexUser,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -136,7 +136,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get users list",
             res=ListOfModels,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -160,7 +160,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get data",
             res=OptionalFieldsModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -185,7 +185,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get data",
             res=OptionalFieldsModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -286,7 +286,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get strict data",
             res=StrictTypesModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -311,7 +311,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get data",
             res=StrictTypesModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -329,7 +329,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get user",
             res=SimpleModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -358,7 +358,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get user",
             res=SimpleModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -378,7 +378,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get user",
             res=SimpleModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -416,7 +416,7 @@ class TestUnitStructuredOutput:
         response = await ask(
             action="Get simple data",
             res=SimpleModel,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()

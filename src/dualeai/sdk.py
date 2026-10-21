@@ -1022,8 +1022,8 @@ class DualeAISDK:
         requests are active at once. The batch is not transactional.
 
         Args:
-            task_id: Client-selected task identifier that will also be supplied
-                as ``request_id`` when the Task is submitted.
+            task_id: The Task identifier that the developer or the SDK selects.
+                Submit the Task with the same ``task_id``.
             attachments: Values returned by :meth:`prepare_attachments`.
             agent_id: Agent identifier for the Library path (keyword-only).
                 Overrides the configured Agent ID for path selection; credentials
@@ -1108,7 +1108,7 @@ class DualeAISDK:
         response_format: ResponseFormat | None = None,
         streaming: bool = False,
         deadline: datetime | None = None,
-        request_id: str | None = None,
+        task_id: str | None = None,
         task_type: str = "completion",
         attachments: list[PreparedAttachment] | None = None,
     ) -> "AgentResponse[T]":
@@ -1136,13 +1136,14 @@ class DualeAISDK:
                 over ``response_schema`` derivation.
             streaming: Request content delta/reset events.
             deadline: Optional absolute deadline. Omission uses the SDK default.
-                A timezone-naive value currently fails with ``TypeError`` during
-                deadline arithmetic.
-            request_id: Optional client-selected root Task id; omission generates
-                UUID4. Use the same id previously used for attachment upload.
+                A timezone-naive value fails with ``TypeError`` during deadline
+                arithmetic.
+            task_id: Optional root Task id, the Task identifier that the developer
+                or the SDK selects; omission generates UUID4. Use the same id
+                previously used for attachment upload.
             task_type: Observability label only; it does not change routing.
             attachments: Prepared metadata for files already uploaded under
-                ``request_id``. This method does not upload or verify them.
+                ``task_id``. This method does not upload or verify them.
 
         Returns:
             A response handle whose runner may still be in flight.
@@ -1169,7 +1170,7 @@ class DualeAISDK:
                 response_format=response_format,
                 streaming=streaming,
                 deadline=deadline,
-                request_id=request_id,
+                task_id=task_id,
                 attachments=attachments,
             )
 
@@ -1186,7 +1187,7 @@ class DualeAISDK:
                 "has_routing_policy": routing_policy is not None,
                 "response_type": response_type.__name__ if response_type else None,
                 "task_type": task_type,
-                "request_id": request_id,
+                "task_id": task_id,
             },
             rejection_context=f"action_length={len(action)}",
         )
@@ -1204,11 +1205,11 @@ class DualeAISDK:
         local_streaming: bool,
         routing_policy: RoutingPolicy | None = None,
         attachments: list[PreparedAttachment] | None = None,
-        request_id: str | None = None,
+        task_id: str | None = None,
     ) -> "AgentResponse[T]":
         """Submit a continuation Task of ``parent_task_id``, running or ended.
 
-        The continuation's Task id is ``request_id``, or a new UUID4. The SDK
+        The continuation's Task id is ``task_id``, or a new UUID4. The SDK
         sends that id in the HTTP task path and ``parent_task_id`` in the
         continuation body. It always sends a ``routing_policy`` object, empty
         when the caller sets no policy fields, and the new Task's ``priority``.
@@ -1236,7 +1237,7 @@ class DualeAISDK:
                 local_streaming=local_streaming,
                 routing_policy=routing_policy,
                 attachments=attachments,
-                request_id=request_id,
+                task_id=task_id,
             ),
             task_type="continuation",
             streaming=local_streaming,
@@ -1248,16 +1249,21 @@ class DualeAISDK:
 
     def _prepare_task_submission(
         self,
+        *,
         operation_type: str,
-        task_id: str,
-        deadline: datetime | None = None,
-        streaming: bool = False,  # noqa: FBT001, FBT002
-    ) -> tuple[datetime, StructuredLogger]:
+        task_id: str | None,
+        deadline: datetime | None,
+        streaming: bool,
+    ) -> tuple[str, datetime, StructuredLogger]:
         """Common preparation logic for both submit and continue operations.
 
+        The new Task's id is the caller-selected ``task_id``, or a new UUID4
+        when the caller selects none. It is chosen here, before any HTTP work.
+
         Returns:
-            Resolved deadline and task-scoped logger.
+            Resolved Task id, resolved deadline and task-scoped logger.
         """
+        task_id = task_id or str(uuid4())
         # Calculate deadline if not provided
         if deadline is None:
             # Default timeout from platform constants
@@ -1288,7 +1294,7 @@ class DualeAISDK:
             task_id=task_id,
         )
 
-        return deadline, task_logger
+        return task_id, deadline, task_logger
 
     def _response_format_default(
         self,
@@ -1483,7 +1489,7 @@ class DualeAISDK:
         - ``task_logger`` (via ``_prepare_task_submission``, with any
           op-specific bindings already attached);
         - ``task_id`` (the *new* spawn id, never the parent: a continuation's
-          Task id is its ``request_id``, or a new UUID4).
+          Task id is its caller-selected ``task_id``, or a new UUID4).
 
         Pipeline: open ``operation_context`` → ``FlowLogger.start`` → build
         streaming buffers and the acceptance Event → spawn the protected
@@ -1543,19 +1549,19 @@ class DualeAISDK:
         local_streaming: bool,
         routing_policy: RoutingPolicy | None = None,
         attachments: list[PreparedAttachment] | None = None,
-        request_id: str | None = None,
+        task_id: str | None = None,
     ) -> "AgentResponse[T]":
         """Internal task continuation: spawn task, return AgentResponse.
 
         ``parent_task_id`` is the public parent. The continuation's Task id is
-        ``request_id``, or a new UUID4, chosen before any HTTP work and kept on
-        the returned ``AgentResponse``. The required policy object carries only
-        the fields the caller set; an omitted policy is an empty object.
+        ``task_id``, or a new UUID4, chosen by ``_prepare_task_submission`` and
+        kept on the returned ``AgentResponse``. The required policy object
+        carries only the fields the caller set; an omitted policy is an empty
+        object.
         """
-        continuation_task_id = request_id or str(uuid4())
-        deadline, task_logger = self._prepare_task_submission(
+        continuation_task_id, deadline, task_logger = self._prepare_task_submission(
             operation_type="task_continuation",
-            task_id=continuation_task_id,
+            task_id=task_id,
             deadline=deadline,
             streaming=local_streaming,
         )
@@ -1602,7 +1608,7 @@ class DualeAISDK:
         response_format: ResponseFormat | None,
         streaming: bool,
         deadline: datetime | None,
-        request_id: str | None,
+        task_id: str | None,
         attachments: list[PreparedAttachment] | None,
     ) -> "AgentResponse[T]":
         """Internal task submission: spawn task, return AgentResponse."""
@@ -1613,11 +1619,9 @@ class DualeAISDK:
             if capabilities
             else RoutingPolicy()
         )
-        task_id_preview = request_id or str(uuid4())
-
-        deadline, task_logger = self._prepare_task_submission(
+        task_id_preview, deadline, task_logger = self._prepare_task_submission(
             operation_type="task_submission",
-            task_id=task_id_preview,
+            task_id=task_id,
             deadline=deadline,
             streaming=streaming,
         )

@@ -584,10 +584,10 @@ async def test_sdk_tasks_send_a_required_policy_object(
     )
     try:
         parent = await sdk.submit_task(
-            "Synthetic action", capabilities=[], routing_policy=policy, request_id="task-policy-parent"
+            "Synthetic action", capabilities=[], routing_policy=policy, task_id="task-policy-parent"
         )
         await parent.task
-        child = await parent.next("Continue", routing=policy, request_id="task-policy-child")
+        child = await parent.next("Continue", routing=policy, task_id="task-policy-child")
         await child.task
     finally:
         await sdk.cleanup()
@@ -1598,7 +1598,7 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
         tracer = TracerProvider().get_tracer("sdk-tls-test")
         with tracer.start_as_current_span("task") as span:
             trace_id = span.get_span_context().trace_id
-            task = await sdk.submit_task("Synthetic action", capabilities=[], request_id="task-1")
+            task = await sdk.submit_task("Synthetic action", capabilities=[], task_id="task-1")
             terminal = await asyncio.wait_for(task.task, timeout=5)
         assert terminal.type == "task.completed"
         assert not stream_done.is_set()  # Live DATA was available before END/outer EOF.

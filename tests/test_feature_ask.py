@@ -9,6 +9,7 @@ Architecture:
 """
 
 import asyncio
+from uuid import UUID
 
 import pytest
 
@@ -142,6 +143,23 @@ class TestUnitAskFunction:
         # Verify all task IDs are unique client-generated UUIDs.
         task_ids = {response1.task_id, response2.task_id, response3.task_id}
         assert len(task_ids) == 3
+
+    async def test_ask_task_id_names_the_submitted_task(self, minimal_mock_sdk: DualeAISDK):
+        """A caller-selected ``task_id`` names the root Task on the response and in the HTTP task path."""
+        response = await ask(action="Summarize the report", task_id="task-root-0001", sdk=minimal_mock_sdk)
+
+        record = require_mock_http_transport(minimal_mock_sdk).get_requests()[-1]
+        assert isinstance(record["request"], BridgeTaskCreateRequest)
+        assert record["task_id"] == "task-root-0001"
+        assert response.task_id == "task-root-0001"
+
+    async def test_ask_without_task_id_names_the_task_by_a_new_uuid4(self, minimal_mock_sdk: DualeAISDK):
+        """An omitted ``task_id`` names the root Task by a UUID4 that the SDK generates before submission."""
+        response = await ask(action="Summarize the report", sdk=minimal_mock_sdk)
+
+        record = require_mock_http_transport(minimal_mock_sdk).get_requests()[-1]
+        assert UUID(response.task_id).version == 4
+        assert record["task_id"] == response.task_id
 
     async def test_ask_streaming_false_by_default(self, minimal_mock_sdk: DualeAISDK):
         """Test ask() defaults to streaming=False."""

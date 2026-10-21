@@ -233,10 +233,9 @@ class CloudEventsClient:
         transport and terminal-event path.
 
         Args:
-            task_id: Client-owned ID in the HTTP task path. The request decides
-                whether it represents a root or continuation child. Root and
-                continuation callers may select it (``request_id``); otherwise
-                the SDK generates UUID4.
+            task_id: Client-owned ID in the HTTP task path, as
+                ``HTTPTransportProtocol.run_task`` describes it. The request
+                decides whether it represents a root or continuation child.
             request: Validated create or continuation request body.
             content_callback: Sync callback invoked in arrival order on each
                 ``BridgeContentDeltaResponse`` and on each

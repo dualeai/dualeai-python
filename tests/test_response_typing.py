@@ -50,7 +50,7 @@ class TestAgentResponseTyping:
         response = await ask(
             action="Get invoice",
             res=Invoice,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         assert_type(response, AgentResponse[Invoice])
@@ -80,7 +80,7 @@ class TestAgentResponseTyping:
         response = await ask(
             action="Get nested",
             res=NestedData,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -99,7 +99,7 @@ class TestAgentResponseTyping:
         response = await ask(
             action="Get string",
             res=str,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -117,7 +117,7 @@ class TestAgentResponseTyping:
         response = await ask(
             action="Get int",
             res=int,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -152,13 +152,13 @@ class TestAgentResponseTyping:
         response_invoice = await ask(
             action="Get invoice",
             res=Invoice,
-            request_id=invoice_task_id,
+            task_id=invoice_task_id,
             sdk=minimal_mock_sdk,
         )
         response_result = await ask(
             action="Get result",
             res=Result,
-            request_id=result_task_id,
+            task_id=result_task_id,
             sdk=minimal_mock_sdk,
         )
 

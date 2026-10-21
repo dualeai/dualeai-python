@@ -82,7 +82,7 @@ async def test_an_open_stream_ends_on_the_stop_and_raises_with_its_reason(
     transport = require_mock_http_transport(minimal_mock_sdk)
     transport.inject_event(task_id, _stopped_event("Cost ceiling reached"))
 
-    response = await ask("Start something long", request_id=task_id, sdk=minimal_mock_sdk)
+    response = await ask("Start something long", task_id=task_id, sdk=minimal_mock_sdk)
 
     with pytest.raises(TaskStoppedError) as stopped:
         await response.model()
@@ -94,7 +94,7 @@ async def test_response_stop_is_the_same_call_without_the_task_id(minimal_mock_s
     """The shortcut saves the caller from repeating an identifier it already holds."""
     from dualeai import ask
 
-    response = await ask("Start something long", request_id="task-shortcut-123456", sdk=minimal_mock_sdk)
+    response = await ask("Start something long", task_id="task-shortcut-123456", sdk=minimal_mock_sdk)
 
     accepted = await response.stop(reason="Wrong document supplied")
 
@@ -110,7 +110,7 @@ async def test_response_stop_rejects_an_empty_reason(minimal_mock_sdk: DualeAISD
     """The shortcut enforces the same contract as the client method."""
     from dualeai import ask
 
-    response = await ask("Start something long", request_id="task-shortcut-654321", sdk=minimal_mock_sdk)
+    response = await ask("Start something long", task_id="task-shortcut-654321", sdk=minimal_mock_sdk)
 
     with pytest.raises(ValueError, match="Stop reason cannot be empty"):
         await response.stop(reason="")

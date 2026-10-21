@@ -242,7 +242,7 @@ class TestUnitMultiTurnConversation:
                 routing=RoutingPolicy(target_accuracy=0.9),
                 response_format=PredefinedResponseFormat.text,
                 attachments=[attachment],
-                request_id="task-child-0001",
+                task_id="task-child-0001",
             ),
             timeout=1.0,
         )
@@ -271,7 +271,7 @@ class TestUnitMultiTurnConversation:
     async def test_continuation_child_error_preserves_problem_details(self, minimal_mock_sdk: DualeAISDK) -> None:
         """A terminal error on C is raised by C's AgentResponse with its typed code."""
         transport = require_mock_http_transport(minimal_mock_sdk)
-        parent = await ask(action="Start", request_id="parent-task-123", sdk=minimal_mock_sdk)
+        parent = await ask(action="Start", task_id="parent-task-123", sdk=minimal_mock_sdk)
         await _complete_response(parent, minimal_mock_sdk)
         continued_response = await parent.next(message="Continue", deadline=DEADLINE)
         transport.inject_event(
@@ -291,7 +291,7 @@ class TestUnitMultiTurnConversation:
     ) -> None:
         """A Bridge rejection keeps its typed problem and continuation-specific prefix."""
         transport = require_mock_http_transport(minimal_mock_sdk)
-        parent = await ask(action="Start", request_id="parent-task-123", sdk=minimal_mock_sdk)
+        parent = await ask(action="Start", task_id="parent-task-123", sdk=minimal_mock_sdk)
         await _complete_response(parent, minimal_mock_sdk)
         problem = ProblemDetails(
             title="Invalid continuation",

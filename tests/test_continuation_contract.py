@@ -26,7 +26,7 @@ class Answer(BaseModel):
 
 async def _completed_parent(sdk: DualeAISDK, task_id: str = "parent-task-123") -> AgentResponse[object]:
     """Submit and complete one public parent through the real SDK path."""
-    response = await ask("Start the conversation", request_id=task_id, sdk=sdk)
+    response = await ask("Start the task", task_id=task_id, sdk=sdk)
     transport = require_mock_http_transport(sdk)
     transport.inject_event(response.task_id, transport.create_task_completed_event())
     await response.task
@@ -59,6 +59,22 @@ async def test_next_builds_child_keyed_request(minimal_mock_sdk: DualeAISDK) -> 
     assert continuation.message == "Continue with é漢🙂"
     assert continuation.deadline == DEADLINE
     assert continuation.response_format is None
+
+
+@pytest.mark.unit
+async def test_next_task_id_names_the_continuation_task(minimal_mock_sdk: DualeAISDK) -> None:
+    """A caller-selected ``task_id`` names the continuation Task; the parent keeps its own task ID."""
+    parent = await _completed_parent(minimal_mock_sdk, "parent-task-123")
+
+    child = await parent.next(message="Continue", deadline=DEADLINE, task_id="task-child-0002")
+
+    record = require_mock_http_transport(minimal_mock_sdk).get_requests()[-1]
+    continuation = record["request"]
+    assert isinstance(continuation, BridgeTaskContinueRequest)
+    assert record["task_id"] == "task-child-0002"
+    assert child.task_id == "task-child-0002"
+    assert continuation.parent_task_id == "parent-task-123"
+    assert parent.task_id == "parent-task-123"
 
 
 @pytest.mark.unit

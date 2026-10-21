@@ -90,9 +90,9 @@ class HTTPTransportProtocol(Protocol):
         SSE response starts, the retry loop uses encrypted GET on the same path.
 
         Args:
-            task_id: Client-owned task ID in the URL. Root and continuation
-                callers may select it (``request_id``); otherwise the SDK
-                generates UUID4.
+            task_id: Client-owned task ID in the URL. A caller selects it
+                with the ``task_id`` argument of ``ask``, ``submit_task`` or
+                ``AgentResponse.next``; otherwise the SDK generates UUID4.
             request: Fully validated bridge request body.
             accepted_callback: Called once when the Platform accepts the
                 request, as its authenticated event stream starts; never called
