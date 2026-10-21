@@ -113,7 +113,7 @@ def _content_filter_error_event(
 ) -> BridgeSSEEvent:
     """Build one opaque content-filter event with optional future extensions."""
     problem: dict[str, JsonValue | None] = {
-        "title": "No acceptable model response",
+        "title": "No Acceptable Model Response",
         "status": 400,
         "detail": message,
         "error_code": "CONTENT_FILTERED",

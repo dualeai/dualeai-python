@@ -319,7 +319,7 @@ class LibraryErrorCode(str, Enum):
     @property
     def display_title(self) -> Union[str, None]:
         return {
-            LibraryErrorCode.expired_upload: "Upload Session Expired",
+            LibraryErrorCode.expired_upload: "Upload Expired Before Ingestion",
             LibraryErrorCode.hash_mismatch: None,
             LibraryErrorCode.size_mismatch: None,
             LibraryErrorCode.format_unsupported: None,
@@ -328,10 +328,10 @@ class LibraryErrorCode(str, Enum):
             LibraryErrorCode.encrypted_document: None,
             LibraryErrorCode.extraction_failed: None,
             LibraryErrorCode.processing_timeout: None,
-            LibraryErrorCode.document_processing_failed: "Document processing failed",
+            LibraryErrorCode.document_processing_failed: "Document Processing Failed",
             LibraryErrorCode.malware_detected: "Malware Detected",
             LibraryErrorCode.library_deleted: "Library Deleted",
-            LibraryErrorCode.library_access_revoked: "Library access revoked",
+            LibraryErrorCode.library_access_revoked: "Library Access Revoked",
         }[self]
 
     @property
@@ -356,7 +356,11 @@ class LibraryErrorCode(str, Enum):
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
         json_schema = _EnumSchemaMetadata(
             (
-                ("EXPIRED_UPLOAD", "Upload Session Expired", "Upload session expired before ingest could promote it"),
+                (
+                    "EXPIRED_UPLOAD",
+                    "Upload Expired Before Ingestion",
+                    "Upload session expired before ingest could promote it",
+                ),
                 ("HASH_MISMATCH", None, "A new or corrected upload is required."),
                 ("SIZE_MISMATCH", None, "A new or corrected upload is required."),
                 ("FORMAT_UNSUPPORTED", None, None),
@@ -367,14 +371,14 @@ class LibraryErrorCode(str, Enum):
                 ("PROCESSING_TIMEOUT", None, None),
                 (
                     "DOCUMENT_PROCESSING_FAILED",
-                    "Document processing failed",
+                    "Document Processing Failed",
                     "The document could not be processed. Upload it again.",
                 ),
                 ("MALWARE_DETECTED", "Malware Detected", None),
                 ("LIBRARY_DELETED", "Library Deleted", "Choose an active Library."),
                 (
                     "LIBRARY_ACCESS_REVOKED",
-                    "Library access revoked",
+                    "Library Access Revoked",
                     "The identity that uploaded the document lost write access to the library.",
                 ),
             )

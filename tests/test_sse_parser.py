@@ -198,7 +198,7 @@ class TestSSEParserEdges:
     async def test_parse_sse_preserves_problem_details_extensions(self):
         payload = (
             '{"type":"task.error","timestamp":"2026-07-30T00:00:00Z",'
-            '"data":{"title":"No acceptable model response","status":400,'
+            '"data":{"title":"No Acceptable Model Response","status":400,'
             '"detail":"No selected model produced an acceptable response.",'
             '"error_code":"CONTENT_FILTERED","retryable":false,'
             '"support_reference":"case-123"}}'
