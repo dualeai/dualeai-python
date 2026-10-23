@@ -41,17 +41,16 @@ class TestObservabilityEndpoints:
 class TestConfigLoading:
     """Test configuration loading from various sources."""
 
-    def test_default_config_values(self):
-        """Test that default config values are set correctly in Field definitions."""
-        # Test the class field defaults directly (what would be used without env vars)
-        # Check Field defaults from the class definition
-        fields = DualeAIConfig.model_fields
-        assert fields["endpoint"].default == "https://api.duale.ai"
-        assert fields["debug"].default is False
-        # token's Field default is None (pydantic-settings fills it from
-        # DUALEAI_TOKEN); required-ness is enforced by validate_token_present_and_format
-        # at validation time, not by the Field declaration itself.
-        assert fields["token"].default is None
+    def test_a_token_alone_targets_the_hosted_api_origin_with_debug_off(self):
+        """An unset endpoint is the documented hosted API origin, and debug is off."""
+        config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
+        assert config.endpoint == "https://api.duale.ai"
+        assert config.debug is False
+
+    def test_a_config_without_a_token_is_refused(self):
+        """A token is required; no default stands in for it."""
+        with pytest.raises(ValueError, match="token is required"):
+            DualeAIConfig()
 
     @patch.dict(
         os.environ,
