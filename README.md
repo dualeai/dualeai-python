@@ -70,7 +70,7 @@ Before retrying a failure, use [Errors and reliability](https://duale.ai/en/docs
 
 | Setting | When to use it |
 | --- | --- |
-| `DUALEAI_ENDPOINT` | A different API environment; the default is `https://api.duale.ai` |
+| `DUALEAI_ENDPOINT` | A different API environment; the default is `https://api.beta.duale.ai` |
 | `DUALEAI_AGENT_ID` | Hosting Tools or uploading Task attachments |
 | `DUALEAI_TENANT_ID` | Managing Libraries or uploading Task attachments |
 | `DUALEAI_OBSERVABILITY__TOKEN` | Exporting telemetry, with a separate telemetry token |

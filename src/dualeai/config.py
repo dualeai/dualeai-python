@@ -118,7 +118,7 @@ class DualeAIConfig(BaseSettings):
 
     # Gateway base for the two protected service endpoints.
     endpoint: str = Field(
-        default="https://api.duale.ai",
+        default="https://api.beta.duale.ai",
         description="HTTPS Gateway base URL for protected Task, Agent, and Library metadata APIs",
     )
 

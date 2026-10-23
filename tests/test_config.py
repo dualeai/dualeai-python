@@ -44,7 +44,7 @@ class TestConfigLoading:
     def test_a_token_alone_targets_the_hosted_api_origin_with_debug_off(self):
         """An unset endpoint is the documented hosted API origin, and debug is off."""
         config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
-        assert config.endpoint == "https://api.duale.ai"
+        assert config.endpoint == "https://api.beta.duale.ai"
         assert config.debug is False
 
     def test_a_config_without_a_token_is_refused(self):
