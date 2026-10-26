@@ -258,7 +258,9 @@ class RegisteredTool(BaseModel):
     model_config = ConfigDict(extra="forbid", title="RegisteredTool", json_schema_extra=None)
     tool: Annotated[
         tool_module.Tool,
-        Field(description="Model-facing Tool Definition, including its name, purpose, and parameter contract."),
+        Field(
+            description="Model-facing Tool Definition, including its name, purpose, and parameter contract. Duale AI reserves every top-level argument name that starts with `__`: it registers a Tool that uses one with the rest of the manifest but never offers it to a model, and the Tool catalog states the reason."
+        ),
     ]
     timeout_seconds: Annotated[
         Annotated[
