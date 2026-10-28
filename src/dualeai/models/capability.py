@@ -11,7 +11,15 @@ from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 from typing_extensions import TypeAliasType
 
-__all__: list[str] = ["Capability", "CapabilityComparison", "CapabilityScore", "GeneralCapabilityComparison"]
+__all__: list[str] = [
+    "Capability",
+    "CapabilityComparison",
+    "CapabilityQualification",
+    "CapabilityScore",
+    "GeneralCapabilityComparison",
+    "GeneralCapabilityScore",
+    "TaskCapabilityScore",
+]
 
 
 @dataclass(frozen=True)
@@ -144,15 +152,65 @@ CapabilityComparison = TypeAliasType(
 )
 
 
-class CapabilityScore(BaseModel):
-    """A capability percentage derived from the saved benchmark measurements of the complete enabled model pool."""
+class CapabilityQualification(str, Enum):
+    """Whether a route has a task capability, judged from its benchmark evidence against the other enabled routes."""
 
-    model_config = ConfigDict(extra="forbid", title="CapabilityScore", json_schema_extra=None)
-    capability: Annotated[
-        CapabilityComparison,
-        Field(description="Capability described by this score; general summarizes overall capability."),
-    ]
-    value: Annotated[
+    yes = "yes"
+    undetermined = "undetermined"
+    no = "no"
+
+    @property
+    def display_title(self) -> str:
+        return {
+            CapabilityQualification.yes: "Yes",
+            CapabilityQualification.undetermined: "Undetermined",
+            CapabilityQualification.no: "No",
+        }[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            CapabilityQualification.yes: "The route's benchmark evidence places it among the stronger of the enabled routes for this capability. When the capability is required, routing prefers this route.",
+            CapabilityQualification.undetermined: "The route is measured, but its measurements cannot place it against enough of the other routes to decide. When the capability is required, routing prefers this route to one without the capability, but not to one that has it.",
+            CapabilityQualification.no: "The route's benchmark evidence places it outside the stronger of the enabled routes for this capability, or the route has no measurement for it.",
+        }[self]
+
+    @staticmethod
+    def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = _EnumSchemaMetadata(
+            (
+                (
+                    "yes",
+                    "Yes",
+                    "The route's benchmark evidence places it among the stronger of the enabled routes for this capability. When the capability is required, routing prefers this route.",
+                ),
+                (
+                    "undetermined",
+                    "Undetermined",
+                    "The route is measured, but its measurements cannot place it against enough of the other routes to decide. When the capability is required, routing prefers this route to one without the capability, but not to one that has it.",
+                ),
+                (
+                    "no",
+                    "No",
+                    "The route's benchmark evidence places it outside the stronger of the enabled routes for this capability, or the route has no measurement for it.",
+                ),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
+        json_schema.update(
+            {
+                "title": "CapabilityQualification",
+                "description": "Whether a route has a task capability, judged from its benchmark evidence against the other enabled routes.",
+            }
+        )
+        return json_schema
+
+
+class GeneralCapabilityScore(BaseModel):
+    """A route's general strength compared with the complete enabled model pool."""
+
+    model_config = ConfigDict(extra="forbid", title="GeneralCapabilityScore", json_schema_extra=None)
+    capability: Annotated[GeneralCapabilityComparison, Field(description="General summarizes overall capability.")]
+    strength: Annotated[
         Union[
             Annotated[
                 StrictFloat, Field(ge=-9007199254740991, le=9007199254740991, allow_inf_nan=False), Field(ge=0, le=100)
@@ -160,6 +218,45 @@ class CapabilityScore(BaseModel):
             None,
         ],
         Field(
-            description="Capability score as a percentage. Null means usable benchmark evidence is absent; zero is a known score. Scores depend on the configured pool and are neither task-success probabilities nor routing-selection probabilities."
+            description="Strength for this capability compared with the other enabled routes measured for it: 100 for the strongest, 0 for the weakest, and 50 for every route when all of them tie. Null when the route has no measurement for the capability or when fewer than two enabled routes are measured. A strength depends on the configured pool and is neither a task-success probability nor a routing-selection probability."
         ),
     ]
+    qualification: Annotated[
+        None, Field(description="Null because general is a comparison scope that a request cannot require.")
+    ]
+
+
+class TaskCapabilityScore(BaseModel):
+    """A route's strength and qualification for a task capability compared with the complete enabled model pool."""
+
+    model_config = ConfigDict(extra="forbid", title="TaskCapabilityScore", json_schema_extra=None)
+    capability: Annotated[Capability, Field(description="Task capability described by this score.")]
+    strength: Annotated[
+        Union[
+            Annotated[
+                StrictFloat, Field(ge=-9007199254740991, le=9007199254740991, allow_inf_nan=False), Field(ge=0, le=100)
+            ],
+            None,
+        ],
+        Field(
+            description="Strength for this capability compared with the other enabled routes measured for it: 100 for the strongest, 0 for the weakest, and 50 for every route when all of them tie. Null when the route has no measurement for the capability or when fewer than two enabled routes are measured. A strength depends on the configured pool and is neither a task-success probability nor a routing-selection probability."
+        ),
+    ]
+    qualification: Annotated[
+        CapabilityQualification,
+        Field(
+            description="Whether the route has this capability compared with the other enabled routes. A request that only some routes can take, such as one with images, is judged against those routes."
+        ),
+    ]
+
+
+CapabilityScore = TypeAliasType(
+    "CapabilityScore",
+    Annotated[
+        Union["GeneralCapabilityScore", "TaskCapabilityScore"],
+        Field(
+            title="CapabilityScore",
+            description="A route's strength and qualification for one capability, from the saved benchmark measurements of the complete enabled model pool.",
+        ),
+    ],
+)

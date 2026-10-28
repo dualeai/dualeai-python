@@ -106,7 +106,7 @@ class RoutingPolicy(BaseModel):
         Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Work capacities the task requires of whoever executes it. Routing prefers routes with evidence for every listed capability and falls back to the best available route when the full request cannot be satisfied.",
+            description="Work capacities the task requires of whoever executes it. A route has a capability when its benchmark evidence places it among the stronger of the enabled routes that can take the request. Routing prefers routes that have every listed capability and falls back to the closest available route when no route whose context window fits the request has all of them.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
@@ -114,7 +114,7 @@ class RoutingPolicy(BaseModel):
         Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Work capacities that improve route preference but do not exclude other available routes.",
+            description="Work capacities that would help. The stronger a route is for one, compared with the other routes that can take the request, the more it is preferred; no route is excluded.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
