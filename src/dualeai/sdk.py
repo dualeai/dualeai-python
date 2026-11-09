@@ -63,7 +63,7 @@ from dualeai.constants import TimingDefaults
 from dualeai.decorators import tool as _tool_decorator
 from dualeai.events.client import CloudEventsClient
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
-from dualeai.exceptions import DualeAIConnectionError
+from dualeai.exceptions import DualeAIConnectionError, DualeAIError
 from dualeai.libraries import LibrariesClient
 from dualeai.lifecycle import LifecycleManager
 from dualeai.logging_config import (
@@ -150,6 +150,12 @@ class ScheduledToolUse:
 
     expires_at: datetime
     result: BridgeToolResultSuccess | BridgeToolResultError | None = None
+    resubmission: asyncio.Task[None] | None = None
+    """The resubmission of ``result``; it is in flight until this Task is done."""
+    redelivered: bool = False
+    """A delivery arrived during the current resubmission attempt."""
+    redelivery_event_id: str | None = None
+    """Cursor of the latest delivery that the resubmission in flight answers."""
 
 
 @lru_cache(maxsize=128)
@@ -583,13 +589,30 @@ class DualeAISDK:
         scheduled = self._scheduled_tool_uses.get(dedup_key)
         if scheduled is not None:
             if scheduled.result is not None:
+                if scheduled.resubmission is not None and not scheduled.resubmission.done():
+                    # ONE RESUBMISSION AT A TIME. Every submission reads the Task's stream to its terminal, so it
+                    # replays each later tool.use it passes; a resubmission per delivery would start one more stream
+                    # per replay, and those streams replay again. The resubmission in flight answers this delivery,
+                    # and submits once more if it fails. Its Task is done in the step that ends its last attempt,
+                    # before its done callbacks run, so a delivery after a final failure starts the next one.
+                    scheduled.redelivered = True
+                    scheduled.redelivery_event_id = last_event_id
+                    logger.info(
+                        "Leaving tool-use redelivery to the resubmission in flight",
+                        task_id=task_id,
+                        tool_call_id=tool_use.tool_call_id,
+                        tool_name=tool_use.name,
+                    )
+                    return
                 logger.info(
                     "Resubmitting cached tool-use result",
                     task_id=task_id,
                     tool_call_id=tool_use.tool_call_id,
                     tool_name=tool_use.name,
                 )
-                self._schedule_tool_result_submission(task_id, scheduled.result, last_event_id=last_event_id)
+                self._schedule_tool_result_submission(
+                    task_id, scheduled.result, scheduled=scheduled, last_event_id=last_event_id
+                )
                 return
             logger.info(
                 "Ignoring duplicate tool-use delivery",
@@ -625,19 +648,24 @@ class DualeAISDK:
         task_id: str,
         result: BridgeToolResultSuccess | BridgeToolResultError,
         *,
+        scheduled: ScheduledToolUse,
         last_event_id: str | None = None,
     ) -> None:
         """Schedule a cached tool result submission without re-running customer code."""
         task = asyncio.create_task(
-            self._submit_single_tool_result(
+            self._resubmit_tool_result(
                 task_id,
                 result,
+                scheduled=scheduled,
                 last_event_id=last_event_id,
             )
         )
+        scheduled.resubmission = task
         self._tool_result_tasks.add(task)
 
         def _on_done(done_task: asyncio.Task[None]) -> None:
+            if scheduled.resubmission is done_task:
+                scheduled.resubmission = None
             self._tool_result_tasks.discard(done_task)
             with contextlib.suppress(asyncio.CancelledError):
                 exc = done_task.exception()
@@ -645,6 +673,33 @@ class DualeAISDK:
                     logger.warning("Tool-result submission task failed", task_id=task_id, error=str(exc))
 
         task.add_done_callback(_on_done)
+
+    async def _resubmit_tool_result(
+        self,
+        task_id: str,
+        result: BridgeToolResultSuccess | BridgeToolResultError,
+        *,
+        scheduled: ScheduledToolUse,
+        last_event_id: str | None,
+    ) -> None:
+        """Resubmit a cached result; a failed attempt resubmits again when the tool.use was redelivered during it."""
+        cursor = last_event_id
+        while True:
+            scheduled.redelivered = False
+            try:
+                await self._submit_single_tool_result(task_id, result, last_event_id=cursor)
+            except DualeAIError as error:
+                if not scheduled.redelivered:
+                    raise
+                logger.warning(
+                    "Tool-result resubmission failed; resubmitting for the redelivery it answers",
+                    task_id=task_id,
+                    tool_call_id=result.tool_call_id,
+                    error=str(error),
+                )
+                cursor = scheduled.redelivery_event_id
+            else:
+                return
 
     def _prune_scheduled_tool_uses(self, now: datetime) -> None:
         """Drop completed tool-use ids after their replay margin expires."""

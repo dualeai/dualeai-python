@@ -2366,6 +2366,152 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("resubmission_fails", "expected_submissions"),
+    [(False, 2), (True, 3)],
+    ids=["resubmission-succeeds", "resubmission-fails"],
+)
+async def test_redeliveries_during_a_resubmission_start_no_submission_of_their_own(
+    config_factory,
+    mock_http_transport: MockHTTPTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    resubmission_fails: bool,
+    expected_submissions: int,
+) -> None:
+    """Redeliveries that arrive while a cached result is resubmitted are answered by that resubmission.
+
+    Every submission reads the Task's stream to its terminal and can replay later tool.use events, so one
+    resubmission per redelivery would multiply with each replay. One more resubmission answers the absorbed
+    redeliveries only when the resubmission in flight fails.
+    """
+    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
+    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
+    executions = 0
+    cursors: list[str | None] = []
+    first_submission_finished = asyncio.Event()
+    resubmission_started = asyncio.Event()
+    release_resubmission = asyncio.Event()
+
+    async def answer_submission(
+        request: BridgeToolResultsRequest,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[BridgeSSEEvent]:
+        cursors.append(last_event_id)
+        number = len(cursors)
+        try:
+            if number == 2:
+                resubmission_started.set()
+                await release_resubmission.wait()
+                if resubmission_fails:
+                    raise DualeAIConnectionError("resubmission failed")
+            yield mock_http_transport.create_task_completed_event()
+        finally:
+            if number == 1:
+                first_submission_finished.set()
+
+    monkeypatch.setattr(mock_http_transport, "submit_tool_results", answer_submission)
+
+    @tool(sdk=sdk, description="Close a named security gate.", timeout=timedelta(seconds=10))
+    async def close_security_gate(gate_id: str) -> dict[str, str]:
+        nonlocal executions
+        executions += 1
+        return {"gate_id": gate_id, "state": "closed"}
+
+    tool_event = mock_http_transport.create_tool_use_event(
+        tool_call_id="call_coalesced",
+        name="close_security_gate",
+        tool_input={"gate_id": "north"},
+    )
+    mock_http_transport.inject_event("task_coalesced", tool_event)
+    response = await ask(instruction="Close the security gate", task_id="task_coalesced", sdk=sdk)
+    await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
+
+    mock_http_transport.inject_event("task_coalesced", tool_event)
+    await asyncio.wait_for(resubmission_started.wait(), timeout=1)
+    mock_http_transport.inject_events(
+        "task_coalesced",
+        [tool_event, tool_event, tool_event, mock_http_transport.create_task_completed_event()],
+    )
+    await response.model()
+    release_resubmission.set()
+    while sdk._tool_result_tasks:
+        await asyncio.wait_for(asyncio.gather(*sdk._tool_result_tasks, return_exceptions=True), timeout=1)
+
+    assert cursors == [tool_event.id] * expected_submissions
+    assert executions == 1
+
+
+@pytest.mark.unit
+async def test_a_redelivery_after_the_resubmission_in_flight_gave_up_starts_the_next_one(
+    config_factory,
+    mock_http_transport: MockHTTPTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redelivery that runs once a failed resubmission has given up is not absorbed by it.
+
+    Several streams deliver the same tool.use, and the event loop can run another stream's delivery after the
+    resubmission's last attempt failed but before that resubmission's callbacks run. Nothing would answer that
+    delivery if the finished resubmission still counted as in flight.
+    """
+    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
+    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
+    executions = 0
+    cursors: list[str | None] = []
+    first_submission_finished = asyncio.Event()
+    resubmission_started = asyncio.Event()
+    release_resubmission = asyncio.Event()
+    tool_event = mock_http_transport.create_tool_use_event(
+        tool_call_id="call_given_up",
+        name="close_security_gate",
+        tool_input={"gate_id": "north"},
+    )
+    tool_use = tool_event.data
+    assert isinstance(tool_use, BridgeToolUseResponse)
+
+    async def answer_submission(
+        request: BridgeToolResultsRequest,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[BridgeSSEEvent]:
+        cursors.append(last_event_id)
+        number = len(cursors)
+        try:
+            if number == 2:
+                resubmission_started.set()
+                await release_resubmission.wait()
+                # Another stream's delivery of the same tool.use is the next callback the loop runs.
+                asyncio.get_running_loop().call_soon(sdk._schedule_tool_use, request.task_id, tool_use, tool_event.id)
+                raise DualeAIConnectionError("resubmission failed")
+            yield mock_http_transport.create_task_completed_event()
+        finally:
+            if number == 1:
+                first_submission_finished.set()
+
+    monkeypatch.setattr(mock_http_transport, "submit_tool_results", answer_submission)
+
+    @tool(sdk=sdk, description="Close a named security gate.", timeout=timedelta(seconds=10))
+    async def close_security_gate(gate_id: str) -> dict[str, str]:
+        nonlocal executions
+        executions += 1
+        return {"gate_id": gate_id, "state": "closed"}
+
+    mock_http_transport.inject_event("task_given_up", tool_event)
+    response = await ask(instruction="Close the security gate", task_id="task_given_up", sdk=sdk)
+    await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
+    mock_http_transport.inject_event("task_given_up", tool_event)
+    await asyncio.wait_for(resubmission_started.wait(), timeout=1)
+    release_resubmission.set()
+    while len(cursors) < 3 and sdk._tool_result_tasks:
+        await asyncio.wait_for(asyncio.gather(*sdk._tool_result_tasks, return_exceptions=True), timeout=1)
+    mock_http_transport.inject_event("task_given_up", mock_http_transport.create_task_completed_event())
+    await response.model()
+
+    assert cursors == [tool_event.id] * 3
+    assert executions == 1
+
+
+@pytest.mark.unit
 async def test_per_task_tool_use_is_not_auto_executed_as_registered_tool(
     config_factory,
     mock_http_transport: MockHTTPTransport,
