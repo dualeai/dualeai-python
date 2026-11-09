@@ -2,7 +2,7 @@
 
 One convenience function, ``ask``, forwards to ``DualeAISDK.submit_task`` and
 derives the observability ``task_type`` from the requested capabilities.
-The helper's result-type default is unproved.
+Without ``res``, its overloads type the response as ``AgentResponse[object]``.
 """
 
 from datetime import datetime
@@ -23,7 +23,7 @@ T = TypeVar("T")
 
 @overload
 async def ask(
-    action: str,
+    instruction: str,
     capabilities: list[Capability] | None,
     res: type[T],
     response_format: ResponseFormat | None = None,
@@ -40,7 +40,7 @@ async def ask(
 
 @overload
 async def ask(
-    action: str,
+    instruction: str,
     capabilities: list[Capability] | None = None,
     *,
     res: type[T],
@@ -57,7 +57,7 @@ async def ask(
 
 @overload
 async def ask(
-    action: str,
+    instruction: str,
     capabilities: list[Capability] | None = None,
     res: None = None,
     response_format: ResponseFormat | None = None,
@@ -73,7 +73,7 @@ async def ask(
 
 
 async def ask(
-    action: str,
+    instruction: str,
     capabilities: list[Capability] | None = None,
     res: type[T] | None = None,
     response_format: ResponseFormat | None = None,
@@ -94,7 +94,7 @@ async def ask(
     ``response.model()`` to translate terminal errors and validate the result.
 
     Args:
-        action: Non-empty instruction for the Task.
+        instruction: Instruction for the Task: non-empty, at most 100,000 characters, without NUL characters.
         capabilities: Optional routing capabilities. When ``routing`` is absent they become
             ``required_capabilities``; they also select an observability ``task_type``.
         res: Optional Python/Pydantic type for local result validation. When no
@@ -123,7 +123,10 @@ async def ask(
         ``AgentResponse`` for the root Task.
 
     Raises:
-        ValueError: If ``action`` is empty or whitespace.
+        pydantic.ValidationError: If ``instruction`` is empty, is longer than
+            100,000 characters, or contains a NUL character, or if ``task_id``
+            is not a Task identifier that
+            ``dualeai.BridgeTaskCreateRequest.task_id`` accepts.
         TypeError: If a supplied root ``deadline`` is timezone-naive.
         RuntimeError: If the process-local Task dependency circuit is open.
 
@@ -152,7 +155,7 @@ async def ask(
             task_type = "reasoning"
 
     return await sdk.submit_task(
-        action=action,
+        instruction=instruction,
         capabilities=capabilities or [],
         routing_policy=routing,
         priority=priority,

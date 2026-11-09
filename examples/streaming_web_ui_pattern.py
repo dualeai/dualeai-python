@@ -98,7 +98,7 @@ async def stream_with_ui_state_management() -> None:
     try:
         async with create_sdk() as sdk:
             response = await ask(
-                action="Write a creative story about AI and humans working together.",
+                instruction="Write a creative story about AI and humans working together.",
                 streaming=True,
                 sdk=sdk,
             )

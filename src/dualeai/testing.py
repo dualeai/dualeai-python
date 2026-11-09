@@ -249,12 +249,12 @@ class MockSDK(DualeAISDK):
         self._libraries = MockLibrariesClient(tenant_id="tenant-test")
         self._mock_responses: dict[str, TestOutput] = {}
 
-    def set_mock_response(self, action: str, response: TestOutput) -> None:
-        """Set a mock response for a specific action."""
-        self._mock_responses[action] = response
+    def set_mock_response(self, instruction: str, response: TestOutput) -> None:
+        """Set a mock response for a specific instruction."""
+        self._mock_responses[instruction] = response
 
-    async def mock_ask(self, action: str) -> TestOutput:
-        """Return the response registered for ``action``, or a stable fallback."""
-        if action in self._mock_responses:
-            return self._mock_responses[action]
-        return f"Mock response for: {action}"
+    async def mock_ask(self, instruction: str) -> TestOutput:
+        """Return the response registered for ``instruction``, or a stable fallback."""
+        if instruction in self._mock_responses:
+            return self._mock_responses[instruction]
+        return f"Mock response for: {instruction}"

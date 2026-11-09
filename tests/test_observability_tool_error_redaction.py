@@ -95,11 +95,11 @@ class TestCustomerToolExceptionNotExported:
             input={},
             deadline_at=datetime.now(timezone.utc) + timedelta(seconds=5),
         )
-        mock_http_transport.inject_event("task-rc3", mock_http_transport.create_task_completed_event())
+        mock_http_transport.inject_event("task-rc3-0001", mock_http_transport.create_task_completed_event())
 
         try:
             # _execute_tool_use swallows the exception into a BridgeToolResultError.
-            await sdk._execute_tool_use("task-rc3", tool_use)
+            await sdk._execute_tool_use("task-rc3-0001", tool_use)
 
             span = _one_span(span_exporter, "dualeai.sdk.execute_tool leaky_tool")
             _assert_exception_body_not_exported(span, secret)

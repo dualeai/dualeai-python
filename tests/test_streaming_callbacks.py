@@ -170,7 +170,7 @@ class TestStreamingCallbackWiring:
         )
 
         response = await ask(
-            action="say hi",
+            instruction="say hi",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -196,7 +196,7 @@ class TestStreamingCallbackWiring:
         )
 
         response = await ask(
-            action="say hi",
+            instruction="say hi",
             streaming=False,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -224,7 +224,7 @@ class TestStreamingCallbackWiring:
         mock_transport.inject_events(task_id, [*injected, _completed_event(5, completion="ab")])
 
         response = await ask(
-            action="order a stream",
+            instruction="order a stream",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -250,7 +250,7 @@ class TestStreamingCallbackWiring:
         )
 
         response = await ask(
-            action="hi",
+            instruction="hi",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -289,7 +289,7 @@ class TestStreamingCallbackWiring:
         )
 
         response = await ask(
-            action="search",
+            instruction="search",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -310,7 +310,7 @@ class TestTaskCancellation:
         # No terminal event injected — bridge iteration suspends.
 
         response = await ask(
-            action="hi",
+            instruction="hi",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -329,7 +329,7 @@ class TestTaskCancellation:
         task_id = "test-cancel-002"
         mock_transport.inject_events(task_id, [_completed_event(1, completion="ok")])
 
-        response = await ask(action="hi", task_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="hi", task_id=task_id, sdk=minimal_mock_sdk)
         await response.model()
 
         response.task.cancel()
@@ -382,7 +382,7 @@ class TestErrorCodeDispatch:
             [_error_event(1, error_code, detail, status=status)],
         )
 
-        response = await ask(action="hi", task_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="hi", task_id=task_id, sdk=minimal_mock_sdk)
         with pytest.raises(DualeAIError) as exc_info:
             await response.model()
         assert exc_info.value.problem_details is not None
@@ -407,7 +407,7 @@ class TestErrorCodeDispatch:
             ],
         )
 
-        response = await ask(action="hi", task_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="hi", task_id=task_id, sdk=minimal_mock_sdk)
         with pytest.raises(DualeAIError) as exc_info:
             await response.model()
 
@@ -427,7 +427,7 @@ class TestBoundaryConditions:
         mock_transport.inject_events(task_id, [_completed_event(1, completion="instant")])
 
         response = await ask(
-            action="hi",
+            instruction="hi",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -453,7 +453,7 @@ class TestBoundaryConditions:
         )
 
         response = await ask(
-            action="hi",
+            instruction="hi",
             streaming=True,
             task_id=task_id,
             sdk=minimal_mock_sdk,

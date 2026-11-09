@@ -26,13 +26,13 @@ async def main() -> None:
     """Submit one root Task and continue it with structured output."""
     async with create_sdk() as sdk:
         response = await ask(
-            action="Write a three-sentence story about a friendly robot.",
+            instruction="Write a three-sentence story about a friendly robot.",
             sdk=sdk,
         )
         print(f"First result: {await response.model()}")
 
         continued = await response.next(
-            message="Add a princess, then return a title and exactly three sentences.",
+            instruction="Add a princess, then return a title and exactly three sentences.",
             res=BookChapter,
         )
         chapter = await continued.model()

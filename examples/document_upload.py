@@ -93,7 +93,7 @@ async def main() -> None:
         print("\nAsking agent to summarize the document...")  # noqa: T201
         prompt = "Summarize the attached document and list its main sections."
         response = await ask(
-            action=prompt,
+            instruction=prompt,
             routing=RoutingPolicy(
                 cost_sensitivity=1.0,
                 target_accuracy=0.3,

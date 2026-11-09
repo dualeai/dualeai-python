@@ -822,7 +822,6 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submissions(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
@@ -830,7 +829,7 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
         nonlocal submit_attempts
         submit_attempts += 1
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             if submit_attempts == 1:
@@ -848,7 +847,7 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
     )
     mock_http_transport.inject_event("task_dedup", tool_event)
 
-    response = await ask(action="Close the gate", task_id="task_dedup", sdk=sdk)
+    response = await ask(instruction="Close the gate", task_id="task_dedup", sdk=sdk)
 
     # First delivery: callable runs, result cached, submission fails.
     await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
@@ -911,7 +910,7 @@ async def test_concurrent_tool_executions_are_bounded(
     events.append(mock_http_transport.create_task_completed_event())
     mock_http_transport.inject_events("task_burst", events)
 
-    response = await ask(action="Run the tool burst", task_id="task_burst", sdk=sdk)
+    response = await ask(instruction="Run the tool burst", task_id="task_burst", sdk=sdk)
     await asyncio.wait_for(limit_reached.wait(), timeout=1)
 
     assert peak == 2  # bounded at max_jobs (RED: peak == 5 without the semaphore)
@@ -1532,10 +1531,10 @@ async def test_submit_tool_results_passes_generated_request_to_transport(
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
-    mock_http_transport.inject_event("task_123", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_123456", mock_http_transport.create_task_completed_event())
 
     terminal = await sdk.submit_tool_results(
-        "task_123",
+        "task_123456",
         [
             BridgeToolResultSuccess(
                 type="success",
@@ -1546,10 +1545,9 @@ async def test_submit_tool_results_passes_generated_request_to_transport(
     )
 
     assert isinstance(terminal, BridgeTaskCompletedResponse)
-    record = mock_http_transport.get_requests_for_task("task_123")[0]
-    request = record["request"]
+    request = mock_http_transport.get_requests_for_task("task_123456")[0]["request"]
     assert isinstance(request, BridgeToolResultsRequest)
-    assert record["task_id"] == "task_123"
+    assert request.task_id == "task_123456"
     assert request.type == "tool_results"
     assert request.tool_results[0].tool_call_id == "call_123"
 
@@ -1598,11 +1596,11 @@ async def test_tool_use_executes_registered_tool_and_posts_success_result(
         tool_input={"gate_id": "north", "reason": "drill"},
     ).data
     assert isinstance(tool_use, BridgeToolUseResponse)
-    mock_http_transport.inject_event("task_456", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_456789", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_456", tool_use)
+    await sdk._execute_tool_use("task_456789", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_456")
+    result = _submitted_tool_result(mock_http_transport, "task_456789")
     assert result.type == "success"
     assert isinstance(result, BridgeToolResultSuccess)
     assert result.tool_call_id == "call_456"
@@ -1809,11 +1807,11 @@ async def test_tool_input_rejects_int_bool_confusion_through_optional(
         input={"active": 1},  # int for Optional[bool] must be rejected, not coerced to True
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
-    mock_http_transport.inject_event("task_opt", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_opt_0001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_opt", tool_use)
+    await sdk._execute_tool_use("task_opt_0001", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_opt")
+    result = _submitted_tool_result(mock_http_transport, "task_opt_0001")
     assert result.type == "error"
     assert isinstance(result, BridgeToolResultError)
     assert "'active'" in result.message
@@ -1925,13 +1923,13 @@ async def test_tool_can_read_its_call_context(
         input={},
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
-    mock_http_transport.inject_event("task_ctx", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_ctx_0001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_ctx", tool_use)
+    await sdk._execute_tool_use("task_ctx_0001", tool_use)
 
     assert seen["tool_call_id"] == "call-ctx"
     assert seen["attempt"] == 1
-    assert seen["task_id"] == "task_ctx"
+    assert seen["task_id"] == "task_ctx_0001"
     assert seen["remaining_positive"] is True
     # Context does not leak outside the call.
     assert current_tool_context() is None
@@ -2102,11 +2100,11 @@ async def test_tool_exceeding_timeout_yields_error_and_cancels_callable(
         # Far-future deadline so the 0.05s tool timeout (not the deadline) fires.
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
-    mock_http_transport.inject_event("task_slow", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_slow_001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_slow", tool_use)
+    await sdk._execute_tool_use("task_slow_001", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_slow")
+    result = _submitted_tool_result(mock_http_transport, "task_slow_001")
     assert isinstance(result, BridgeToolResultError)
     assert cancelled["seen"] is True  # wait_for cancelled the callable at its await
 
@@ -2165,11 +2163,11 @@ async def test_sync_tool_executes_via_thread_offload(
         input={"gate_id": "north"},
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
-    mock_http_transport.inject_event("task_sync", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_sync_001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_sync", tool_use)
+    await sdk._execute_tool_use("task_sync_001", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_sync")
+    result = _submitted_tool_result(mock_http_transport, "task_sync_001")
     assert result.type == "success"
     assert isinstance(result, BridgeToolResultSuccess)
     assert result.output == {"gate_id": "north", "state": "closed"}
@@ -2324,7 +2322,6 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submission(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
@@ -2332,7 +2329,7 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
         nonlocal submit_attempts
         submit_attempts += 1
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             if submit_attempts == 2:
@@ -2360,7 +2357,7 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
         [tool_event, tool_event, mock_http_transport.create_task_completed_event()],
     )
 
-    response = await ask(action="Close the security gate", task_id="task_replay", sdk=sdk)
+    response = await ask(instruction="Close the security gate", task_id="task_replay", sdk=sdk)
     await response.model()
     await asyncio.wait_for(both_submissions_finished.wait(), timeout=1)
 
@@ -2387,7 +2384,7 @@ async def test_per_task_tool_use_is_not_auto_executed_as_registered_tool(
     mock_http_transport.inject_event("task_per_task", mock_http_transport.create_task_completed_event())
 
     response = await ask(
-        action="Use the per-task lookup",
+        instruction="Use the per-task lookup",
         streaming=True,
         task_id="task_per_task",
         sdk=sdk,
@@ -2411,13 +2408,12 @@ async def test_tool_results_submission_resumes_after_triggering_tool_use_event(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submission(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             submission_finished.set()
@@ -2451,7 +2447,7 @@ async def test_tool_results_submission_resumes_after_triggering_tool_use_event(
     )
 
     response = await ask(
-        action="Close the security gate",
+        instruction="Close the security gate",
         task_id="task_replay_after_result",
         sdk=sdk,
     )
@@ -2481,13 +2477,12 @@ async def test_continuation_tool_use_and_results_stay_keyed_to_public_child(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submission(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             submission_finished.set()
@@ -2503,10 +2498,12 @@ async def test_continuation_tool_use_and_results_stay_keyed_to_public_child(
         return {"gate_id": gate_id, "state": "closed"}
 
     parent_task_id = "parent-public-task"
-    parent = await ask(action="Start", task_id=parent_task_id, sdk=sdk)
+    parent = await ask(instruction="Start", task_id=parent_task_id, sdk=sdk)
     mock_http_transport.inject_event(parent_task_id, mock_http_transport.create_task_completed_event())
     await parent.model()
-    response = await parent.next(message="Close the gate", deadline=datetime.now(timezone.utc) + timedelta(minutes=1))
+    response = await parent.next(
+        instruction="Close the gate", deadline=datetime.now(timezone.utc) + timedelta(minutes=1)
+    )
     child_task_id = response.task_id
     tool_event = mock_http_transport.create_tool_use_event(
         tool_call_id="call_continuation_child",

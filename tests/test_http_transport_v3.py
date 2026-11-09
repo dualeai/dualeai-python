@@ -503,11 +503,12 @@ async def test_agent_lifecycle_rejects_wrong_accepted_status_and_malformed_repli
         await transport.send_agent_heartbeat(heartbeat)
 
 
-def _task_request() -> BridgeTaskCreateRequest:
+def _task_request(task_id: str = "task-synthetic-0001") -> BridgeTaskCreateRequest:
     return BridgeTaskCreateRequest(
         type="create",
+        task_id=task_id,
         routing_policy=RoutingPolicy(),
-        action_prompt="Synthetic action",
+        instruction="Synthetic action",
         deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
     )
 
@@ -567,20 +568,168 @@ class _StreamContext:
 
 
 class _StreamSession(_FiniteSession):
-    def __init__(self, results: list[_StreamReply | BaseException]) -> None:
+    """Answers every call, finite or streamed, from one script in call order."""
+
+    def __init__(self, results: list[HPKEResponse | _StreamReply | BaseException]) -> None:
         super().__init__([])
         self.results = results
 
+    async def request(self, method, url, *, headers=None, params=None, json=None):
+        self.calls.append(_Call(method, url, dict(headers or {}), dict(params) if params else None, json))
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        assert isinstance(result, HPKEResponse), "a finite request reads a finite reply"
+        return result
+
     def stream(self, method, url, *, headers=None, json=None, timeout=None):
         self.calls.append(_Call(method, url, dict(headers or {}), None, json))
-        return _StreamContext(self.results.pop(0))
+        result = self.results.pop(0)
+        assert not isinstance(result, HPKEResponse), "a stream reads a streamed reply"
+        return _StreamContext(result)
 
 
-async def _with_stream_session(results: list[_StreamReply | BaseException]) -> tuple[HTTPTransport, _StreamSession]:
+async def _with_stream_session(
+    results: list[HPKEResponse | _StreamReply | BaseException],
+) -> tuple[HTTPTransport, _StreamSession]:
     transport = HTTPTransport("https://api.example.test", _TOKEN)
     session = _StreamSession(results)
     await _as_connected(transport, bridge=session, library=_FiniteSession([]))
     return transport, session
+
+
+def _accepted() -> HPKEResponse:
+    """The Platform's answer to an accepted submission: 202 with no body."""
+    return _response(202)
+
+
+def _routes(session: _FiniteSession) -> list[tuple[str, str]]:
+    return [(call.method, urlsplit(call.url).path) for call in session.calls]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["create", "continue"])
+async def test_a_task_is_submitted_to_the_tasks_route_then_read_by_its_identifier(kind: str) -> None:
+    """The submission carries the Task identifier in its body; the stream is read with GET on that identifier."""
+    request = (
+        _task_request("task-route-0001")
+        if kind == "create"
+        else BridgeTaskContinueRequest(
+            type="continue",
+            task_id="task-route-0001",
+            routing_policy=RoutingPolicy(),
+            parent_task_id="parent-task-123",
+            instruction="Continue",
+            deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
+        )
+    )
+    transport, session = await _with_stream_session([_accepted(), _StreamReply([_completed_block()])])
+
+    assert [event.data.type async for event in transport.run_task(request)] == ["task.completed"]
+
+    assert _routes(session) == [("POST", "/v1/hpke/tasks"), ("GET", "/v1/hpke/tasks/task-route-0001")]
+    submit, read = session.calls
+    assert isinstance(submit.body, dict)
+    assert (submit.body["type"], submit.body["task_id"]) == (kind, "task-route-0001")
+    assert read.body is None
+    assert "Last-Event-ID" not in submit.headers
+    assert "Last-Event-ID" not in read.headers, "a new Task's stream is read from its first event"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("answer", "calls_at_acceptance"),
+    [
+        ("read_streams", [1]),
+        ("read_resumes", [1]),
+        ("submission_repeated", [2]),
+        ("read_refused", [1]),
+        ("submission_refused", []),
+    ],
+)
+async def test_acceptance_is_reported_by_the_202_before_the_stream_is_read(
+    monkeypatch, answer: str, calls_at_acceptance: list[int]
+) -> None:
+    """The 202 reports acceptance once, before the GET opens, even when reading is then refused.
+
+    A failed or refused submission never reports it, and neither does a reconnecting read.
+    """
+    monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
+    problem = {"title": "Forbidden", "status": 403, "detail": "synthetic", "error_code": "DENIED", "retryable": False}
+    scripts: dict[str, list[HPKEResponse | _StreamReply | BaseException]] = {
+        "read_streams": [_accepted(), _StreamReply([_completed_block()])],
+        "read_resumes": [
+            _accepted(),
+            _StreamReply([_delta_block("2:1", "first"), TransportError("network_error", "cut")]),
+            _StreamReply([_completed_block("2:2")]),
+        ],
+        "submission_repeated": [
+            TransportError("network_error", "no answer"),
+            _accepted(),
+            _StreamReply([_completed_block()]),
+        ],
+        "read_refused": [_accepted(), _StreamReply([json.dumps(problem).encode()], status=403, mode="finite")],
+        "submission_refused": [_response(403, problem)],
+    }
+    transport, session = await _with_stream_session(scripts[answer])
+    seen: list[int] = []
+    stream = transport.run_task(
+        _task_request("task-accept-0001"), accepted_callback=lambda: seen.append(len(session.calls))
+    )
+
+    if answer.endswith("_refused"):
+        with pytest.raises(HTTPTransportAuthError):
+            _ = [event async for event in stream]
+    else:
+        assert [event.data.type async for event in stream][-1] == "task.completed"
+    # The session records each call as it is made, so the count at acceptance is the POST that got the 202.
+    assert seen == calls_at_acceptance
+
+
+@pytest.mark.unit
+async def test_tool_results_are_submitted_then_read_after_the_triggering_event() -> None:
+    """Tool Results go to the tasks route; the Task's stream resumes after the cursor of the triggering tool.use."""
+    results = BridgeToolResultsRequest(
+        type="tool_results",
+        task_id="task-tool-0001",
+        tool_results=[BridgeToolResultSuccess(type="success", tool_call_id="call-123456789", output={"ok": True})],
+    )
+    transport, session = await _with_stream_session([_accepted(), _StreamReply([_completed_block("42:4")])])
+
+    events = [event.id async for event in transport.submit_tool_results(results, last_event_id="42:3")]
+
+    assert events == ["42:4"]
+    assert _routes(session) == [("POST", "/v1/hpke/tasks"), ("GET", "/v1/hpke/tasks/task-tool-0001")]
+    submit, read = session.calls
+    assert submit.body == {
+        "type": "tool_results",
+        "task_id": "task-tool-0001",
+        "tool_results": [{"type": "success", "tool_call_id": "call-123456789", "output": {"ok": True}}],
+    }
+    assert "Last-Event-ID" not in submit.headers
+    assert (read.body, read.headers["Last-Event-ID"]) == (None, "42:3")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "answer",
+    [pytest.param(_response(200), id="200"), pytest.param(_response(202, {"task_id": "x"}), id="202-with-body")],
+)
+async def test_a_submission_is_accepted_only_by_an_empty_202(answer: HPKEResponse) -> None:
+    """Any other success answer to the submission is a protocol error: nothing is read and nothing is accepted."""
+    transport, session = await _with_stream_session([answer])
+    accepted: list[str] = []
+
+    with pytest.raises(HTTPTransportConnectionError):
+        _ = [
+            event
+            async for event in transport.run_task(
+                _task_request("task-answer-0001"), accepted_callback=lambda: accepted.append("accepted")
+            )
+        ]
+
+    assert _routes(session) == [("POST", "/v1/hpke/tasks")]
+    assert accepted == []
 
 
 @pytest.mark.unit
@@ -600,7 +749,7 @@ async def test_sdk_tasks_send_a_required_policy_object(
 ) -> None:
     """Creation and continuation send an object, retaining only the policy fields set by the caller."""
     transport, session = await _with_stream_session(
-        [_StreamReply([_completed_block()]), _StreamReply([_completed_block()])]
+        [_accepted(), _StreamReply([_completed_block()]), _accepted(), _StreamReply([_completed_block()])]
     )
     sdk = DualeAISDK(
         config=DualeAIConfig(endpoint="https://api.example.test", token=_TOKEN, tenant_id=_TENANT),
@@ -617,7 +766,7 @@ async def test_sdk_tasks_send_a_required_policy_object(
     finally:
         await sdk.cleanup()
 
-    create_call, continue_call = session.calls
+    create_call, _, continue_call, _ = session.calls
     for call in (create_call, continue_call):
         assert isinstance(call.body, dict)
         assert call.body["routing_policy"] == wire_policy
@@ -627,19 +776,20 @@ async def test_sdk_tasks_send_a_required_policy_object(
 async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> None:
     request = BridgeTaskCreateRequest(
         type="create",
-        action_prompt="do it",
+        task_id="task-wire-fields",
+        instruction="do it",
         deadline=datetime(2026, 12, 31, tzinfo=timezone.utc),
         routing_policy=RoutingPolicy(target_accuracy=0.9, required_capabilities=[Capability.long_context]),
         response_format=JsonSchemaResponseFormat(json_schema={"type": "object"}),
         response_stream=True,
         attachments=[Attachment(key="attachment-key", filename="report.pdf", description="Quarterly report")],
     )
-    transport, session = await _with_stream_session([_StreamReply([_completed_block()])])
+    transport, session = await _with_stream_session([_accepted(), _StreamReply([_completed_block()])])
 
-    assert [event.data.type async for event in transport.run_task("task-wire-fields", request)] == ["task.completed"]
+    assert [event.data.type async for event in transport.run_task(request)] == ["task.completed"]
 
-    [call] = session.calls
-    assert (call.method, urlsplit(call.url).path) == ("POST", "/v1/hpke/tasks/task-wire-fields")
+    call = session.calls[0]
+    assert (call.method, urlsplit(call.url).path) == ("POST", "/v1/hpke/tasks")
     body = call.body
     assert isinstance(body, dict)
     assert body["response_stream"] is True
@@ -651,48 +801,30 @@ async def test_task_create_fields_reach_the_hpke_session_with_wire_aliases() -> 
 
 
 @pytest.mark.unit
-async def test_continuation_and_tool_results_send_literal_child_bodies_and_cursor() -> None:
+async def test_a_continuation_submits_its_literal_child_body() -> None:
+    """The continuation body reaches the session as sent: its Task, its parent, and its non-ASCII instruction."""
     continuation = BridgeTaskContinueRequest(
         type="continue",
+        task_id="child-task",
         routing_policy=RoutingPolicy(),
         parent_task_id="parent-task-123",
-        message="Continue with é漢🙂",
+        instruction="Continue with é漢🙂",
         response_format=PredefinedResponseFormat.json,
         deadline=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
     )
-    results = BridgeToolResultsRequest(
-        type="tool_results",
-        tool_results=[
-            BridgeToolResultSuccess(type="success", tool_call_id="call-123456789", output={"state": "closed"})
-        ],
-    )
-    transport, session = await _with_stream_session(
-        [_StreamReply([_completed_block()]), _StreamReply([_completed_block()])]
-    )
+    transport, session = await _with_stream_session([_accepted(), _StreamReply([_completed_block()])])
 
-    assert [event.data.type async for event in transport.run_task("child-task", continuation)] == ["task.completed"]
-    assert [
-        event.data.type async for event in transport.submit_tool_results("child-task", results, last_event_id="42:3")
-    ] == ["task.completed"]
+    assert [event.data.type async for event in transport.run_task(continuation)] == ["task.completed"]
 
-    assert [(call.method, urlsplit(call.url).path) for call in session.calls] == [
-        ("POST", "/v1/hpke/tasks/child-task"),
-        ("POST", "/v1/hpke/tasks/child-task"),
-    ]
     assert session.calls[0].body == {
         "type": "continue",
+        "task_id": "child-task",
         "routing_policy": {},
         "parent_task_id": "parent-task-123",
-        "message": "Continue with é漢🙂",
+        "instruction": "Continue with é漢🙂",
         "response_format": "json",
         "deadline": "2026-08-03T12:00:00Z",
     }
-    assert "Last-Event-ID" not in session.calls[0].headers
-    assert session.calls[1].body == {
-        "type": "tool_results",
-        "tool_results": [{"type": "success", "tool_call_id": "call-123456789", "output": {"state": "closed"}}],
-    }
-    assert session.calls[1].headers["Last-Event-ID"] == "42:3"
 
 
 @pytest.mark.unit
@@ -705,19 +837,18 @@ async def test_task_rejected_finite_reply_keeps_problem_and_does_not_retry(monke
         "error_code": "INVALID_CONTINUATION",
         "retryable": False,
     }
-    transport, session = await _with_stream_session(
-        [_StreamReply([json.dumps(problem).encode()], status=422, mode="finite")]
-    )
+    transport, session = await _with_stream_session([_response(422, problem)])
     continuation = BridgeTaskContinueRequest(
         type="continue",
+        task_id="child-task",
         routing_policy=RoutingPolicy(),
         parent_task_id="parent-task-123",
-        message="Continue",
+        instruction="Continue",
         deadline=datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
     )
 
     with pytest.raises(HTTPTransportResponseError) as raised:
-        _ = [event async for event in transport.run_task("child-task", continuation)]
+        _ = [event async for event in transport.run_task(continuation)]
 
     assert len(session.calls) == 1
     assert raised.value.problem_details is not None
@@ -727,16 +858,15 @@ async def test_task_rejected_finite_reply_keeps_problem_and_does_not_retry(monke
 
 @pytest.mark.unit
 async def test_active_trace_context_reaches_protected_logical_request() -> None:
-    transport, session = await _with_stream_session([_StreamReply([_completed_block()])])
+    transport, session = await _with_stream_session([_accepted(), _StreamReply([_completed_block()])])
     tracer = TracerProvider().get_tracer("sdk-transport-test")
 
     with tracer.start_as_current_span("task") as span:
-        assert [event.data.type async for event in transport.run_task("task-1", _task_request())] == ["task.completed"]
+        assert [event.data.type async for event in transport.run_task(_task_request())] == ["task.completed"]
         context = span.get_span_context()
 
-    assert session.calls[0].headers["traceparent"] == (
-        f"00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}"
-    )
+    traceparent = f"00-{context.trace_id:032x}-{context.span_id:016x}-{context.trace_flags:02x}"
+    assert [call.headers["traceparent"] for call in session.calls] == [traceparent, traceparent]
 
 
 @pytest.mark.unit
@@ -744,44 +874,51 @@ async def test_task_resumes_after_nonterminal_event_and_closes_each_stream(monke
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     first = _StreamReply([_delta_block("5:1", "first"), TransportError("network_error", "synthetic disconnect")])
     second = _StreamReply([_completed_block("5:2")])
-    transport, session = await _with_stream_session([first, second])
+    transport, session = await _with_stream_session([_accepted(), first, second])
     client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
     await client.connect()
     delivered: list[StreamingContentEvent] = []
     try:
         result = await client.run_task(
-            task_id="task-1",
-            request=_task_request(),
+            request=_task_request("task-resume-01"),
             content_callback=delivered.append,
         )
     finally:
         await client.disconnect()
     assert result.type == "task.completed"
     assert delivered == [BridgeContentDeltaResponse(type="content.delta", delta="first", generation=1, sequence=0)]
-    assert [call.method for call in session.calls] == ["POST", "GET"]
-    assert all(urlsplit(call.url).path == "/v1/hpke/tasks/task-1" for call in session.calls)
-    assert session.calls[1].headers["Last-Event-ID"] == "5:1"
-    assert "Authorization" not in session.calls[0].headers
-    assert session.calls[0].headers["Accept"] == "text/event-stream"
+    assert _routes(session) == [
+        ("POST", "/v1/hpke/tasks"),
+        ("GET", "/v1/hpke/tasks/task-resume-01"),
+        ("GET", "/v1/hpke/tasks/task-resume-01"),
+    ]
+    assert session.calls[2].headers["Last-Event-ID"] == "5:1"
+    assert all("Authorization" not in call.headers for call in session.calls)
+    assert all(call.headers["Accept"] == "text/event-stream" for call in session.calls if call.method == "GET")
     assert first.closed and second.closed
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("discovery_error", ["discovery_network", "discovery_expired"])
-async def test_task_replays_pre_start_post_but_never_retries_tampering(monkeypatch, discovery_error: str) -> None:
+async def test_task_repeats_an_unanswered_submission_but_never_retries_tampering(
+    monkeypatch, discovery_error: str
+) -> None:
+    """A submission that got no answer is sent again with the same body; a tampered answer is never retried."""
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     transport, session = await _with_stream_session(
         [
             TransportError(discovery_error, "synthetic pre-start discovery failure"),
+            _accepted(),
             _StreamReply([_completed_block()]),
         ]
     )
-    assert len([event async for event in transport.run_task("task-1", _task_request())]) == 1
-    assert [call.method for call in session.calls] == ["POST", "POST"]
+    assert len([event async for event in transport.run_task(_task_request())]) == 1
+    assert [call.method for call in session.calls] == ["POST", "POST", "GET"]
+    assert session.calls[0].body == session.calls[1].body
 
     transport, session = await _with_stream_session([ProtocolError("authentication_failed", "synthetic bad tag")])
     with pytest.raises(HTTPTransportStreamError) as raised:
-        _ = [event async for event in transport.run_task("task-1", _task_request())]
+        _ = [event async for event in transport.run_task(_task_request())]
     assert isinstance(raised.value.__cause__, ProtocolError)
     assert len(session.calls) == 1
 
@@ -791,99 +928,44 @@ async def test_task_recovers_from_missing_end_with_the_last_delivered_cursor(mon
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     first = _StreamReply([_delta_block("10:1", "first"), ProtocolError("malformed_envelope", "missing END")])
     second = _StreamReply([_completed_block("10:2")])
-    transport, session = await _with_stream_session([first, second])
-    events = [event async for event in transport.run_task("task-1", _task_request())]
+    transport, session = await _with_stream_session([_accepted(), first, second])
+    events = [event async for event in transport.run_task(_task_request())]
     assert [event.id for event in events] == ["10:1", "10:2"]
-    assert [call.method for call in session.calls] == ["POST", "GET"]
-    assert session.calls[1].headers["Last-Event-ID"] == "10:1"
+    assert [call.method for call in session.calls] == ["POST", "GET", "GET"]
+    assert session.calls[2].headers["Last-Event-ID"] == "10:1"
 
 
 @pytest.mark.unit
 async def test_public_terminal_consumer_closes_live_iterator() -> None:
     reply = _StreamReply([_completed_block(), AssertionError("read past terminal")])
-    transport, session = await _with_stream_session([reply])
+    transport, session = await _with_stream_session([_accepted(), reply])
     client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
     await client.connect()
     try:
-        result = await client.run_task(task_id="task-terminal-0001", request=_task_request())
+        result = await client.run_task(request=_task_request("task-terminal-0001"))
 
         assert result.type == "task.completed"
         assert reply.closed is True
-        assert len(session.calls) == 1
+        assert len(session.calls) == 2
     finally:
         await client.disconnect()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("answer", ["sse_200", "finite_403"])
-async def test_run_task_reports_acceptance_when_the_stream_starts(answer: str) -> None:
-    """Acceptance precedes the first event, including when an accepted stream stays quiet."""
-    reader_started = asyncio.Event()
-    release_first_block = asyncio.Event()
-
-    class HeldReply(_StreamReply):
-        async def iter_sse(self) -> AsyncIterator[bytes]:
-            reader_started.set()
-            await release_first_block.wait()
-            async for block in super().iter_sse():
-                yield block
-
-    if answer == "sse_200":
-        reply = HeldReply([_completed_block()])
-    else:
-        problem = {
-            "title": "Forbidden",
-            "status": 403,
-            "detail": "synthetic",
-            "error_code": "AUTHORIZATION_FAILED",
-            "retryable": False,
-        }
-        reply = _StreamReply([json.dumps(problem).encode()], status=403, mode="finite")
-    transport, _ = await _with_stream_session([reply])
-    calls: list[str] = []
-    stream = transport.run_task(
-        "task-accept-0001",
-        _task_request(),
-        accepted_callback=lambda: calls.append("accepted"),
-    )
-
-    if answer == "sse_200":
-        first_event = asyncio.create_task(anext(stream))
-        try:
-            await asyncio.wait_for(reader_started.wait(), timeout=2.0)
-            assert calls == ["accepted"], "Accepted headers must release the caller before the first event"
-            assert not first_event.done()
-
-            release_first_block.set()
-            first = await asyncio.wait_for(first_event, timeout=2.0)
-            assert first.data.type == "task.completed"
-            assert [event async for event in stream] == []
-            assert calls == ["accepted"]
-        finally:
-            first_event.cancel()
-            await asyncio.gather(first_event, return_exceptions=True)
-            await stream.aclose()
-    else:
-        with pytest.raises(HTTPTransportAuthError):
-            _ = [event async for event in stream]
-        assert calls == []
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("submit_results", [False, True])
 async def test_closing_task_iterator_closes_protected_stream(submit_results: bool) -> None:
     reply = _StreamReply([_completed_block()])
-    transport, _ = await _with_stream_session([reply])
+    transport, _ = await _with_stream_session([_accepted(), reply])
     stream = (
         transport.submit_tool_results(
-            "task-1",
             BridgeToolResultsRequest(
                 type="tool_results",
+                task_id="task-synthetic-0001",
                 tool_results=[BridgeToolResultSuccess(type="success", tool_call_id="call_1", output="done")],
             ),
         )
         if submit_results
-        else transport.run_task("task-1", _task_request())
+        else transport.run_task(_task_request())
     )
 
     assert (await anext(stream)).data.type == "task.completed"
@@ -901,21 +983,19 @@ async def test_task_retries_actual_http_5xx(monkeypatch, source: str, status: in
     """The 5xx rule uses the received status, even without a problem body."""
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     rejected = (
-        _StreamReply([b"unstructured error"], status=status, mode="finite")
+        HPKEResponse(status=status, headers=[], body=b"unstructured error", url=URL(_BASE), method="POST")
         if source == "logical"
         else TransportError(source, "synthetic rejection", status_code=status)
     )
-    transport, session = await _with_stream_session([rejected, _StreamReply([_completed_block()])])
+    transport, session = await _with_stream_session([rejected, _accepted(), _StreamReply([_completed_block()])])
     try:
         if retry:
-            assert [event.data.type async for event in transport.run_task("task-status", _task_request())] == [
-                "task.completed"
-            ]
+            assert [event.data.type async for event in transport.run_task(_task_request())] == ["task.completed"]
         else:
             with pytest.raises(HTTPTransportError):
-                _ = [event async for event in transport.run_task("task-status", _task_request())]
-        assert [call.method for call in session.calls] == (["POST", "POST"] if retry else ["POST"])
-        assert all(call.body == session.calls[0].body for call in session.calls)
+                _ = [event async for event in transport.run_task(_task_request())]
+        assert [call.method for call in session.calls] == (["POST", "POST", "GET"] if retry else ["POST"])
+        assert all(call.body == session.calls[0].body for call in session.calls if call.method == "POST")
     finally:
         await transport.disconnect()
 
@@ -947,6 +1027,7 @@ async def test_task_retry_flag_and_http_status_are_independent(monkeypatch, stat
     rejected = _StreamReply([json.dumps(problem).encode()], status=status, mode="finite")
     transport, session = await _with_stream_session(
         [
+            _accepted(),
             _StreamReply([_delta_block("7:1", "first"), TransportError("network_error", "cut")]),
             rejected,
             _StreamReply([_completed_block("7:2")]),
@@ -956,16 +1037,18 @@ async def test_task_retry_flag_and_http_status_are_independent(monkeypatch, stat
     await client.connect()
     try:
         if retry:
-            assert (await client.run_task(task_id="task-flag", request=_task_request())).type == "task.completed"
+            assert (await client.run_task(request=_task_request())).type == "task.completed"
         else:
             with pytest.raises(BusinessError) as error:
-                await client.run_task(task_id="task-flag", request=_task_request())
+                await client.run_task(request=_task_request())
             assert error.value.problem_details is not None
             assert error.value.problem_details.status == body_status
             assert error.value.context.metadata is not None
             assert error.value.context.metadata["http_status"] == status
-        assert [call.method for call in session.calls] == (["POST", "GET", "GET"] if retry else ["POST", "GET"])
-        assert all(call.body is None and call.headers["Last-Event-ID"] == "7:1" for call in session.calls[1:])
+        assert [call.method for call in session.calls] == (
+            ["POST", "GET", "GET", "GET"] if retry else ["POST", "GET", "GET"]
+        )
+        assert all(call.body is None and call.headers["Last-Event-ID"] == "7:1" for call in session.calls[2:])
         assert _tokens_of(transport).refusals == 0
     finally:
         await client.disconnect()
@@ -990,17 +1073,15 @@ async def test_task_classifies_network_wrappers_by_cause(monkeypatch, cause: Exc
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     failure = TransportError("network_error", "wrapped")
     failure.__cause__ = cause
-    transport, session = await _with_stream_session([failure, _StreamReply([_completed_block()])])
+    transport, session = await _with_stream_session([failure, _accepted(), _StreamReply([_completed_block()])])
     try:
         if retry:
-            assert [event.data.type async for event in transport.run_task("task-types", _task_request())] == [
-                "task.completed"
-            ]
+            assert [event.data.type async for event in transport.run_task(_task_request())] == ["task.completed"]
         else:
             with pytest.raises(HTTPTransportStreamError) as error:
-                _ = [event async for event in transport.run_task("task-types", _task_request())]
+                _ = [event async for event in transport.run_task(_task_request())]
             assert error.value.__cause__ is failure
-        assert len(session.calls) == (2 if retry else 1)
+        assert [call.method for call in session.calls] == (["POST", "POST", "GET"] if retry else ["POST"])
     finally:
         await transport.disconnect()
 
@@ -1011,22 +1092,22 @@ async def test_task_asyncio_timeout_recovers_or_reports_final_context(monkeypatc
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     first = _StreamReply([_delta_block("11:1", "first"), asyncio.TimeoutError()])
     tail = [_StreamReply([_completed_block("11:2")])] if succeeds else [asyncio.TimeoutError() for _ in range(4)]
-    transport, session = await _with_stream_session([first, *tail])
+    transport, session = await _with_stream_session([_accepted(), first, *tail])
     client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
     await client.connect()
     try:
         if succeeds:
-            assert (await client.run_task(task_id="task-timeout", request=_task_request())).type == "task.completed"
+            assert (await client.run_task(request=_task_request("task-timeout"))).type == "task.completed"
         else:
             with pytest.raises(DualeAIConnectionError) as error:
-                await client.run_task(task_id="task-timeout", request=_task_request())
+                await client.run_task(request=_task_request("task-timeout"))
             assert error.value.context.operation == "task_run"
             assert error.value.context.task_id == "task-timeout"
             assert error.value.context.retry_attempt == 4
             assert error.value.context.metadata is not None
             assert error.value.context.metadata["last_event_id"] == "11:1"
             assert error.value.context.metadata["logical_method"] == "GET"
-        assert [call.method for call in session.calls] == ["POST", *(["GET"] * (1 if succeeds else 4))]
+        assert [call.method for call in session.calls] == ["POST", "GET", *(["GET"] * (1 if succeeds else 4))]
     finally:
         await client.disconnect()
 
@@ -1036,13 +1117,13 @@ async def test_task_asyncio_timeout_recovers_or_reports_final_context(monkeypatc
 async def test_task_checked_eof_resumes_without_repeating_post(monkeypatch, has_delta: bool) -> None:
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     first = _StreamReply([_delta_block("4:1", "first")] if has_delta else [])
-    transport, session = await _with_stream_session([first, _StreamReply([_completed_block("4:2")])])
+    transport, session = await _with_stream_session([_accepted(), first, _StreamReply([_completed_block("4:2")])])
     try:
-        events = [event async for event in transport.run_task("task-eof", _task_request())]
+        events = [event async for event in transport.run_task(_task_request())]
         assert [event.data.type for event in events] == (["content.delta"] if has_delta else []) + ["task.completed"]
-        assert [call.method for call in session.calls] == ["POST", "GET"]
-        assert session.calls[1].body is None
-        assert session.calls[1].headers.get("Last-Event-ID") == ("4:1" if has_delta else None)
+        assert [call.method for call in session.calls] == ["POST", "GET", "GET"]
+        assert session.calls[2].body is None
+        assert session.calls[2].headers.get("Last-Event-ID") == ("4:1" if has_delta else None)
         assert first.closed
     finally:
         await transport.disconnect()
@@ -1053,35 +1134,34 @@ async def test_task_checked_eof_resumes_without_repeating_post(monkeypatch, has_
 async def test_task_error_context_identifies_the_operation(operation: str) -> None:
     """An HTTP 403 on a Task call raises ``DualeAIAuthError`` whose context names the operation and the Task."""
     problem = {"title": "Denied", "status": 403, "detail": "synthetic", "error_code": "DENIED", "retryable": False}
-    transport, session = await _with_stream_session(
-        [_StreamReply([json.dumps(problem).encode()], status=403, mode="finite")]
-    )
+    transport, session = await _with_stream_session([_response(403, problem)])
     client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
     await client.connect()
     try:
         with pytest.raises(DualeAIAuthError) as raised:
             if operation == "tool_results":
                 await client.submit_tool_results(
-                    task_id="task-context",
                     request=BridgeToolResultsRequest(
                         type="tool_results",
+                        task_id="task-context",
                         tool_results=[BridgeToolResultSuccess(type="success", tool_call_id="call-1", output="done")],
                     ),
                     last_event_id="1:2",
                 )
             else:
                 request = (
-                    _task_request()
+                    _task_request("task-context")
                     if operation == "task_run"
                     else BridgeTaskContinueRequest(
                         type="continue",
+                        task_id="task-context",
                         routing_policy=RoutingPolicy(),
                         parent_task_id="parent-task-123",
-                        message="continue",
+                        instruction="continue",
                         deadline=_task_request().deadline,
                     )
                 )
-                await client.run_task(task_id="task-context", request=request)
+                await client.run_task(request=request)
         context = raised.value.context
         assert context.operation == operation
         assert context.task_id == "task-context"
@@ -1100,26 +1180,34 @@ async def test_task_error_context_identifies_the_operation(operation: str) -> No
 
 @pytest.mark.unit
 @pytest.mark.parametrize("established", [False, True])
-async def test_tool_result_retry_uses_its_own_start_not_inherited_cursor(monkeypatch, established: bool) -> None:
+async def test_tool_results_repeat_the_submission_until_its_202_then_read_from_the_triggering_cursor(
+    monkeypatch, established: bool
+) -> None:
+    """Before the 202 a failure repeats the same Tool Results; after it, every read starts at the triggering cursor."""
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     if established:
         failure = TransportError("network_error", "response body interrupted")
         failure.__cause__ = aiohttp.ClientPayloadError("response body interrupted")
-        first = _StreamReply([failure])
+        script: list[HPKEResponse | _StreamReply | BaseException] = [_accepted(), _StreamReply([failure])]
     else:
-        first = TransportError("outer_status", "unavailable", status_code=503)
-    transport, session = await _with_stream_session([first, _StreamReply([_completed_block("8:2")])])
+        script = [TransportError("outer_status", "unavailable", status_code=503), _accepted()]
+    transport, session = await _with_stream_session([*script, _StreamReply([_completed_block("8:2")])])
     results = BridgeToolResultsRequest(
         type="tool_results",
+        task_id="task-tool-0001",
         tool_results=[BridgeToolResultSuccess(type="success", tool_call_id="call-123", output={"ok": True})],
     )
     try:
-        assert [
-            event.data.type async for event in transport.submit_tool_results("task-tool", results, last_event_id="8:1")
-        ] == ["task.completed"]
-        assert [call.method for call in session.calls] == ["POST", "GET" if established else "POST"]
-        assert all(call.headers["Last-Event-ID"] == "8:1" for call in session.calls)
-        assert session.calls[1].body == (None if established else session.calls[0].body)
+        assert [event.data.type async for event in transport.submit_tool_results(results, last_event_id="8:1")] == [
+            "task.completed"
+        ]
+        assert [call.method for call in session.calls] == (
+            ["POST", "GET", "GET"] if established else ["POST", "POST", "GET"]
+        )
+        posts = [call for call in session.calls if call.method == "POST"]
+        reads = [call for call in session.calls if call.method == "GET"]
+        assert all(call.body == posts[0].body and "Last-Event-ID" not in call.headers for call in posts)
+        assert all(call.body is None and call.headers["Last-Event-ID"] == "8:1" for call in reads)
     finally:
         await transport.disconnect()
 
@@ -1133,6 +1221,7 @@ async def test_task_mixed_budget_counts_renewal_without_an_http_request(monkeypa
     final = _StreamReply([_completed_block("9:2")]) if fifth_succeeds else asyncio.TimeoutError()
     transport, session = await _with_stream_session(
         [
+            _accepted(),
             first,
             TransportError("outer_status", "unavailable", status_code=503),
             _StreamReply([json.dumps(problem).encode()], status=418, mode="finite"),
@@ -1152,13 +1241,13 @@ async def test_task_mixed_budget_counts_renewal_without_an_http_request(monkeypa
     monkeypatch.setattr(_tokens_of(transport), "get", renew)
     try:
         if fifth_succeeds:
-            assert [event.id async for event in transport.run_task("task-budget", _task_request())] == ["9:1", "9:2"]
+            assert [event.id async for event in transport.run_task(_task_request())] == ["9:1", "9:2"]
         else:
             with pytest.raises(HTTPTransportStreamError):
-                _ = [event async for event in transport.run_task("task-budget", _task_request())]
+                _ = [event async for event in transport.run_task(_task_request())]
         assert acquisitions == 5
-        assert [call.method for call in session.calls] == ["POST", "GET", "GET", "GET"]
-        assert all(call.headers["Last-Event-ID"] == "9:1" and call.body is None for call in session.calls[1:])
+        assert [call.method for call in session.calls] == ["POST", "GET", "GET", "GET", "GET"]
+        assert all(call.headers["Last-Event-ID"] == "9:1" and call.body is None for call in session.calls[2:])
         assert first.closed
     finally:
         await transport.disconnect()
@@ -1178,12 +1267,14 @@ async def test_task_exhaustion_reports_the_last_failure(monkeypatch: pytest.Monk
         for _ in range(4)
     ]
     first = _StreamReply([_delta_block("12:1", "first"), TransportError("network_error", "lost")])
-    transport, session = await _with_stream_session([first, *failures, _StreamReply([_completed_block("12:2")])])
+    transport, session = await _with_stream_session(
+        [_accepted(), first, *failures, _StreamReply([_completed_block("12:2")])]
+    )
     client = CloudEventsClient(DualeAIConfig(token=_TOKEN), transport=transport)
     await client.connect()
     try:
         with pytest.raises(DualeAIConnectionError) as raised:
-            await client.run_task(task_id="task-exhausted", request=_task_request())
+            await client.run_task(request=_task_request("task-exhausted"))
         context = raised.value.context
         assert context.operation == "task_run"
         assert context.task_id == "task-exhausted"
@@ -1196,7 +1287,7 @@ async def test_task_exhaustion_reports_the_last_failure(monkeypatch: pytest.Monk
         }
         assert raised.value.__cause__ is not None
         assert (raised.value.problem_details is not None) == (fault == "logical")
-        assert [call.method for call in session.calls] == ["POST", "GET", "GET", "GET", "GET"]
+        assert [call.method for call in session.calls] == ["POST", "GET", "GET", "GET", "GET", "GET"]
         assert first.closed
     finally:
         await client.disconnect()
@@ -1216,6 +1307,7 @@ async def test_task_renewal_classifies_its_original_cause(monkeypatch, failure: 
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     transport, session = await _with_stream_session(
         [
+            _accepted(),
             _StreamReply([_delta_block("6:1", "first"), TransportError("network_error", "lost")]),
             _StreamReply([_completed_block("6:2")]),
         ]
@@ -1232,15 +1324,15 @@ async def test_task_renewal_classifies_its_original_cause(monkeypatch, failure: 
     monkeypatch.setattr(_tokens_of(transport), "get", renew)
     try:
         if retry:
-            assert [event.id async for event in transport.run_task("task-renew", _task_request())] == ["6:1", "6:2"]
+            assert [event.id async for event in transport.run_task(_task_request())] == ["6:1", "6:2"]
         else:
             with pytest.raises(HTTPTransportConnectionError) as raised:
-                _ = [event async for event in transport.run_task("task-renew", _task_request())]
+                _ = [event async for event in transport.run_task(_task_request())]
             assert raised.value.__cause__ is failure
             assert raised.value.context is not None
             assert raised.value.context.retry_attempt == 1
         assert acquisitions == (3 if retry else 2)
-        assert [call.method for call in session.calls] == (["POST", "GET"] if retry else ["POST"])
+        assert [call.method for call in session.calls] == (["POST", "GET", "GET"] if retry else ["POST", "GET"])
     finally:
         await transport.disconnect()
 
@@ -1270,11 +1362,11 @@ async def test_task_terminal_does_not_read_or_retry_past_the_result(terminal: st
     data = json.dumps(payload)
     block = f"id: 13:1\nevent: {terminal}\ndata: {data}\n\n".encode()
     reply = _StreamReply([block, AssertionError("read past terminal")])
-    transport, session = await _with_stream_session([reply])
+    transport, session = await _with_stream_session([_accepted(), reply])
     try:
-        assert [event.data.type async for event in transport.run_task("task-terminal", _task_request())] == [terminal]
+        assert [event.data.type async for event in transport.run_task(_task_request())] == [terminal]
         assert reply.closed
-        assert len(session.calls) == 1
+        assert len(session.calls) == 2
     finally:
         await transport.disconnect()
 
@@ -1290,8 +1382,8 @@ async def test_task_cancellation_during_backoff_closes_the_stream(monkeypatch: p
     retrying = transport_module.AsyncRetrying
     monkeypatch.setattr(transport_module, "AsyncRetrying", lambda **kwargs: retrying(sleep=sleep, **kwargs))
     reply = _StreamReply([_delta_block("14:1", "first"), TransportError("network_error", "lost")])
-    transport, session = await _with_stream_session([reply])
-    stream = transport.run_task("task-cancel", _task_request())
+    transport, session = await _with_stream_session([_accepted(), reply])
+    stream = transport.run_task(_task_request())
     try:
         assert (await anext(stream)).id == "14:1"
         waiting = asyncio.create_task(anext(stream))
@@ -1300,7 +1392,7 @@ async def test_task_cancellation_during_backoff_closes_the_stream(monkeypatch: p
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiting
-        assert len(session.calls) == 1
+        assert len(session.calls) == 2
     finally:
         await stream.aclose()
         await transport.disconnect()
@@ -1342,9 +1434,11 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
     monkeypatch.setattr(transport_module, "wait_exponential_jitter", lambda **_kwargs: wait_none())
     calls: list[tuple[str, str, dict[str, str], bytes]] = []
     discoveries = 0
+    submissions = 0
+    reads = 0
 
-    async def endpoint(request: web.Request) -> web.Response:  # noqa: PLR0912 - explicit wire fault cases
-        nonlocal discoveries
+    async def endpoint(request: web.Request) -> web.Response:  # noqa: PLR0912, PLR0915 - explicit wire fault cases
+        nonlocal discoveries, submissions, reads
         if request.method == "GET":
             discoveries += 1
             if fault == "discovery_503" and discoveries == 1:
@@ -1366,28 +1460,33 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
             try:
                 head = opened.head
                 calls.append((head.method.value, head.path, {h.name: h.value for h in head.headers}, bytes(body)))
-                step = len(calls)
-                if (fault == "outer_initial" and step == 1) or (fault == "outer_resume" and step == 2):
-                    return web.Response(status=503)
-                if step == 1 and fault in {"logical_503", "logical_retryable", "finite_integrity"}:
-                    status = 418 if fault == "logical_retryable" else 503
-                    problem = json.dumps(
-                        {
-                            "title": "Busy",
-                            "status": status,
-                            "detail": "synthetic",
-                            "error_code": "BUSY",
-                            "retryable": True,
-                        }
-                    ).encode()
-                    envelope = right.protect_response(Response(status, (), problem))
+                if head.method.value == "POST":
+                    submissions += 1
+                    if fault == "outer_initial" and submissions == 1:
+                        return web.Response(status=503)
+                    status, answer = 202, b""
+                    if submissions == 1 and fault in {"logical_503", "logical_retryable"}:
+                        status = 418 if fault == "logical_retryable" else 503
+                        answer = json.dumps(
+                            {
+                                "title": "Busy",
+                                "status": status,
+                                "detail": "synthetic",
+                                "error_code": "BUSY",
+                                "retryable": True,
+                            }
+                        ).encode()
+                    envelope = right.protect_response(Response(status, (), answer))
                     if fault == "finite_integrity":
                         envelope = envelope[:-1] + bytes([envelope[-1] ^ 1])
                     return web.Response(body=envelope, content_type=RESPONSE_MEDIA_TYPE)
+                reads += 1
+                if fault == "outer_resume" and reads == 2:
+                    return web.Response(status=503)
                 sealer, start = right.into_sealer(200, (Header("content-type", "text/event-stream"),))
                 try:
                     wire = bytearray(start)
-                    if step == 1 and fault in {"outer_resume", "eof_empty", "eof_delta"}:
+                    if reads == 1 and fault in {"outer_resume", "eof_empty", "eof_delta"}:
                         if fault != "eof_empty":
                             wire.extend(sealer.seal_sse_block(_delta_block("3:1", "first")))
                     elif fault == "sse_integrity":
@@ -1395,7 +1494,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
                         wire.extend(block[:-1] + bytes([block[-1] ^ 1]))
                     else:
                         wire.extend(sealer.seal_sse_block(_completed_block("3:2")))
-                    if not (fault == "outer_resume" and step == 1):
+                    if not (fault == "outer_resume" and reads == 1):
                         wire.extend(sealer.finish())
                     return web.Response(body=bytes(wire), content_type=RESPONSE_MEDIA_TYPE)
                 finally:
@@ -1429,8 +1528,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
         if fault in {"finite_integrity", "sse_integrity"}:
             with pytest.raises(DualeAIConnectionError) as error:
                 await client.run_task(
-                    task_id="task-native",
-                    request=_task_request(),
+                    request=_task_request("task-native"),
                     content_callback=delivered.append,
                 )
             assert error.value.context.error_code == "authentication_failed"
@@ -1438,8 +1536,7 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
             assert error.value.context.retry_attempt == 0
         else:
             result = await client.run_task(
-                task_id="task-native",
-                request=_task_request(),
+                request=_task_request("task-native"),
                 content_callback=delivered.append,
             )
             assert result.type == "task.completed"
@@ -1450,19 +1547,26 @@ async def test_real_tls_task_recovery(  # noqa: PLR0915 - one local peer exercis
         server.close()
     assert not peer_errors, f"Local HPKE peer failed: {peer_errors!r}"
     expected = {
-        "outer_resume": ["POST", "GET", "GET"],
-        "eof_delta": ["POST", "GET"],
-        "eof_empty": ["POST", "GET"],
-        "discovery_503": ["POST"],
+        "outer_resume": ["POST", "GET", "GET", "GET"],
+        "eof_delta": ["POST", "GET", "GET"],
+        "eof_empty": ["POST", "GET", "GET"],
+        "discovery_503": ["POST", "GET"],
         "finite_integrity": ["POST"],
-        "sse_integrity": ["POST"],
-    }.get(fault, ["POST", "POST"])
+        "sse_integrity": ["POST", "GET"],
+    }.get(fault, ["POST", "POST", "GET"])
     assert [call[0] for call in calls] == expected
     assert discoveries == (2 if fault == "discovery_503" else 1)
-    assert all(call[1] == "/v1/hpke/tasks/task-native" for call in calls)
-    for method, _path, headers, body in calls[1:]:
-        assert body == (b"" if method == "GET" else calls[0][3])
-        assert headers.get("last-event-id") == ("3:1" if fault in {"outer_resume", "eof_delta"} else None)
+    assert all(
+        path == ("/v1/hpke/tasks" if method == "POST" else "/v1/hpke/tasks/task-native") for method, path, _, _ in calls
+    )
+    posts = [call for call in calls if call[0] == "POST"]
+    reads_seen = [call for call in calls if call[0] == "GET"]
+    assert all(body == posts[0][3] and "last-event-id" not in headers for _, _, headers, body in posts)
+    assert all(body == b"" for _, _, _, body in reads_seen)
+    cursor = "3:1" if fault in {"outer_resume", "eof_delta"} else None
+    assert [headers.get("last-event-id") for _, _, headers, _ in reads_seen] == [
+        cursor if index else None for index in range(len(reads_seen))
+    ]
     assert delivered == (
         [BridgeContentDeltaResponse(type="content.delta", delta="first", generation=1, sequence=0)]
         if fault in {"outer_resume", "eof_delta"}
@@ -1544,6 +1648,9 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
                         Response(202, (Header("content-type", "application/json"),), body)
                     )
                     return web.Response(body=envelope, content_type=RESPONSE_MEDIA_TYPE)
+                if logical.method.value == "POST":
+                    envelope = response_right.protect_response(Response(202, (), b""))
+                    return web.Response(body=envelope, content_type=RESPONSE_MEDIA_TYPE)
                 sealer, first = response_right.into_sealer(200, (Header("content-type", "text/event-stream"),))
                 response = web.StreamResponse(status=200, headers={"Content-Type": RESPONSE_MEDIA_TYPE})
                 await response.prepare(request)
@@ -1622,7 +1729,7 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
         tracer = TracerProvider().get_tracer("sdk-tls-test")
         with tracer.start_as_current_span("task") as span:
             trace_id = span.get_span_context().trace_id
-            task = await sdk.submit_task("Synthetic action", capabilities=[], task_id="task-1")
+            task = await sdk.submit_task("Synthetic action", capabilities=[], task_id="task-tls-0001")
             terminal = await asyncio.wait_for(task.task, timeout=5)
         assert terminal.type == "task.completed"
         assert not stream_done.is_set()  # Live DATA was available before END/outer EOF.
@@ -1651,17 +1758,20 @@ async def test_real_v3_tls_boundary_reuses_discovery_per_service(  # noqa: PLR09
         ("GET", "/http-bridge/v1/hpke"),
         ("POST", "/http-bridge/v1/hpke"),
         ("POST", "/http-bridge/v1/hpke"),
+        ("POST", "/http-bridge/v1/hpke"),
     ]
     assert [item[:2] for item in observed] == [
         ("GET", f"/v1/hpke/tenants/{_TENANT}"),
         ("GET", f"/v1/hpke/tenants/{_TENANT}"),
-        ("POST", "/v1/hpke/tasks/task-1"),
+        ("POST", "/v1/hpke/tasks"),
+        ("GET", "/v1/hpke/tasks/task-tls-0001"),
         ("POST", "/v1/hpke/tasks/task-stop-me-123456/stop"),
     ]
     assert all("authorization" not in headers for _, _, headers, _ in observed)
-    assert observed[2][2]["accept"] == "text/event-stream"
-    assert observed[2][2]["traceparent"].split("-")[1] == f"{trace_id:032x}"
-    assert json.loads(observed[2][3])["action_prompt"] == "Synthetic action"
+    assert observed[3][2]["accept"] == "text/event-stream"
+    assert all(observed[index][2]["traceparent"].split("-")[1] == f"{trace_id:032x}" for index in (2, 3))
+    submitted = json.loads(observed[2][3])
+    assert (submitted["task_id"], submitted["instruction"]) == ("task-tls-0001", "Synthetic action")
     assert all("authorization" not in {name.lower() for name in headers} for headers in outer_headers)
     assert all("traceparent" not in {name.lower() for name in headers} for headers in outer_headers)
 
@@ -1930,6 +2040,10 @@ async def lifetime_endpoint(  # noqa: PLR0915  # One loopback TLS owner includes
                         await pending.release.wait()
                     body = right.protect_response(Response(200, (), b'{"libraries": []}'))
                     return web.Response(body=body, content_type=RESPONSE_MEDIA_TYPE)
+                if opened.head.method.value == "POST":
+                    return web.Response(
+                        body=right.protect_response(Response(202, (), b"")), content_type=RESPONSE_MEDIA_TYPE
+                    )
                 paused = harness.streams[opened.head.path.rsplit("/", 1)[-1]]
                 sealer, first = right.into_sealer(200, (Header("content-type", "text/event-stream"),))
                 response = web.StreamResponse(headers={"Content-Type": RESPONSE_MEDIA_TYPE})
@@ -1985,9 +2099,9 @@ async def test_retired_tunnels_keep_admitted_streams_until_the_last_response_fin
     harness = lifetime_endpoint
     with freeze_time("2098-12-31T23:59:00Z", real_asyncio=True) as clock:
         first, second = _PausedResponse(), _PausedResponse()
-        harness.streams.update(first=first, second=second)
-        stream = harness.transport.run_task("first", _task_request())
-        other = harness.transport.run_task("second", _task_request())
+        harness.streams.update({"task-first-0001": first, "task-second-001": second})
+        stream = harness.transport.run_task(_task_request("task-first-0001"))
+        other = harness.transport.run_task(_task_request("task-second-001"))
         async with AsyncExitStack() as cleanup:
             cleanup.push_async_callback(stream.aclose)
             cleanup.push_async_callback(other.aclose)

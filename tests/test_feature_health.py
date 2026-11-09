@@ -3,21 +3,19 @@
 The fixture uses the real SDK with its HTTP transport boundary replaced.
 """
 
-import asyncio
 import time
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 
 from dualeai import DualeAISDK
 from dualeai.cache import MockCacheBackend
-from dualeai.models.bridge import BridgeTaskCompletedResponse
-from dualeai.models.llm_result import LLMResult
-from dualeai.response import TerminalEvent
+from dualeai.orchestrator import ask
 from dualeai.sdk import ComponentHealth
 from tests.conftest import TestTenantIDs
+from tests.mocks.mock_http import require_mock_http_transport
 
 
 def _component_bool(raw_components: dict[str, object], name: str) -> bool:
@@ -40,15 +38,6 @@ def _health_components(health: dict[str, object]) -> ComponentHealth:
         "cache": _component_bool(components_by_name, "cache"),
         "events": _component_bool(components_by_name, "events"),
     }
-
-
-async def _sleeping_terminal_event() -> TerminalEvent:
-    await asyncio.sleep(60)
-    return BridgeTaskCompletedResponse(
-        type="task.completed",
-        timestamp=datetime.now(timezone.utc),
-        result=LLMResult(completion="done", cache_hit=False),
-    )
 
 
 @pytest.mark.unit
@@ -187,44 +176,23 @@ class TestUnitHealthFeature:
         # Uptime should have increased
         assert uptime2 >= uptime1
 
-    async def test_health_inflight_tasks_count(self, minimal_mock_sdk: DualeAISDK):
-        """Test inflight_tasks reflects actual in-flight task count.
-
-        After the Future→asyncio.Task migration, in-flight tasks are
-        spawned by submit_task (real bridge iteration). This test
-        directly populates the inflight set with sentinel tasks.
-        """
-        import asyncio
-
+    async def test_health_counts_each_submitted_task_until_its_terminal(self, minimal_mock_sdk: DualeAISDK):
+        """``inflight_tasks`` counts a submitted Task from submission until its terminal event, then drops it."""
         sdk = minimal_mock_sdk
-
-        # No tasks yet
+        transport = require_mock_http_transport(sdk)
         assert sdk.get_health_status()["inflight_tasks"] == 0
 
-        # Spawn sentinel tasks and register
-        t1 = asyncio.create_task(_sleeping_terminal_event())
-        t2 = asyncio.create_task(_sleeping_terminal_event())
-        sdk._inflight_tasks["task-1"] = t1
-        sdk._inflight_tasks["task-2"] = t2
+        first = await ask(instruction="First", task_id="task-health-0001", sdk=sdk)
+        second = await ask(instruction="Second", task_id="task-health-0002", sdk=sdk)
+        assert sdk.get_health_status()["inflight_tasks"] == 2
 
-        try:
-            assert sdk.get_health_status()["inflight_tasks"] == 2
+        transport.inject_event(first.task_id, transport.create_task_completed_event())
+        await first.model()
+        assert sdk.get_health_status()["inflight_tasks"] == 1
 
-            t1.cancel()
-            try:
-                await t1
-            except asyncio.CancelledError:
-                pass
-            sdk._inflight_tasks.pop("task-1", None)
-
-            assert sdk.get_health_status()["inflight_tasks"] == 1
-        finally:
-            t2.cancel()
-            try:
-                await t2
-            except asyncio.CancelledError:
-                pass
-            sdk._inflight_tasks.clear()
+        transport.inject_event(second.task_id, transport.create_task_completed_event())
+        await second.model()
+        assert sdk.get_health_status()["inflight_tasks"] == 0
 
     def test_health_registered_tools_count(self, minimal_mock_sdk: DualeAISDK) -> None:
         """The local health snapshot counts Tools registered through the SDK."""

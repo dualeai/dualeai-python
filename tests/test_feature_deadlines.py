@@ -41,7 +41,10 @@ class TestUnitDeadlineHandling:
     ) -> None:
         """Preserve every supported deadline shape at the transport boundary."""
         await ask(
-            action="Task with deadline", capabilities=[Capability.long_context], deadline=deadline, sdk=minimal_mock_sdk
+            instruction="Task with deadline",
+            capabilities=[Capability.long_context],
+            deadline=deadline,
+            sdk=minimal_mock_sdk,
         )
 
         [record] = require_mock_http_transport(minimal_mock_sdk).get_requests()
@@ -57,14 +60,14 @@ class TestUnitDeadlineHandling:
         """Test continue_task accepts and propagates deadline parameter."""
         sdk = minimal_mock_sdk
         deadline = datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc)
-        parent = await ask(action="Start", task_id="original-task-123", sdk=sdk)
+        parent = await ask(instruction="Start", task_id="original-task-123", sdk=sdk)
         transport = require_mock_http_transport(sdk)
         transport.inject_event(parent.task_id, transport.create_task_completed_event())
         await parent.task
 
         # Continue task with deadline
         await parent.next(
-            message="Continue the task",
+            instruction="Continue the task",
             deadline=deadline,
         )
 
@@ -85,7 +88,7 @@ class TestUnitDeadlineHandling:
 
         # Submit first task
         await ask(
-            action="Task 1",
+            instruction="Task 1",
             capabilities=[],
             deadline=deadline1,
             sdk=sdk,
@@ -93,7 +96,7 @@ class TestUnitDeadlineHandling:
 
         # Submit second task with different deadline
         await ask(
-            action="Task 2",
+            instruction="Task 2",
             capabilities=[],
             deadline=deadline2,
             sdk=sdk,
@@ -112,7 +115,7 @@ class TestUnitDeadlineHandling:
         sdk = minimal_mock_sdk
 
         await ask(
-            action="Task without explicit deadline",
+            instruction="Task without explicit deadline",
             capabilities=[],
             deadline=None,
             sdk=sdk,
@@ -124,5 +127,4 @@ class TestUnitDeadlineHandling:
 
         request = requests[0]["request"]
         assert isinstance(request, BridgeTaskCreateRequest)
-        assert requests[0]["task_id"] is not None
         assert request.deadline is not None

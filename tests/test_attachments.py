@@ -199,7 +199,6 @@ class _RecordingLibraryTransport(HTTPTransportProtocol):
 
     def run_task(  # pragma: no cover - protocol stub
         self,
-        task_id: str,
         request: BridgeTaskRequest,
         *,
         accepted_callback: Callable[[], None] | None = None,

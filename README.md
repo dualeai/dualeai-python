@@ -44,7 +44,7 @@ class SupportDecision(BaseModel):
 async def main() -> None:
     async with create_sdk() as sdk:
         response = await ask(
-            action="Review this synthetic support case and return the next safe action.",
+            instruction="Review this synthetic support case and return the next safe action.",
             res=SupportDecision,
             sdk=sdk,
         )

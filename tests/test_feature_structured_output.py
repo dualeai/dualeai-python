@@ -78,7 +78,7 @@ class TestUnitStructuredOutput:
     async def test_ask_with_pydantic_model_type(self, minimal_mock_sdk: DualeAISDK) -> None:
         """Test ask() with res=PydanticModel sets expected_type."""
         response = await ask(
-            action="Extract user data",
+            instruction="Extract user data",
             res=SimpleModel,
             sdk=minimal_mock_sdk,
         )
@@ -109,7 +109,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=invalid_data)
 
         response = await ask(
-            action="Get user",
+            instruction="Get user",
             res=ComplexUser,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -134,7 +134,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=valid_data)
 
         response = await ask(
-            action="Get users list",
+            instruction="Get users list",
             res=ListOfModels,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -158,7 +158,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=minimal_data)
 
         response = await ask(
-            action="Get data",
+            instruction="Get data",
             res=OptionalFieldsModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -183,7 +183,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=full_data)
 
         response = await ask(
-            action="Get data",
+            instruction="Get data",
             res=OptionalFieldsModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -284,7 +284,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=valid_data)
 
         response = await ask(
-            action="Get strict data",
+            instruction="Get strict data",
             res=StrictTypesModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -309,7 +309,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=invalid_data)
 
         response = await ask(
-            action="Get data",
+            instruction="Get data",
             res=StrictTypesModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -327,7 +327,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=incomplete_data)
 
         response = await ask(
-            action="Get user",
+            instruction="Get user",
             res=SimpleModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -356,7 +356,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=data_with_extras)
 
         response = await ask(
-            action="Get user",
+            instruction="Get user",
             res=SimpleModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -376,7 +376,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=invalid_data)
 
         response = await ask(
-            action="Get user",
+            instruction="Get user",
             res=SimpleModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,
@@ -414,7 +414,7 @@ class TestUnitStructuredOutput:
         inject_llm_completion(mock_transport, task_id, validated_data=minimal_data)
 
         response = await ask(
-            action="Get simple data",
+            instruction="Get simple data",
             res=SimpleModel,
             task_id=task_id,
             sdk=minimal_mock_sdk,

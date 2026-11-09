@@ -73,9 +73,9 @@ _LIBRARY_ENDPOINT_PATH = "/libraries/v1/hpke"
 _OPERATION_PREFIX = "/v1/hpke"
 """Prefix for the request path inside the encrypted message.
 
-Task request:
+Task submission:
 - HTTP request sent by the SDK: POST /http-bridge/v1/hpke.
-- Request inside the encrypted message: POST /v1/hpke/tasks/{task_id}.
+- Request inside the encrypted message: POST /v1/hpke/tasks.
 
 Library list request:
 - HTTP request sent by the SDK: POST /libraries/v1/hpke.
@@ -107,22 +107,6 @@ def _library_path(tenant_id: str, *segments: str) -> str:
     return _OPERATION_PREFIX + "/" + "/".join(quote(value, safe="") for value in values)
 
 
-def _resolve_retry_method(
-    method: str,
-    json_data: Mapping[str, object] | None,
-    *,
-    stream_established: bool,
-) -> tuple[str, Mapping[str, object] | None]:
-    """Resume with GET after this operation's authenticated SSE 200 START.
-
-    An inherited Tool cursor does not establish the Tool Results POST; before
-    its own START, retry the original method and body with the same Task ID.
-    """
-    if stream_established and method == "POST":
-        return "GET", None
-    return method, json_data
-
-
 class HTTPTransportError(Exception):
     """Base error for protected API operations.
 
@@ -131,8 +115,9 @@ class HTTPTransportError(Exception):
     failure even when no ProblemDetails body exists.
 
     On final stream failure, `_stream_request` attaches `context` with the Task
-    ID, a zero-based `retry_attempt` (0 through 4), and the known HTTP status,
-    selected logical method, and last checked event ID in `metadata`. Selection
+    ID, a zero-based `retry_attempt` below `HTTPTransport._MAX_RETRIES`, and, in
+    `metadata`, the known HTTP status, the logical method (POST until the
+    submission's 202, GET after it) and the last checked event ID. The method
     does not prove that the request was sent: credential renewal can fail first.
     The client supplies `context.operation` during translation. Other operations
     can leave `context` unset.
@@ -256,6 +241,40 @@ def _retryable_stream_error(error: BaseException, *, stream_established: bool) -
     )
 
 
+def _final_stream_failure(
+    error: BaseException,
+    *,
+    task_id: str,
+    retry_attempt: int,
+    logical_method: str,
+    last_event_id: str | None,
+) -> HTTPTransportError:
+    """Return the error a Task stream raises after its last attempt, with its context attached."""
+    failure = (
+        error
+        if isinstance(error, HTTPTransportError)
+        else HTTPTransportStreamError(
+            f"Protected Task stream failed: {task_id}",
+            status_code=error.status_code if isinstance(error, TransportError) else None,
+            code=error.code if isinstance(error, (TransportError, ProtocolError, StateError)) else type(error).__name__,
+        )
+    )
+    metadata: dict[str, str | int | float | bool] = {"logical_method": logical_method}
+    if failure.status_code is not None:
+        metadata["http_status"] = failure.status_code
+    if last_event_id is not None:
+        metadata["last_event_id"] = last_event_id
+    failure.context = ErrorContext(
+        error_code=(failure.problem_details.error_code if failure.problem_details else None)
+        or failure.code
+        or type(failure).__name__,
+        task_id=task_id,
+        retry_attempt=retry_attempt,
+        metadata=metadata,
+    )
+    return failure
+
+
 def _is_refused_credential(error: BaseException) -> bool:
     """Whether this failure MIGHT be the tunnel refusing our platform token.
 
@@ -310,8 +329,9 @@ class HTTPTransport:
         self._token = token
         self._tenant_id = tenant_id
         # THE CREDENTIAL IS OBTAINED, NOT DERIVED FROM THE API TOKEN. The API
-        # token identifies this agent to the token service; the derived platform
-        # token opens every tunnel without transmitting that key during issuance.
+        # token identifies this agent when the platform token is issued. Key
+        # agreement derives that token's key on both sides, so issuance never
+        # transmits the key, and the platform token opens every tunnel.
         self._tokens: PlatformTokenProvider | None = None
         self._held: PlatformToken | None = None
         self._bridge_source: DiscoveredEndpoint | None = None
@@ -639,18 +659,11 @@ class HTTPTransport:
 
     def run_task(
         self,
-        task_id: str,
         request: BridgeTaskRequest,
         *,
         accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncGenerator[BridgeSSEEvent, None]:
-        return self._stream_request(
-            method="POST",
-            path=f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}",
-            task_id=task_id,
-            json_data=dump_wire_model(request),
-            accepted_callback=accepted_callback,
-        )
+        return self._stream_request(request, last_event_id=None, accepted_callback=accepted_callback)
 
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
         return await self._request_model(
@@ -663,18 +676,11 @@ class HTTPTransport:
 
     def submit_tool_results(
         self,
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncGenerator[BridgeSSEEvent, None]:
-        return self._stream_request(
-            method="POST",
-            path=f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}",
-            task_id=task_id,
-            json_data=dump_wire_model(request),
-            last_event_id=last_event_id,
-        )
+        return self._stream_request(request, last_event_id=last_event_id, accepted_callback=None)
 
     async def _post_bridge_accepted(
         self, path: str, request: AgentRegistrationMessage | AgentDeregistrationMessage
@@ -810,38 +816,61 @@ class HTTPTransport:
             schema_error="Document create response did not match schema",
         )
 
+    async def _submit(self, session: HPKEClientSession, body: Mapping[str, object]) -> None:
+        """POST one Task submission to the tasks route; return only when the Platform accepted it with an empty 202."""
+        path = f"{_OPERATION_PREFIX}/tasks"
+        headers: dict[str, str] = {}
+        inject_trace_context(headers)
+        response = await session.request("POST", self._url(path), headers=headers, json=body)
+        content = await response.read()
+        _check_status(response.status, content, path=path)
+        if response.status != HTTPStatus.ACCEPTED:
+            raise HTTPTransportConnectionError(
+                f"Task submission returned HTTP {response.status}: POST {path}", status_code=response.status
+            )
+        if content:
+            raise HTTPTransportConnectionError(
+                f"Task submission returned an unexpected body: POST {path}", status_code=response.status
+            )
+
     async def _stream_request(
         self,
-        method: str,
-        path: str,
+        request: BridgeTaskRequest | BridgeToolResultsRequest,
         *,
-        task_id: str,
-        json_data: Mapping[str, object],
-        last_event_id: str | None = None,
-        accepted_callback: Callable[[], None] | None = None,
+        last_event_id: str | None,
+        accepted_callback: Callable[[], None] | None,
     ) -> AsyncGenerator[BridgeSSEEvent, None]:
-        """Run or resume the Task stream with the service's stable-ID contract.
+        """Submit one request, then read its Task's stream until a terminal.
 
-        Each invocation shares five total attempts across recoverable failures,
-        including credential renewal failures before a Task request is sent.
+        The submission is a POST of ``request`` to the tasks route; the
+        Platform accepts it with an empty 202. The stream is a GET on the Task
+        the body names, with ``last_event_id`` as its first cursor: none for a
+        new Task, whose stream is read from its first event, and the triggering
+        ``tool.use`` cursor for Tool Results.
+
+        Each invocation shares `_MAX_RETRIES` total attempts across recoverable failures,
+        including credential renewal failures before a request is sent.
         Progress does not reset the budget, and the count does not bound elapsed
         time. Initial connection bootstrap is outside this loop.
 
-        `_resolve_retry_method` switches from replaying the same POST to GET
-        after this operation's authenticated SSE 200 START. Reconnect with the
-        last checked event ID when available. EOF without a Task terminal is
-        recoverable; completed, error, and stopped terminals end consumption.
+        Until the 202, an attempt repeats the same POST; the Task identifier in
+        its body makes a repeat the same submission. After the 202, every
+        attempt is a GET with the last checked event ID when one is known. EOF
+        without a Task terminal is recoverable; completed, error, and stopped
+        terminals end consumption.
 
-        `accepted_callback` runs once, at the first authenticated SSE 200 START;
-        a finite answer, an error status, a failure before that START, and a
-        later reconnect never call it.
+        `accepted_callback` runs once, at the 202; a refused or failed
+        submission never calls it, and neither does a later read.
 
         A terminal ends recovery even when its problem is retryable.
         """
+        task_id = request.task_id
+        path = f"{_OPERATION_PREFIX}/tasks/{quote(task_id, safe='')}"
+        body = dump_wire_model(request)
         current_last_event_id = last_event_id
+        accepted = False
         stream_established = False
         attempt_number = 1
-        effective_method = method
 
         def retry_after_failure(error: BaseException) -> bool:
             return _retryable_stream_error(error, stream_established=stream_established)
@@ -855,58 +884,59 @@ class HTTPTransport:
             ):
                 with attempt:
                     attempt_number = attempt.retry_state.attempt_number
-                    effective_method, effective_body = _resolve_retry_method(
-                        method, json_data, stream_established=stream_established
-                    )
-                    headers = {"Accept": HTTPDefaults.ACCEPT_SSE}
-                    if current_last_event_id is not None:
-                        headers["Last-Event-ID"] = current_last_event_id
-                    inject_trace_context(headers)
-                    async with (
-                        self._session_for() as session,
-                        session.stream(
-                            effective_method,
+                    async with self._session_for() as session:
+                        if not accepted:
+                            await self._submit(session, body)
+                            accepted = True
+                            if accepted_callback is not None:
+                                accepted_callback()
+                        headers = {"Accept": HTTPDefaults.ACCEPT_SSE}
+                        if current_last_event_id is not None:
+                            headers["Last-Event-ID"] = current_last_event_id
+                        inject_trace_context(headers)
+                        async with session.stream(
+                            "GET",
                             self._url(path),
                             headers=headers,
-                            json=effective_body,
                             timeout=aiohttp.ClientTimeout(
                                 total=None,
                                 connect=self._CONNECT_TIMEOUT.total_seconds(),
                                 sock_read=self._SOCK_READ_TIMEOUT.total_seconds(),
                             ),
-                        ) as response,
-                    ):
-                        if response.mode == "finite":
-                            body = await response.read()
-                            _check_status(response.status, body, path=path)
+                        ) as response:
+                            if response.mode == "finite":
+                                content = await response.read()
+                                _check_status(response.status, content, path=path)
+                                raise HTTPTransportStreamError(
+                                    f"Task stream returned finite HTTP {response.status}: {path}",
+                                    status_code=response.status,
+                                )
+                            if response.mode != "sse" or response.status != HTTPStatus.OK:
+                                raise HTTPTransportStreamError(
+                                    f"Task stream returned HTTP {response.status} in mode {response.mode}: {path}",
+                                    status_code=response.status,
+                                )
+                            stream_established = True
+                            try:
+                                async for event in parse_sse_stream(response.iter_sse()):
+                                    current_last_event_id = event.id
+                                    yield event
+                                    if isinstance(
+                                        event.data,
+                                        (
+                                            BridgeTaskCompletedResponse,
+                                            BridgeTaskErrorResponse,
+                                            BridgeTaskStoppedResponse,
+                                        ),
+                                    ):
+                                        return
+                            except SSEParseError as error:
+                                raise HTTPTransportStreamError(
+                                    f"SSE parse error: {error}", code="sse_parse_error"
+                                ) from error
                             raise HTTPTransportStreamError(
-                                f"Task stream returned finite HTTP {response.status}: {path}",
-                                status_code=response.status,
+                                f"Task stream ended without a terminal event: {task_id}", code="stream_incomplete"
                             )
-                        if response.mode != "sse" or response.status != HTTPStatus.OK:
-                            raise HTTPTransportStreamError(
-                                f"Task stream returned HTTP {response.status} in mode {response.mode}: {path}",
-                                status_code=response.status,
-                            )
-                        if accepted_callback is not None and not stream_established:
-                            accepted_callback()
-                        stream_established = True
-                        try:
-                            async for event in parse_sse_stream(response.iter_sse()):
-                                current_last_event_id = event.id
-                                yield event
-                                if isinstance(
-                                    event.data,
-                                    (BridgeTaskCompletedResponse, BridgeTaskErrorResponse, BridgeTaskStoppedResponse),
-                                ):
-                                    return
-                        except SSEParseError as error:
-                            raise HTTPTransportStreamError(
-                                f"SSE parse error: {error}", code="sse_parse_error"
-                            ) from error
-                        raise HTTPTransportStreamError(
-                            f"Task stream ended without a terminal event: {task_id}", code="stream_incomplete"
-                        )
         except (
             HTTPTransportError,
             TransportError,
@@ -918,29 +948,12 @@ class HTTPTransport:
             TimeoutError,
             ssl.SSLError,
         ) as error:
-            failure = (
-                error
-                if isinstance(error, HTTPTransportError)
-                else HTTPTransportStreamError(
-                    f"Protected Task stream failed: {task_id}",
-                    status_code=error.status_code if isinstance(error, TransportError) else None,
-                    code=error.code
-                    if isinstance(error, (TransportError, ProtocolError, StateError))
-                    else type(error).__name__,
-                )
-            )
-            metadata: dict[str, str | int | float | bool] = {"logical_method": effective_method}
-            if failure.status_code is not None:
-                metadata["http_status"] = failure.status_code
-            if current_last_event_id is not None:
-                metadata["last_event_id"] = current_last_event_id
-            failure.context = ErrorContext(
-                error_code=(failure.problem_details.error_code if failure.problem_details else None)
-                or failure.code
-                or type(failure).__name__,
+            failure = _final_stream_failure(
+                error,
                 task_id=task_id,
                 retry_attempt=attempt_number - 1,
-                metadata=metadata,
+                logical_method="GET" if accepted else "POST",
+                last_event_id=current_last_event_id,
             )
             if failure is error:
                 raise

@@ -118,6 +118,7 @@ def _wire_models() -> list[BaseModel]:
         ),
         BridgeToolResultsRequest(
             type="tool_results",
+            task_id="task-wire-0001",
             tool_results=[
                 BridgeToolResultSuccess(
                     type="success",

@@ -85,7 +85,7 @@ class TestUnitObservabilityFeature:
                 mock_transport.fail_next_task(HTTPTransportConnectionError("stream lost"))
             elif failure == "auth":
                 mock_transport.fail_next_task(HTTPTransportAuthError("denied"))
-            lost = await ask(action="synthetic", task_id="metric-lost", sdk=minimal_mock_sdk)
+            lost = await ask(instruction="synthetic", task_id="metric-lost", sdk=minimal_mock_sdk)
             if failure == "cancel":
                 lost.task.cancel()
             expected = {
@@ -96,7 +96,7 @@ class TestUnitObservabilityFeature:
             with pytest.raises(expected[failure]):
                 await lost.model()
             mock_transport.inject_event("metric-done", mock_transport.create_task_completed_event())
-            done = await ask(action="synthetic", task_id="metric-done", sdk=minimal_mock_sdk)
+            done = await ask(instruction="synthetic", task_id="metric-done", sdk=minimal_mock_sdk)
             assert await done.model() == "Task completed"
             exported = isolated_otel_providers.get_metrics_data()
             assert exported is not None
@@ -294,7 +294,7 @@ class TestUnitObservabilityWiring:
         inject_llm_completion(mock_transport, task_id, completion="ok")
 
         with patch.object(minimal_mock_sdk._observability, "task_completed") as spy:
-            response = await ask(action="hello", task_id=task_id, sdk=minimal_mock_sdk)
+            response = await ask(instruction="hello", task_id=task_id, sdk=minimal_mock_sdk)
             await response.model()
             # Yield so the task's done callback runs.
             await asyncio.sleep(0)
@@ -312,11 +312,11 @@ class TestUnitObservabilityWiring:
         """The child runner labels a successful continuation separately from a root task."""
         parent_task_id = "parent-task-123"
         inject_llm_completion(mock_transport, parent_task_id, completion="parent")
-        parent = await ask(action="Start", task_id=parent_task_id, sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Start", task_id=parent_task_id, sdk=minimal_mock_sdk)
         await parent.model()
 
         with patch.object(minimal_mock_sdk._observability, "task_completed") as spy:
-            response = await parent.next(message="Continue")
+            response = await parent.next(instruction="Continue")
             mock_transport.inject_event(response.task_id, mock_transport.create_task_completed_event())
             await response.model()
             await asyncio.sleep(0)
@@ -334,11 +334,11 @@ class TestUnitObservabilityWiring:
         """The child runner labels a failed continuation separately from a root task."""
         parent_task_id = "parent-task-123"
         inject_llm_completion(mock_transport, parent_task_id, completion="parent")
-        parent = await ask(action="Start", task_id=parent_task_id, sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Start", task_id=parent_task_id, sdk=minimal_mock_sdk)
         await parent.model()
 
         with patch.object(minimal_mock_sdk._observability, "task_failed") as spy:
-            response = await parent.next(message="Continue")
+            response = await parent.next(instruction="Continue")
             mock_transport.inject_event(
                 response.task_id,
                 mock_transport.create_task_error_event("Child failed", error_code="CHILD_FAILED"),
@@ -360,7 +360,7 @@ class TestUnitObservabilityWiring:
         inject_llm_completion(mock_transport, task_id, completion="ok")
 
         with patch.object(minimal_mock_sdk._observability, "task_submitted") as spy:
-            response = await ask(action="hello", task_id=task_id, sdk=minimal_mock_sdk)
+            response = await ask(instruction="hello", task_id=task_id, sdk=minimal_mock_sdk)
             await response.model()
 
         spy.assert_called()

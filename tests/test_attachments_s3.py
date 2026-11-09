@@ -204,7 +204,6 @@ class _MotoMetadataTransport(HTTPTransportProtocol):
 
     def run_task(
         self,
-        task_id: str,
         request: BridgeTaskRequest,
         *,
         accepted_callback: Callable[[], None] | None = None,

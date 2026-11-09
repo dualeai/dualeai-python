@@ -78,24 +78,25 @@ class HTTPTransportProtocol(Protocol):
 
     def run_task(
         self,
-        task_id: str,
         request: BridgeTaskRequest,
         *,
         accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit a root create or child continuation and stream that task.
 
-        Encrypted POST /v1/hpke/tasks/{task_id}. The typed
-        body's discriminator selects creation or continuation. After a protected
-        SSE response starts, the retry loop uses encrypted GET on the same path.
+        Encrypted POST /v1/hpke/tasks with the typed body, whose discriminator
+        selects creation or continuation; the Platform accepts it with an empty
+        202. The stream is then read with encrypted GET
+        /v1/hpke/tasks/{task_id}, from the Task's first event; reconnects use
+        the same GET with the last event ID.
 
         Args:
-            task_id: Client-owned task ID in the URL. A caller selects it
-                with the ``task_id`` argument of ``ask``, ``submit_task`` or
+            request: Fully validated bridge request body. Its ``task_id`` is
+                the client-owned Task ID: a caller selects it with the
+                ``task_id`` argument of ``ask``, ``submit_task`` or
                 ``AgentResponse.next``; otherwise the SDK generates UUID4.
-            request: Fully validated bridge request body.
             accepted_callback: Called once when the Platform accepts the
-                request, as its authenticated event stream starts; never called
+                request with its 202, before the stream is read; never called
                 for a refused request.
 
         Yields:
@@ -109,17 +110,16 @@ class HTTPTransportProtocol(Protocol):
 
     def submit_tool_results(
         self,
-        task_id: str,
         request: "BridgeToolResultsRequest",
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit tool results and resume the same public task stream.
 
-        Encrypted POST /v1/hpke/tasks/{task_id} with
-        type=tool_results. The bridge publishes an internal tool-result
-        continuation beneath the URL task and returns that task's existing
-        stream. ``last_event_id`` is the opaque SSE cursor for the triggering
+        Encrypted POST /v1/hpke/tasks with type=tool_results; the body's
+        ``task_id`` names the Task that emitted the ``tool.use`` events. After
+        the 202, encrypted GET /v1/hpke/tasks/{task_id} reads that Task's
+        stream after ``last_event_id``, the opaque SSE cursor of the triggering
         ``tool.use``.
         """
         ...

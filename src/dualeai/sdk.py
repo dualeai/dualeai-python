@@ -550,9 +550,9 @@ class DualeAISDK:
         Returns:
             The terminal event from the same public ``task_id`` stream.
         """
-        request = BridgeToolResultsRequest(type="tool_results", tool_results=results)
+        request = BridgeToolResultsRequest(type="tool_results", task_id=task_id, tool_results=results)
         client = await self._ensure_events_client()
-        return await client.submit_tool_results(task_id=task_id, request=request, last_event_id=last_event_id)
+        return await client.submit_tool_results(request=request, last_event_id=last_event_id)
 
     def _schedule_tool_use(
         self,
@@ -825,10 +825,9 @@ class DualeAISDK:
         last_event_id: str | None = None,
     ) -> None:
         """Submit one generated Bridge tool result and schedule nested tool-use events."""
-        request = BridgeToolResultsRequest(type="tool_results", tool_results=[result])
+        request = BridgeToolResultsRequest(type="tool_results", task_id=task_id, tool_results=[result])
         client = await self._ensure_events_client()
         await client.submit_tool_results(
-            task_id=task_id,
             request=request,
             last_event_id=last_event_id,
             tool_use_callback=lambda next_tool_use, next_event_id: self._schedule_tool_use(
@@ -1096,7 +1095,7 @@ class DualeAISDK:
 
     async def submit_task(
         self,
-        action: str,
+        instruction: str,
         capabilities: list[Capability],
         *,
         priority: PriorityClass = PriorityClass.standard,
@@ -1119,7 +1118,7 @@ class DualeAISDK:
         platform stop request.
 
         Args:
-            action: Non-empty Task instruction.
+            instruction: Task instruction: non-empty, at most 100,000 characters, without NUL characters.
             capabilities: Capabilities used to derive ``required_capabilities`` when
                 ``routing_policy`` is omitted.
             priority: Task scheduling class. Fast favors lower waiting time for
@@ -1147,19 +1146,20 @@ class DualeAISDK:
             A response handle whose runner may still be in flight.
 
         Raises:
-            ValueError: If ``action`` is empty or whitespace.
+            pydantic.ValidationError: If ``instruction`` is empty, is longer
+                than 100,000 characters, or contains a NUL character, or if
+                ``task_id`` is not a Task identifier that
+                ``dualeai.BridgeTaskCreateRequest.task_id`` accepts.
             TypeError: If a supplied ``deadline`` is timezone-naive.
             RuntimeError: If the process-local Task dependency circuit is open.
 
         Transport failures after the runner is created surface through
         ``response.model()`` or by awaiting ``response.task``.
         """
-        if not action or not action.strip():
-            raise ValueError("Action cannot be empty")
 
         async def operation() -> AgentResponse[T]:
             return await self._submit_task_internal(
-                action,
+                instruction,
                 capabilities,
                 priority=priority,
                 routing_policy=routing_policy,
@@ -1178,8 +1178,8 @@ class DualeAISDK:
             task_type=task_type,
             streaming=streaming,
             trace_attributes={
-                # Never log prompt/action CONTENT (PII). Metadata only.
-                "action_length": len(action),
+                # Never log instruction CONTENT (PII). Metadata only.
+                "instruction_length": len(instruction),
                 "capabilities_count": len(capabilities),
                 "streaming_enabled": streaming,
                 "has_routing_policy": routing_policy is not None,
@@ -1187,13 +1187,13 @@ class DualeAISDK:
                 "task_type": task_type,
                 "task_id": task_id,
             },
-            rejection_context=f"action_length={len(action)}",
+            rejection_context=f"instruction_length={len(instruction)}",
         )
 
     async def _continue_task(
         self,
         parent_task_id: str,
-        message: str,
+        instruction: str,
         deadline: datetime | None = None,
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
@@ -1208,11 +1208,11 @@ class DualeAISDK:
         """Submit a continuation Task of ``parent_task_id``, running or ended.
 
         The continuation's Task id is ``task_id``, or a new UUID4. The SDK
-        sends that id in the HTTP task path and ``parent_task_id`` in the
-        continuation body. It always sends a ``routing_policy`` object, empty
-        when the caller sets no policy fields, and the new Task's ``priority``.
-        It sends ``response_format``,
-        ``response_stream`` and ``attachments`` only when the caller set them;
+        sends that id and ``parent_task_id`` in the continuation body. It
+        always sends a ``routing_policy`` object, empty when the caller sets no
+        policy fields, and the new Task's ``priority``. It sends
+        ``response_format``, ``response_stream`` and ``attachments`` only when
+        the caller set them;
         an omitted criterion takes the parent Task's value on the Platform.
         ``local_streaming`` selects the returned response's local buffering.
         Nothing in this SDK enforces the Platform's inheritance of an omitted
@@ -1226,7 +1226,7 @@ class DualeAISDK:
             operation_func=partial(
                 self._continue_task_internal,
                 parent_task_id,
-                message,
+                instruction,
                 deadline,
                 response_type,
                 response_format,
@@ -1262,9 +1262,7 @@ class DualeAISDK:
             Resolved Task id, resolved deadline and task-scoped logger.
         """
         task_id = task_id or str(uuid4())
-        # Calculate deadline if not provided
         if deadline is None:
-            # Default timeout from platform constants
             default_timeout_seconds = TimingDefaults.DEFAULT_TASK_TIMEOUT_SECONDS
             deadline = datetime.now(timezone.utc) + timedelta(seconds=default_timeout_seconds)
             logger.debug(
@@ -1277,14 +1275,12 @@ class DualeAISDK:
         now = datetime.now(timezone.utc)
         deadline_remaining = (deadline - now).total_seconds()
 
-        # Create task-specific logger with bound context
         task_logger = get_task_logger(
             f"dualeai.sdk.{operation_type}",
             task_id=task_id,
             streaming=streaming,
         )
 
-        # Log deadline telemetry with task logger
         task_logger.info(
             f"Task {operation_type} deadline telemetry",
             deadline=deadline.isoformat(),
@@ -1349,7 +1345,6 @@ class DualeAISDK:
         self,
         *,
         admission: asyncio.Future[None],
-        task_id: str,
         request: BridgeTaskRequest,
         content_callback: Callable[[StreamingContentEvent], None] | None,
         tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None],
@@ -1365,7 +1360,7 @@ class DualeAISDK:
 
         ``accepted_callback`` runs when the Platform accepts the request, and
         again when this runner ends, so a runner that ends before acceptance (a
-        refused request, a stream failure, a local cancellation) never leaves a
+        refused or failed submission, a local cancellation) never leaves a
         continuation waiting.
 
         A local failure never counts as a remote failure, and a stream failure
@@ -1387,7 +1382,6 @@ class DualeAISDK:
                 try:
                     events_client = await self._ensure_events_client()
                     terminal = await events_client.run_task(
-                        task_id=task_id,
                         request=request,
                         content_callback=content_callback,
                         tool_use_callback=tool_use_callback,
@@ -1419,7 +1413,7 @@ class DualeAISDK:
                 admission.set_exception(exc)
             raise
         finally:
-            self._inflight_tasks.pop(task_id, None)
+            self._inflight_tasks.pop(request.task_id, None)
             accepted_callback()
             if admitted:
                 duration = time.time() - spawn_time
@@ -1437,7 +1431,6 @@ class DualeAISDK:
     async def _spawn_run_task(
         self,
         *,
-        task_id: str,
         request: BridgeTaskRequest,
         content_callback: Callable[[StreamingContentEvent], None] | None,
         tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None],
@@ -1448,14 +1441,13 @@ class DualeAISDK:
         task = asyncio.create_task(
             self._run_task_with_circuit_breaker(
                 admission=admission,
-                task_id=task_id,
                 request=request,
                 content_callback=content_callback,
                 tool_use_callback=tool_use_callback,
                 accepted_callback=accepted_callback,
             )
         )
-        self._inflight_tasks[task_id] = task
+        self._inflight_tasks[request.task_id] = task
         try:
             await admission
         except asyncio.CancelledError:
@@ -1473,7 +1465,6 @@ class DualeAISDK:
         self,
         *,
         operation_name: str,
-        task_id: str,
         request: BridgeTaskRequest,
         streaming: bool,
         response_type: type[T] | None,
@@ -1486,8 +1477,9 @@ class DualeAISDK:
         - a fully validated create or continuation ``request``;
         - ``task_logger`` (via ``_prepare_task_submission``, with any
           op-specific bindings already attached);
-        - ``task_id`` (the *new* spawn id, never the parent: a continuation's
-          Task id is its caller-selected ``task_id``, or a new UUID4).
+        - the request's ``task_id`` (the *new* spawn id, never the parent: a
+          continuation's Task id is its caller-selected ``task_id``, or a new
+          UUID4).
 
         Pipeline: open ``operation_context`` → ``FlowLogger.start`` → build
         streaming buffers and the acceptance Event → spawn the protected
@@ -1500,6 +1492,7 @@ class DualeAISDK:
         ``FlowLogger.start`` / ``end`` share ``task_id`` so the
         timing cache resolves and ``duration_ms`` is populated.
         """
+        task_id = request.task_id
         with operation_context(operation_name):
             FlowLogger.start(task_logger, operation_name, task_id)
 
@@ -1510,7 +1503,6 @@ class DualeAISDK:
             accepted = asyncio.Event()
             try:
                 task = await self._spawn_run_task(
-                    task_id=task_id,
                     request=request,
                     content_callback=on_content,
                     tool_use_callback=on_tool_use,
@@ -1537,7 +1529,7 @@ class DualeAISDK:
     async def _continue_task_internal(
         self,
         parent_task_id: str,
-        message: str,
+        instruction: str,
         deadline: datetime | None = None,
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
@@ -1577,8 +1569,9 @@ class DualeAISDK:
         request = BridgeTaskContinueRequest.model_validate(
             {
                 "type": "continue",
+                "task_id": continuation_task_id,
                 "parent_task_id": parent_task_id,
-                "message": message,
+                "instruction": instruction,
                 "deadline": deadline,
                 "priority": priority,
                 "routing_policy": routing_policy if routing_policy is not None else RoutingPolicy(),
@@ -1587,7 +1580,6 @@ class DualeAISDK:
         )
         return await self._spawn_and_wrap_response(
             operation_name="task_continuation",
-            task_id=continuation_task_id,
             request=request,
             streaming=local_streaming,
             response_type=response_type,
@@ -1596,7 +1588,7 @@ class DualeAISDK:
 
     async def _submit_task_internal(
         self,
-        action: str,
+        instruction: str,
         capabilities: list[Capability],
         *,
         priority: PriorityClass,
@@ -1630,7 +1622,7 @@ class DualeAISDK:
             has_preferred_capabilities=bool(routing_policy_obj.preferred_capabilities),
         )
 
-        task_logger.info("Task submission details", action_length=len(action))
+        task_logger.info("Task submission details", instruction_length=len(instruction))
         resolved_response_format = self._response_format_default(response_format, response_type, response_schema)
         bridge_attachments = (
             [
@@ -1646,7 +1638,8 @@ class DualeAISDK:
         )
         request = BridgeTaskCreateRequest(
             type="create",
-            action_prompt=action,
+            task_id=task_id_preview,
+            instruction=instruction,
             deadline=deadline,
             priority=priority,
             routing_policy=routing_policy_obj,
@@ -1657,7 +1650,6 @@ class DualeAISDK:
 
         return await self._spawn_and_wrap_response(
             operation_name="task_submission",
-            task_id=task_id_preview,
             request=request,
             streaming=streaming,
             response_type=response_type,
@@ -1805,7 +1797,6 @@ class DualeAISDK:
         """Close scheduler with graceful shutdown."""
         if self._scheduler and not self._scheduler.closed:
             try:
-                # Use wait_and_close for graceful shutdown with longer timeout
                 await asyncio.wait_for(self._scheduler.wait_and_close(), timeout=3.0)
             except (asyncio.CancelledError, RuntimeError, AttributeError, asyncio.TimeoutError):
                 # Force close if graceful close fails or times out
@@ -1847,7 +1838,7 @@ class DualeAISDK:
         tasks = list(self._tool_result_tasks)
         # Graceful drain: give in-flight tool work the configured window to COMPLETE
         # before cancelling, so a rolling deploy does not cancel a tool mid-side-effect
-        # (graceful_shutdown_timeout, default 0.0 = cancel immediately as before).
+        # (graceful_shutdown_timeout; its default 0.0 cancels immediately).
         if self._graceful_shutdown_timeout > 0:
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(
@@ -1890,10 +1881,8 @@ class DualeAISDK:
         # Then cleanup lifecycle tasks + deregister (owned by the lifecycle manager)
         await self._lifecycle.aclose()
 
-        # Cleanup scheduler with enhanced error suppression
         await self._cleanup_scheduler()
 
-        # Cleanup events client connection
         async with self._events_client_lock:
             if self._events_client:
                 with contextlib.suppress(Exception):
@@ -1905,7 +1894,7 @@ class DualeAISDK:
                 await self._cache.close()
             self._cache = None
 
-        # Give async tasks a moment to complete cleanup with shortened delay
+        # Give async tasks a moment to complete cleanup.
         await asyncio.sleep(0.01)
 
     async def __aenter__(self) -> Self:

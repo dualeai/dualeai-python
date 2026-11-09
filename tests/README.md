@@ -39,13 +39,13 @@ from tests.mocks.mock_http import require_mock_http_transport
 
 
 @pytest.mark.unit
-async def test_action_reaches_the_task_request(minimal_mock_sdk: DualeAISDK) -> None:
-    await ask(action="Test", sdk=minimal_mock_sdk)
+async def test_instruction_reaches_the_task_request(minimal_mock_sdk: DualeAISDK) -> None:
+    await ask(instruction="Test", sdk=minimal_mock_sdk)
 
     [call] = require_mock_http_transport(minimal_mock_sdk).get_requests()
     request = call["request"]
     assert isinstance(request, BridgeTaskCreateRequest)
-    assert request.action_prompt == "Test"
+    assert request.instruction == "Test"
 ```
 
 ## Benchmarks
@@ -60,7 +60,7 @@ make test-bench  # Runs via --codspeed, serial execution, no coverage
 ## Integration Tests
 
 The integration suite checks signed uploads against local S3, bounded part
-scheduling against a loopback object store, and protected Bridge and Library
+scheduling against a loopback object store, and protected Task and Library
 calls against a local TLS endpoint. These tests do not contact external
 services.
 

@@ -25,17 +25,17 @@ def _library_create_request(path: str) -> LibraryCreateRequest:
 
 @pytest.mark.unit
 async def test_mock_sdk_returns_configured_response() -> None:
-    """A configured action returns exactly the response set for it."""
+    """A configured instruction returns exactly the response set for it."""
     sdk = MockSDK()
     sdk.set_mock_response("hello", "world")
     assert await sdk.mock_ask("hello") == "world"
 
 
 @pytest.mark.unit
-async def test_mock_sdk_default_response_for_unconfigured_action() -> None:
-    """An unconfigured action returns the deterministic default string."""
+async def test_mock_sdk_default_response_for_unconfigured_instruction() -> None:
+    """An unconfigured instruction returns the deterministic default string."""
     sdk = MockSDK()
-    assert await sdk.mock_ask("unknown-action") == "Mock response for: unknown-action"
+    assert await sdk.mock_ask("unknown-instruction") == "Mock response for: unknown-instruction"
 
 
 @pytest.mark.unit

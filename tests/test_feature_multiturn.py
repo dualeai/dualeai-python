@@ -21,7 +21,11 @@ from dualeai.attachments import PreparedAttachment
 from dualeai.events.http_transport import HTTPTransportResponseError
 from dualeai.exceptions import BusinessError, DualeAIError
 from dualeai.models.attachment import Attachment
-from dualeai.models.bridge import BridgeSSEEvent, BridgeTaskContinueRequest, BridgeTaskStoppedResponse
+from dualeai.models.bridge import (
+    BridgeSSEEvent,
+    BridgeTaskContinueRequest,
+    BridgeTaskStoppedResponse,
+)
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.response_format import PredefinedResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
@@ -63,16 +67,16 @@ class TestUnitMultiTurnContinuation:
     async def test_chained_continuations_link_each_child_to_previous_task(self, minimal_mock_sdk: DualeAISDK):
         """Each child names the preceding public task as its parent."""
         # Create initial response
-        initial_response = await ask(action="Start chain", sdk=minimal_mock_sdk)
+        initial_response = await ask(instruction="Start chain", sdk=minimal_mock_sdk)
         requests_after_initial = len(require_mock_http_transport(minimal_mock_sdk).get_requests())
 
         # Chain continuations - REAL SDK handles each
         await _complete_response(initial_response, minimal_mock_sdk)
-        continued_1 = await initial_response.next(message="first step")
+        continued_1 = await initial_response.next(instruction="first step")
         await _complete_response(continued_1, minimal_mock_sdk)
-        continued_2 = await continued_1.next(message="second step")
+        continued_2 = await continued_1.next(instruction="second step")
         await _complete_response(continued_2, minimal_mock_sdk)
-        continued_3 = await continued_2.next(message="third step")
+        continued_3 = await continued_2.next(instruction="third step")
 
         # Verify each continuation has unique task_id
         task_ids_set = {
@@ -91,7 +95,7 @@ class TestUnitMultiTurnContinuation:
         for record in continuation_requests:
             request = record["request"]
             assert isinstance(request, BridgeTaskContinueRequest)
-            links.append((record["task_id"], request.parent_task_id))
+            links.append((request.task_id, request.parent_task_id))
         assert links == [
             (continued_1.task_id, initial_response.task_id),
             (continued_2.task_id, continued_1.task_id),
@@ -104,7 +108,7 @@ class TestUnitMultiTurnContinuation:
     async def test_agent_response_has_sdk_reference(self, minimal_mock_sdk: DualeAISDK):
         """Test that AgentResponse maintains reference to SDK for tenant context."""
         # Call ask
-        response = await ask(action="Test task", sdk=minimal_mock_sdk)
+        response = await ask(instruction="Test task", sdk=minimal_mock_sdk)
 
         # Verify response has SDK reference
         assert response.sdk is minimal_mock_sdk
@@ -113,16 +117,16 @@ class TestUnitMultiTurnContinuation:
     async def test_response_preserves_streaming_flag(self, minimal_mock_sdk: DualeAISDK):
         """Test that AgentResponse preserves streaming flag from initial call."""
         # Non-streaming response
-        response_no_stream = await ask(action="No stream", streaming=False, sdk=minimal_mock_sdk)
+        response_no_stream = await ask(instruction="No stream", streaming=False, sdk=minimal_mock_sdk)
         assert response_no_stream.streaming is False
 
         # Streaming response
-        response_stream = await ask(action="Stream", streaming=True, sdk=minimal_mock_sdk)
+        response_stream = await ask(instruction="Stream", streaming=True, sdk=minimal_mock_sdk)
         assert response_stream.streaming is True
 
     async def test_next_continues_a_running_parent_at_once(self, minimal_mock_sdk: DualeAISDK) -> None:
         """A parent without a terminal event is continued at once and keeps running."""
-        parent = await ask(action="Initial", sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Initial", sdk=minimal_mock_sdk)
         transport = require_mock_http_transport(minimal_mock_sdk)
         requests_before = len(transport.get_requests())
 
@@ -130,17 +134,16 @@ class TestUnitMultiTurnContinuation:
 
         assert parent.task.done() is False
         assert len(transport.get_requests()) == requests_before + 1
-        record = transport.get_requests()[-1]
-        request = record["request"]
+        request = transport.get_requests()[-1]["request"]
         assert isinstance(request, BridgeTaskContinueRequest)
         assert request.parent_task_id == parent.task_id
-        assert request.message == "Branch"
-        assert record["task_id"] == child.task_id
+        assert request.instruction == "Branch"
+        assert request.task_id == child.task_id
 
     @pytest.mark.parametrize("outcome", ["completed", "error", "stopped"])
     async def test_next_continues_after_any_parent_outcome(self, minimal_mock_sdk: DualeAISDK, outcome: str) -> None:
         """A completed, failed, or stopped parent is continued, and its outcome is not raised."""
-        parent = await ask(action="Initial", sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Initial", sdk=minimal_mock_sdk)
         transport = require_mock_http_transport(minimal_mock_sdk)
         requests_before = len(transport.get_requests())
         transport.inject_event(parent.task_id, _terminal_event(transport, outcome))
@@ -152,14 +155,14 @@ class TestUnitMultiTurnContinuation:
         request = transport.get_requests()[-1]["request"]
         assert isinstance(request, BridgeTaskContinueRequest)
         assert request.parent_task_id == parent.task_id
-        assert request.message == "Continue"
+        assert request.instruction == "Continue"
 
     @pytest.mark.parametrize("release", ["accepted", "cancelled"])
     async def test_next_waits_only_for_the_parents_acceptance(self, minimal_mock_sdk: DualeAISDK, release: str):
         """No continuation is sent before the parent's acceptance; acceptance or the runner's end releases it."""
         transport = require_mock_http_transport(minimal_mock_sdk)
         acceptance = transport.hold_next_acceptance()
-        parent = await ask(action="Initial", sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Initial", sdk=minimal_mock_sdk)
         requests_before = len(transport.get_requests())
 
         next_call = asyncio.create_task(parent.next("Continue"))
@@ -184,10 +187,10 @@ class TestUnitMultiTurnContinuation:
         """One caller may stop waiting for the parent's acceptance without cancelling shared parent work."""
         transport = require_mock_http_transport(minimal_mock_sdk)
         acceptance = transport.hold_next_acceptance()
-        initial_response = await ask(action="Initial", sdk=minimal_mock_sdk)
+        initial_response = await ask(instruction="Initial", sdk=minimal_mock_sdk)
         requests_before = len(transport.get_requests())
-        cancelled_waiter = asyncio.create_task(initial_response.next(message="Cancelled branch"))
-        surviving_waiter = asyncio.create_task(initial_response.next(message="Surviving branch"))
+        cancelled_waiter = asyncio.create_task(initial_response.next(instruction="Cancelled branch"))
+        surviving_waiter = asyncio.create_task(initial_response.next(instruction="Surviving branch"))
         await asyncio.sleep(0)
 
         cancelled_waiter.cancel()
@@ -213,7 +216,7 @@ class TestUnitMultiTurnContinuation:
         self, minimal_mock_sdk: DualeAISDK, criteria: str
     ) -> None:
         """Priority defaults independently; omitted inherited criteria stay absent and set criteria are sent."""
-        parent = await ask(action="Initial", sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Initial", sdk=minimal_mock_sdk)
         transport = require_mock_http_transport(minimal_mock_sdk)
 
         if criteria == "defaults":
@@ -222,7 +225,10 @@ class TestUnitMultiTurnContinuation:
             request = transport.get_requests()[-1]["request"]
             assert isinstance(request, BridgeTaskContinueRequest)
             body = dump_wire_model(request)
-            assert set(body) == {"type", "parent_task_id", "message", "deadline", "priority", "routing_policy"}
+            optional = {
+                name for name, field in BridgeTaskContinueRequest.model_fields.items() if not field.is_required()
+            }
+            assert body.keys() & optional == {"priority"}
             assert body["priority"] == "standard"
             assert body["routing_policy"] == {}
             return
@@ -247,20 +253,19 @@ class TestUnitMultiTurnContinuation:
             timeout=1.0,
         )
 
-        record = transport.get_requests()[-1]
-        request = record["request"]
+        request = transport.get_requests()[-1]["request"]
         assert isinstance(request, BridgeTaskContinueRequest)
         assert request.response_stream is False
         assert request.routing_policy == RoutingPolicy(target_accuracy=0.9)
         assert request.response_format is PredefinedResponseFormat.text
         assert request.attachments == [Attachment(key="k1", filename="report.pdf", description="Quarterly report")]
         assert request.deadline == DEADLINE
-        assert record["task_id"] == "task-child-0001"
+        assert request.task_id == "task-child-0001"
         assert child.task_id == "task-child-0001"
 
     async def test_omitted_streaming_keeps_the_parents_local_buffering(self, minimal_mock_sdk: DualeAISDK) -> None:
         """An omitted ``streaming`` keeps the parent's local buffering; an explicit value replaces it."""
-        parent = await ask(action="Initial", streaming=True, sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Initial", streaming=True, sdk=minimal_mock_sdk)
 
         inherited = await asyncio.wait_for(parent.next("Continue"), timeout=1.0)
         replaced = await asyncio.wait_for(parent.next("Continue", streaming=False), timeout=1.0)
@@ -271,9 +276,9 @@ class TestUnitMultiTurnContinuation:
     async def test_continuation_child_error_preserves_problem_details(self, minimal_mock_sdk: DualeAISDK) -> None:
         """A terminal error on C is raised by C's AgentResponse with its typed code."""
         transport = require_mock_http_transport(minimal_mock_sdk)
-        parent = await ask(action="Start", task_id="parent-task-123", sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Start", task_id="parent-task-123", sdk=minimal_mock_sdk)
         await _complete_response(parent, minimal_mock_sdk)
-        continued_response = await parent.next(message="Continue", deadline=DEADLINE)
+        continued_response = await parent.next(instruction="Continue", deadline=DEADLINE)
         transport.inject_event(
             continued_response.task_id,
             transport.create_task_error_event("Child failed", error_code="CHILD_FAILED"),
@@ -291,7 +296,7 @@ class TestUnitMultiTurnContinuation:
     ) -> None:
         """A Bridge rejection keeps its typed problem and continuation-specific prefix."""
         transport = require_mock_http_transport(minimal_mock_sdk)
-        parent = await ask(action="Start", task_id="parent-task-123", sdk=minimal_mock_sdk)
+        parent = await ask(instruction="Start", task_id="parent-task-123", sdk=minimal_mock_sdk)
         await _complete_response(parent, minimal_mock_sdk)
         problem = ProblemDetails(
             title="Invalid continuation",
@@ -306,7 +311,7 @@ class TestUnitMultiTurnContinuation:
                 problem_details=problem,
             )
         )
-        response = await parent.next(message="Continue", deadline=DEADLINE)
+        response = await parent.next(instruction="Continue", deadline=DEADLINE)
 
         with pytest.raises(BusinessError, match="Task continuation failed") as exc_info:
             await response.model()
@@ -315,14 +320,14 @@ class TestUnitMultiTurnContinuation:
 
     async def test_concurrent_sibling_continuations_share_the_same_parent(self, minimal_mock_sdk: DualeAISDK):
         """Concurrent next calls mint unique children without changing the parent."""
-        initial_response = await ask(action="Initial", sdk=minimal_mock_sdk)
+        initial_response = await ask(instruction="Initial", sdk=minimal_mock_sdk)
         await _complete_response(initial_response, minimal_mock_sdk)
         transport = require_mock_http_transport(minimal_mock_sdk)
         requests_before = len(transport.get_requests())
 
         first, second = await asyncio.gather(
-            initial_response.next(message="First branch"),
-            initial_response.next(message="Second branch"),
+            initial_response.next(instruction="First branch"),
+            initial_response.next(instruction="Second branch"),
         )
 
         assert first.task_id != second.task_id

@@ -144,7 +144,6 @@ class CloudEventsClient:
                 logger.debug("Injected HTTP transport initialized")
                 return
 
-            # Create HTTPTransport for production
             logger.debug(
                 "Initializing protected HTTP transport",
                 endpoint=self.config.endpoint,
@@ -220,7 +219,6 @@ class CloudEventsClient:
     async def run_task(
         self,
         *,
-        task_id: str,
         request: BridgeTaskRequest,
         content_callback: ContentCallback | None = None,
         tool_use_callback: ToolUseCallback | None = None,
@@ -228,15 +226,15 @@ class CloudEventsClient:
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Submit one typed task request and consume its task-keyed stream.
 
-        The SDK owns ``task_id`` and constructs ``request`` before this
+        The SDK owns the Task ID and constructs ``request`` before this
         boundary. Create and continuation requests therefore share the same
         transport and terminal-event path.
 
         Args:
-            task_id: Client-owned ID in the HTTP task path, as
-                ``HTTPTransportProtocol.run_task`` describes it. The request
+            request: Validated create or continuation request body. Its
+                ``task_id`` is the client-owned Task ID, as
+                ``HTTPTransportProtocol.run_task`` describes it; its type
                 decides whether it represents a root or continuation child.
-            request: Validated create or continuation request body.
             content_callback: Sync callback invoked in arrival order on each
                 ``BridgeContentDeltaResponse`` and on each
                 ``BridgeContentResetResponse``, which starts a new generation.
@@ -245,7 +243,7 @@ class CloudEventsClient:
                 ``BridgeToolUseResponse`` with its SSE event id. Same
                 fast-callback rule.
             accepted_callback: Called once when the Platform accepts the
-                request, as its authenticated event stream starts; never called
+                request with its 202, before the stream is read; never called
                 for a refused request.
 
         Returns:
@@ -263,13 +261,13 @@ class CloudEventsClient:
         transport = self._ensure_connected()
         logger.debug(
             "Running task",
-            task_id=task_id,
+            task_id=request.task_id,
             request_type=request.type,
         )
         operation = "task_continue" if request.type == "continue" else "task_run"
         return await self._consume_terminal_stream(
-            task_id=task_id,
-            stream=transport.run_task(task_id, request, accepted_callback=accepted_callback),
+            task_id=request.task_id,
+            stream=transport.run_task(request, accepted_callback=accepted_callback),
             operation=operation,
             content_callback=content_callback,
             tool_use_callback=tool_use_callback,
@@ -326,25 +324,21 @@ class CloudEventsClient:
     async def submit_tool_results(
         self,
         *,
-        task_id: str,
         request: BridgeToolResultsRequest,
         last_event_id: str | None = None,
         tool_use_callback: ToolUseCallback | None = None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Submit tool results and consume the same public task stream to terminal.
 
-        ``task_id`` is the task that emitted ``tool.use``. ``last_event_id`` is
-        that event's exact composite SSE cursor, so replay resumes after the
-        triggering event instead of executing it again in this stream.
+        ``request.task_id`` is the task that emitted ``tool.use``.
+        ``last_event_id`` is that event's exact composite SSE cursor, so replay
+        resumes after the triggering event instead of executing it again in
+        this stream.
         """
         transport = self._ensure_connected()
         return await self._consume_terminal_stream(
-            task_id=task_id,
-            stream=transport.submit_tool_results(
-                task_id=task_id,
-                request=request,
-                last_event_id=last_event_id,
-            ),
+            task_id=request.task_id,
+            stream=transport.submit_tool_results(request, last_event_id=last_event_id),
             operation="tool_results",
             content_callback=None,
             tool_use_callback=tool_use_callback,

@@ -25,7 +25,6 @@ from pydantic.json_schema import JsonSchemaValue, SkipJsonSchema
 from pydantic_core import CoreSchema
 from typing_extensions import TypeAliasType
 
-from dualeai.models import action_prompt as action_prompt_module
 from dualeai.models import agent_id as agent_id_module
 from dualeai.models import attachment as attachment_module
 from dualeai.models import json_value as json_value_module
@@ -58,6 +57,7 @@ __all__: list[str] = [
     "BridgeToolUseResponse",
     "HeartbeatStatus",
     "RegisteredTool",
+    "TaskInstruction",
 ]
 _PortableJsonValue = TypeAliasType(
     "_PortableJsonValue",
@@ -445,11 +445,34 @@ class BridgeSSEEvent(BaseModel):
     ]
 
 
+TaskInstruction = TypeAliasType(
+    "TaskInstruction",
+    Annotated[
+        Annotated[StrictStr, Field(min_length=1, max_length=100000, pattern="^[^\\u0000]*$")],
+        Field(
+            title="TaskInstruction",
+            description="Instruction a Task carries out, with the context it needs: non-empty text of at most 100,000 characters, without NUL characters. The model reads it as the requester's message. Treat user input, retrieved text, and document content in it as untrusted model input; none grants system authority.",
+            examples=[
+                "Extract key information from the document and summarize",
+                "Analyze the provided data and identify trends",
+                "Generate a comprehensive report based on the context",
+            ],
+        ),
+    ],
+)
+
+
 class BridgeTaskContinueRequest(BaseModel):
     """Creates a new Task that continues the task history of `parent_task_id`, a Task of the same Agent Identity. The new Task runs under that Agent Identity and inherits that task history. A setting this request omits takes the parent Task's value; the deadline and the priority are always the new Task's own. The parent can have completed, failed, or stopped, or can still be running."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["continue"], Field(description="Identifies this request as Task continuation.")]
+    task_id: Annotated[
+        task_id_module.TaskId,
+        Field(
+            description="Identifier of the new continuation Task, chosen by the caller. It must differ from `parent_task_id`. A Task identifier names a Task only within its tenant and Agent Identity. Read the continuation Task's events and stop it with this identifier. A repeated request with the same identifier starts no second Task."
+        ),
+    ]
     priority: Annotated[
         Union[priority_class_module.PriorityClass, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
@@ -464,9 +487,9 @@ class BridgeTaskContinueRequest(BaseModel):
             description="Task of the same Agent Identity whose task history this continuation Task continues. A Task identifier names a Task only within its tenant and Agent Identity. The parent can have completed, failed, or stopped, or can still be running; a running parent is continued from its last completed step. A continuation must name an immediate parent Task admitted less than 30 days ago. Task history content leaves the inherited context 30 days after the request that supplied it; instructions may remain available for up to 90 days after the request that supplied them. The continuation uses the inherited context that remains available."
         ),
     ]
-    message: Annotated[
-        Annotated[StrictStr, Field(max_length=100000, pattern="^[^\\u0000]*$")],
-        Field(description="User message that continues the task history. It is the continuation Task's instruction."),
+    instruction: Annotated[
+        TaskInstruction,
+        Field(description="Instruction for the continuation Task. It follows the inherited task history."),
     ]
     attachments: Annotated[
         Union[Annotated[list[attachment_module.Attachment], Field(strict=True)], SkipJsonSchema[None]],
@@ -479,7 +502,7 @@ class BridgeTaskContinueRequest(BaseModel):
     routing_policy: Annotated[
         routing_policy_module.RoutingPolicy,
         Field(
-            description="Model-selection preferences for this request. The object is required. At public admission, a preference left unset takes the parent Task's admitted value: the parent request's preference, resolved with Platform defaults at admission. Capabilities the Platform inferred for the parent Task are not inherited."
+            description="Model-selection preferences for this request. The object is required. A preference left unset takes the parent Task's value: the parent's own preference, resolved with Platform defaults when the parent Task was admitted. Capabilities the Platform inferred for the parent Task are not inherited."
         ),
     ]
     response_format: Annotated[
@@ -510,6 +533,12 @@ class BridgeTaskCreateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["create"], Field(description="Identifies this request as Task creation.")]
+    task_id: Annotated[
+        task_id_module.TaskId,
+        Field(
+            description="Identifier of the new Task, chosen by the caller. A Task identifier names a Task only within its tenant and Agent Identity. Read the Task's events and stop the Task with this identifier. A repeated request with the same identifier starts no second Task."
+        ),
+    ]
     priority: Annotated[
         Union[priority_class_module.PriorityClass, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
@@ -518,9 +547,7 @@ class BridgeTaskCreateRequest(BaseModel):
             json_schema_extra={"default": "standard"},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
-    action_prompt: Annotated[
-        action_prompt_module.ActionPrompt, Field(description="Instruction and contextual material for the Task.")
-    ]
+    instruction: Annotated[TaskInstruction, Field(description="Instruction for the Task, with the context it needs.")]
     attachments: Annotated[
         Union[Annotated[list[attachment_module.Attachment], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
@@ -591,10 +618,13 @@ class BridgeToolResultSuccess(BaseModel):
 
 
 class BridgeToolResultsRequest(BaseModel):
-    """Submits Tool Results and resumes the Task's existing event stream. The `type` field is `tool_results`."""
+    """Submits Tool Results to the Task whose `tool.use` events requested them. The Task then continues. The `type` field is `tool_results`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["tool_results"], Field(description="Identifies this request as Tool Result submission.")]
+    task_id: Annotated[
+        task_id_module.TaskId, Field(description="Task whose `tool.use` events these Tool Results answer.")
+    ]
     tool_results: Annotated[
         Annotated[
             list[

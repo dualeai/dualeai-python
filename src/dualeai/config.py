@@ -2,8 +2,9 @@
 
 Task and Agent requests use the Bridge hpke-http/3 endpoint derived from the
 HTTPS Gateway base. Library metadata requests use a separate protected
-endpoint with bearer authorization inside HPKE; ``tenant_id`` is part of their
-URL. Hosted-tool lifecycle operations require ``agent_id``. Attachment uploads
+endpoint; ``tenant_id`` is part of their URL. Both endpoints authenticate with
+the platform token issued for the API token. Hosted-tool lifecycle operations
+require ``agent_id``. Attachment uploads
 use the configured Agent ID unless a per-call ID is supplied.
 """
 
@@ -47,10 +48,11 @@ class DualeAIConfig(BaseSettings):
     Task operations are encrypted, including their method and path. Discovery
     GET and encrypted POST requests use /http-bridge/v1/hpke. The encrypted
     operations use these paths without the /http-bridge service name:
-    - POST /v1/hpke/tasks/{task_id} → SSE stream (create task, type=create)
-    - POST /v1/hpke/tasks/{task_id} → SSE stream (tool results, type=tool_results)
-    - POST /v1/hpke/tasks/{task_id} → SSE stream (continue, type=continue)
-    - GET /v1/hpke/tasks/{task_id} → SSE stream (reconnect)
+    - POST /v1/hpke/tasks → 202 (create task, type=create)
+    - POST /v1/hpke/tasks → 202 (continue, type=continue)
+    - POST /v1/hpke/tasks → 202 (tool results, type=tool_results)
+    - GET /v1/hpke/tasks/{task_id} → SSE stream (read and reconnect)
+    - POST /v1/hpke/tasks/{task_id}/stop → acceptance receipt (stop request)
 
     ``tenant_id`` and ``agent_id`` are not interchangeable with the API token:
     Library logical routes need ``tenant_id`` and hosted-tool lifecycle calls

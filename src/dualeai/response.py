@@ -455,7 +455,7 @@ class AgentResponse(Generic[T]):
 
     async def next(
         self,
-        message: str,
+        instruction: str,
         *,
         priority: PriorityClass = PriorityClass.standard,
         res: type[T] | None = None,
@@ -499,7 +499,9 @@ class AgentResponse(Generic[T]):
         Nothing in this SDK enforces the Platform behavior described here.
 
         Args:
-            message: New user turn for the continuation Task.
+            instruction: Instruction for the continuation Task: non-empty, at
+                most 100,000 characters, without NUL characters. It follows the
+                inherited task history.
             priority: This continuation's scheduling class. Omission selects
                 standard independently of this Task's class. Fast favors lower
                 waiting time for the same work and uses the Fast Task price.
@@ -532,6 +534,10 @@ class AgentResponse(Generic[T]):
 
         Raises:
             ValueError: If ``deadline`` is timezone-naive.
+            pydantic.ValidationError: If ``instruction`` is empty, longer than
+                100,000 characters, or contains a NUL character, or if
+                ``task_id`` is not a Task identifier that
+                ``dualeai.BridgeTaskContinueRequest.task_id`` accepts.
             asyncio.CancelledError: If this call is cancelled before it sends
                 the continuation; this Task keeps running.
 
@@ -548,15 +554,15 @@ class AgentResponse(Generic[T]):
         SDK enforces these Platform answers.
 
         Example:
-            response = await ask(action="What's 2+2?", sdk=sdk)
-            branch = await response.next(message="and times two?")
+            response = await ask(instruction="What's 2+2?", sdk=sdk)
+            branch = await response.next(instruction="and times two?")
             result = await response.model()
             final = await branch.model()
         """
         await self._accepted.wait()
         return await self.sdk._continue_task(  # noqa: SLF001 - paired SDK response implementation
             parent_task_id=self.task_id,
-            message=message,
+            instruction=instruction,
             priority=priority,
             response_type=res,
             deadline=deadline,
@@ -598,7 +604,7 @@ class AgentResponse(Generic[T]):
                 other reason.
 
         Example:
-            response = await ask(action="Analyse this contract", sdk=sdk)
+            response = await ask(instruction="Analyse this contract", sdk=sdk)
             await response.stop(reason="Wrong document supplied")
 
             try:

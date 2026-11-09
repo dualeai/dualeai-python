@@ -155,7 +155,6 @@ class MockHTTPTransport(HTTPTransportProtocol):
 
     async def run_task(
         self,
-        task_id: str,
         request: BridgeTaskRequest,
         *,
         accepted_callback: Callable[[], None] | None = None,
@@ -175,6 +174,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         Yields:
             BridgeSSEEvent objects from the injected queue.
         """
+        task_id = request.task_id
         self._requests.append(
             {
                 "operation": "run_task",
@@ -219,12 +219,12 @@ class MockHTTPTransport(HTTPTransportProtocol):
 
     async def submit_tool_results(
         self,
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         """Mock tool-results continuation stream."""
+        task_id = request.task_id
         self._requests.append(
             {
                 "operation": "submit_tool_results",

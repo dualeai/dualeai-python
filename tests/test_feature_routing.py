@@ -20,7 +20,7 @@ async def test_explicit_routing_policy_overrides_derived_capabilities(minimal_mo
     )
 
     await ask(
-        action="Route task",
+        instruction="Route task",
         capabilities=[Capability.agentic],
         routing=policy,
         sdk=minimal_mock_sdk,
@@ -41,7 +41,7 @@ async def test_explicit_routing_policy_overrides_derived_capabilities(minimal_mo
 async def test_capabilities_derive_only_required_routing_capabilities(minimal_mock_sdk: DualeAISDK) -> None:
     capabilities = [Capability.agentic, Capability.long_context]
 
-    await ask(action="Route task", capabilities=capabilities, sdk=minimal_mock_sdk)
+    await ask(instruction="Route task", capabilities=capabilities, sdk=minimal_mock_sdk)
 
     [call] = require_mock_http_transport(minimal_mock_sdk).get_requests()
     request = call["request"]
