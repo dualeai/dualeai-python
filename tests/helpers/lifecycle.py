@@ -31,7 +31,7 @@ def inject_llm_completion(
 ) -> None:
     """Queue a completion event for a task.
 
-    Call BEFORE invoking the SDK (use ``request_id=task_id`` on
+    Call BEFORE invoking the SDK (use ``task_id=task_id`` on
     ``ask()``) so the queued event is ready when the bridge stream
     opens.
 

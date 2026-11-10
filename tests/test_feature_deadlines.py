@@ -1,4 +1,4 @@
-"""Priority 9 tests for deadline/timeout handling feature.
+"""Tests for deadline and timeout handling.
 
 Tests deadline parameter propagation and timeout handling with REAL SDK (minimal mocking).
 
@@ -15,8 +15,8 @@ import pytest
 from dualeai import DualeAISDK
 from dualeai.constants import TimingDefaults
 from dualeai.models.bridge import BridgeTaskContinueRequest, BridgeTaskCreateRequest
-from dualeai.models.skill_enum import SkillEnum
-from dualeai.orchestrator import ask, continue_conversation
+from dualeai.models.capability import Capability
+from dualeai.orchestrator import ask
 from tests.mocks.mock_http import require_mock_http_transport
 
 
@@ -40,7 +40,12 @@ class TestUnitDeadlineHandling:
         deadline: datetime,
     ) -> None:
         """Preserve every supported deadline shape at the transport boundary."""
-        await ask(action="Task with deadline", skills=[SkillEnum.analysis], deadline=deadline, sdk=minimal_mock_sdk)
+        await ask(
+            instruction="Task with deadline",
+            capabilities=[Capability.long_context],
+            deadline=deadline,
+            sdk=minimal_mock_sdk,
+        )
 
         [record] = require_mock_http_transport(minimal_mock_sdk).get_requests()
         request = record["request"]
@@ -55,15 +60,14 @@ class TestUnitDeadlineHandling:
         """Test continue_task accepts and propagates deadline parameter."""
         sdk = minimal_mock_sdk
         deadline = datetime(2025, 1, 15, 10, 20, 0, tzinfo=timezone.utc)
-        parent = await ask(action="Start", request_id="original-task-123", sdk=sdk)
+        parent = await ask(instruction="Start", task_id="original-task-123", sdk=sdk)
         transport = require_mock_http_transport(sdk)
         transport.inject_event(parent.task_id, transport.create_task_completed_event())
         await parent.task
 
         # Continue task with deadline
-        await continue_conversation(
-            response=parent,
-            message="Continue the task",
+        await parent.next(
+            instruction="Continue the task",
             deadline=deadline,
         )
 
@@ -84,16 +88,16 @@ class TestUnitDeadlineHandling:
 
         # Submit first task
         await ask(
-            action="Task 1",
-            skills=[],
+            instruction="Task 1",
+            capabilities=[],
             deadline=deadline1,
             sdk=sdk,
         )
 
         # Submit second task with different deadline
         await ask(
-            action="Task 2",
-            skills=[],
+            instruction="Task 2",
+            capabilities=[],
             deadline=deadline2,
             sdk=sdk,
         )
@@ -111,8 +115,8 @@ class TestUnitDeadlineHandling:
         sdk = minimal_mock_sdk
 
         await ask(
-            action="Task without explicit deadline",
-            skills=[],
+            instruction="Task without explicit deadline",
+            capabilities=[],
             deadline=None,
             sdk=sdk,
         )
@@ -123,5 +127,4 @@ class TestUnitDeadlineHandling:
 
         request = requests[0]["request"]
         assert isinstance(request, BridgeTaskCreateRequest)
-        assert requests[0]["task_id"] is not None
         assert request.deadline is not None

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from re import fullmatch
 from typing import Annotated, Literal, Union
@@ -78,6 +80,8 @@ _PortableJsonValue = TypeAliasType(
 
 def _validate_string_constraints_2(value: object) -> object:
     if not isinstance(value, str):
+        if not isinstance(value, datetime):
+            raise ValueError("date-time input must be an RFC 3339 string or a datetime")
         return value
     if fullmatch("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})", value) is None:
         raise ValueError("string is not a canonical date-time")
@@ -96,6 +100,26 @@ def _reject_explicit_null(value: object) -> object:
     if value is None:
         raise ValueError("explicit null is not allowed; omit the field instead")
     return value
+
+
+@dataclass(frozen=True)
+class _EnumSchemaMetadata:
+    choices: tuple[tuple[str, Union[str, None], Union[str, None]], ...]
+
+    def __get_pydantic_json_schema__(self, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(core_schema)).copy()
+        json_schema.pop("enum", None)
+        json_schema.pop("const", None)
+        branches: list[JsonSchemaValue] = []
+        for value, title, description in self.choices:
+            branch: JsonSchemaValue = {"const": value}
+            if title is not None:
+                branch["title"] = title
+            if description is not None:
+                branch["description"] = description
+            branches.append(branch)
+        json_schema["oneOf"] = branches
+        return json_schema
 
 
 LibraryService = TypeAliasType(
@@ -118,7 +142,7 @@ class Library(BaseModel):
     current_path: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=300)],
         Field(
-            description="Current free-form folder path. It can contain slash-separated segments and can be changed. Paths are display metadata and are not unique."
+            description="Current free-form folder path. It can contain slash-separated segments and can be changed. Permissions name the path, and several Libraries can share one path and its permissions."
         ),
     ]
     current_tags: Annotated[
@@ -149,13 +173,13 @@ class Library(BaseModel):
 
 
 class LibraryCreateRequest(BaseModel):
-    """Creates a Library at the requested path, or returns a writable Library already using it. Paths are display metadata and are not unique."""
+    """Creates a Library at the requested path, or returns an active Library already using it, after IAM allows write on that path. Paths are not unique: Libraries at the same path share the permissions IAM gives that path."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     path: Annotated[
-        Annotated[StrictStr, Field(min_length=1, max_length=300)],
+        Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}*]*$")],
         Field(
-            description="Initial free-form folder path. It can contain slash-separated segments and does not require a prefix."
+            description="Initial free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *: IAM binds {self} and {tenant_id} in a path it checks, its resource contract refuses any other brace, and a policy pattern reads a trailing * as a wildcard."
         ),
     ]
 
@@ -256,9 +280,9 @@ class LibraryDocumentCreateResponse(BaseModel):
         Field(description="Initial ingestion status. It is always queued for a newly added document."),
     ]
     location: Annotated[
-        Annotated[StrictStr, Field(min_length=1, pattern="^/v1/tenants/[^/]+/[^/]+/documents/[^/]+$")],
+        Annotated[StrictStr, Field(min_length=1)],
         Field(
-            description="Path to read the document and poll its ingestion status. It matches the Location response header."
+            description="Relative URI reference to read the document and poll its ingestion status. Resolve it against the create or restore request URL. It matches the Location response header."
         ),
     ]
 
@@ -276,7 +300,7 @@ class LibraryDocumentDeleteRequest(BaseModel):
 
 
 class LibraryErrorCode(str, Enum):
-    """Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and PERMISSION_DRIFT require choosing an active Library or restoring write access."""
+    """Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."""
 
     expired_upload = "EXPIRED_UPLOAD"
     hash_mismatch = "HASH_MISMATCH"
@@ -287,18 +311,81 @@ class LibraryErrorCode(str, Enum):
     encrypted_document = "ENCRYPTED_DOCUMENT"
     extraction_failed = "EXTRACTION_FAILED"
     processing_timeout = "PROCESSING_TIMEOUT"
+    document_processing_failed = "DOCUMENT_PROCESSING_FAILED"
     malware_detected = "MALWARE_DETECTED"
     library_deleted = "LIBRARY_DELETED"
-    permission_drift = "PERMISSION_DRIFT"
-    index_write_failed = "INDEX_WRITE_FAILED"
-    segment_lost = "SEGMENT_LOST"
+    library_access_revoked = "LIBRARY_ACCESS_REVOKED"
+
+    @property
+    def display_title(self) -> Union[str, None]:
+        return {
+            LibraryErrorCode.expired_upload: "Upload Expired Before Ingestion",
+            LibraryErrorCode.hash_mismatch: None,
+            LibraryErrorCode.size_mismatch: None,
+            LibraryErrorCode.format_unsupported: None,
+            LibraryErrorCode.corrupt_document: None,
+            LibraryErrorCode.document_too_large: None,
+            LibraryErrorCode.encrypted_document: None,
+            LibraryErrorCode.extraction_failed: None,
+            LibraryErrorCode.processing_timeout: None,
+            LibraryErrorCode.document_processing_failed: "Document Processing Failed",
+            LibraryErrorCode.malware_detected: "Malware Detected",
+            LibraryErrorCode.library_deleted: "Library Deleted",
+            LibraryErrorCode.library_access_revoked: "Library Access Revoked",
+        }[self]
+
+    @property
+    def description(self) -> Union[str, None]:
+        return {
+            LibraryErrorCode.expired_upload: "Upload session expired before ingest could promote it",
+            LibraryErrorCode.hash_mismatch: "A new or corrected upload is required.",
+            LibraryErrorCode.size_mismatch: "A new or corrected upload is required.",
+            LibraryErrorCode.format_unsupported: None,
+            LibraryErrorCode.corrupt_document: None,
+            LibraryErrorCode.document_too_large: None,
+            LibraryErrorCode.encrypted_document: None,
+            LibraryErrorCode.extraction_failed: None,
+            LibraryErrorCode.processing_timeout: None,
+            LibraryErrorCode.document_processing_failed: "The document could not be processed. Upload it again.",
+            LibraryErrorCode.malware_detected: None,
+            LibraryErrorCode.library_deleted: "Choose an active Library.",
+            LibraryErrorCode.library_access_revoked: "The identity that uploaded the document lost write access to the library.",
+        }[self]
 
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
+        json_schema = _EnumSchemaMetadata(
+            (
+                (
+                    "EXPIRED_UPLOAD",
+                    "Upload Expired Before Ingestion",
+                    "Upload session expired before ingest could promote it",
+                ),
+                ("HASH_MISMATCH", None, "A new or corrected upload is required."),
+                ("SIZE_MISMATCH", None, "A new or corrected upload is required."),
+                ("FORMAT_UNSUPPORTED", None, None),
+                ("CORRUPT_DOCUMENT", None, None),
+                ("DOCUMENT_TOO_LARGE", None, None),
+                ("ENCRYPTED_DOCUMENT", None, None),
+                ("EXTRACTION_FAILED", None, None),
+                ("PROCESSING_TIMEOUT", None, None),
+                (
+                    "DOCUMENT_PROCESSING_FAILED",
+                    "Document Processing Failed",
+                    "The document could not be processed. Upload it again.",
+                ),
+                ("MALWARE_DETECTED", "Malware Detected", None),
+                ("LIBRARY_DELETED", "Library Deleted", "Choose an active Library."),
+                (
+                    "LIBRARY_ACCESS_REVOKED",
+                    "Library Access Revoked",
+                    "The identity that uploaded the document lost write access to the library.",
+                ),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and PERMISSION_DRIFT require choosing an active Library or restoring write access."
+                "description": "Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."
             }
         )
         return json_schema
@@ -366,21 +453,42 @@ class LibraryDocumentListRequest(BaseModel):
 
 
 class LibraryResponseDocumentStatus(str, Enum):
-    """Document ingestion status. queued means the document was accepted and is waiting to start; processing means ingestion has started; ready means ingestion completed; failed means ingestion ended unsuccessfully. Inspect failure for details when available."""
+    """Document ingestion status. Inspect failure for details when available."""
 
     queued = "queued"
     processing = "processing"
     ready = "ready"
     failed = "failed"
 
+    @property
+    def display_title(self) -> str:
+        return {
+            LibraryResponseDocumentStatus.queued: "Queued",
+            LibraryResponseDocumentStatus.processing: "Processing",
+            LibraryResponseDocumentStatus.ready: "Ready",
+            LibraryResponseDocumentStatus.failed: "Failed",
+        }[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            LibraryResponseDocumentStatus.queued: "The document was accepted and is waiting to start.",
+            LibraryResponseDocumentStatus.processing: "Document ingestion has started.",
+            LibraryResponseDocumentStatus.ready: "Document ingestion completed.",
+            LibraryResponseDocumentStatus.failed: "Document ingestion ended unsuccessfully.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
-        json_schema.update(
-            {
-                "description": "Document ingestion status. queued means the document was accepted and is waiting to start; processing means ingestion has started; ready means ingestion completed; failed means ingestion ended unsuccessfully. Inspect failure for details when available."
-            }
-        )
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("queued", "Queued", "The document was accepted and is waiting to start."),
+                ("processing", "Processing", "Document ingestion has started."),
+                ("ready", "Ready", "Document ingestion completed."),
+                ("failed", "Failed", "Document ingestion ended unsuccessfully."),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
+        json_schema.update({"description": "Document ingestion status. Inspect failure for details when available."})
         return json_schema
 
 
@@ -513,7 +621,7 @@ class LibraryDocumentUploadPart(BaseModel):
         Field(description="1-indexed part number."),
     ]
     upload_url: Annotated[
-        AnyUrl, Field(description="URL to which the client uploads this part with an HTTP PUT request.")
+        AnyUrl, Field(description="URL to which the caller uploads this part with an HTTP PUT request.")
     ]
     offset: Annotated[
         Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=0)],
@@ -574,7 +682,9 @@ class LibraryWithRevision(BaseModel):
     ]
     path: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=300)],
-        Field(description="Current free-form folder path. Paths are display metadata and are not unique."),
+        Field(
+            description="Current free-form folder path. Permissions name the path, and several Libraries can share one path and its permissions."
+        ),
     ]
     tags: Annotated[
         Annotated[
@@ -624,10 +734,10 @@ class LibraryPatchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra={"minProperties": 1})
     path: Annotated[
-        Union[Annotated[StrictStr, Field(min_length=1, max_length=300)], SkipJsonSchema[None]],
+        Union[Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}*]*$")], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="New free-form folder path. It can contain slash-separated segments and does not require a prefix."
+            description="New free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *: IAM binds {self} and {tenant_id} in a path it checks, its resource contract refuses any other brace, and a policy pattern reads a trailing * as a wildcard."
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     tags: Annotated[
@@ -665,7 +775,7 @@ LibraryPolicy = TypeAliasType(
     Annotated[
         authz_module.AuthzGrantInput,
         Field(
-            description="Resource-scoped access grant for one Library. Use library:read to read the Library, its revisions, its documents, and their previews; library:write to add documents, change metadata and tags, and restore trashed documents; library:delete to delete documents or the Library; and library:admin to manage its grants. library:* covers these four operations but not tenant-scoped library:upload."
+            description="Access grant on a Library's current path, shared by every Library at that path. Use library:read to read the Library, its revisions, its documents, and their previews; library:write to add documents, change metadata and tags, and restore trashed documents; library:delete to delete documents or the Library; and library:admin to manage its grants. library:* covers these operations but not tenant-scoped library:upload."
         ),
     ],
 )

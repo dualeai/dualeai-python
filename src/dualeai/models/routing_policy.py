@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Annotated, Union
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictFloat
 from pydantic.json_schema import SkipJsonSchema
 
-from dualeai.models import skill_enum as skill_enum_module
+from dualeai.models import capability as capability_module
 
 __all__: list[str] = ["RoutingPolicy"]
 
@@ -31,15 +31,13 @@ class RoutingPolicy(BaseModel):
                     "target_accuracy": 0.85,
                     "cost_sensitivity": 0.2,
                     "speed_preference": 0.7,
-                    "priority_level": 5,
-                    "required_skills": ["code", "analysis"],
+                    "required_capabilities": ["code", "long_context"],
                 },
                 {
                     "target_accuracy": 0.95,
                     "cost_sensitivity": 0.9,
-                    "priority_level": 0,
-                    "required_skills": ["reasoning", "analysis"],
-                    "preferred_skills": ["agentic", "long_context"],
+                    "required_capabilities": ["problem_solving", "long_context"],
+                    "preferred_capabilities": ["agentic", "long_context"],
                 },
             ]
         },
@@ -104,30 +102,19 @@ class RoutingPolicy(BaseModel):
             json_schema_extra={"default": None},
         ),
     ] = None
-    priority_level: Annotated[
-        Union[
-            Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=-10, le=10)],
-            SkipJsonSchema[None],
-        ],
+    required_capabilities: Annotated[
+        Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Task priority from -10 to 10. Lower values reduce the preference for lower measured latency, 0 applies the normal balance, and higher values strengthen it. Cost preference is controlled separately by cost_sensitivity.",
-            json_schema_extra={"default": 0},
-        ),
-    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
-    required_skills: Annotated[
-        Union[Annotated[list[skill_enum_module.SkillEnum], Field(strict=True)], SkipJsonSchema[None]],
-        BeforeValidator(_reject_explicit_null),
-        Field(
-            description="Skills the selected model should possess. Routing prefers models with evidence for every listed skill and falls back to the best available route when the full request cannot be satisfied.",
+            description="Work capacities the task requires of whoever executes it. A route has a capability when its benchmark evidence places it among the stronger of the enabled routes that can take the request. Routing prefers routes that have every listed capability and falls back to the closest available route when no route whose context window fits the request has all of them.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
-    preferred_skills: Annotated[
-        Union[Annotated[list[skill_enum_module.SkillEnum], Field(strict=True)], SkipJsonSchema[None]],
+    preferred_capabilities: Annotated[
+        Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Skills that improve model preference but do not exclude other available routes.",
+            description="Work capacities that would help. The stronger a route is for one, compared with the other routes that can take the request, the more it is preferred; no route is excluded.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)

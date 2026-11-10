@@ -1,14 +1,14 @@
-"""Transport Protocol for SDK communication (RFC-051).
+"""Structural protocol for SDK HTTP and SSE communication.
 
-Provides clean dependency injection boundary for testing.
+Provides a dependency injection boundary.
 
 Protocol:
-- HTTPTransportProtocol: HTTP/SSE bridge transport
+- HTTPTransportProtocol: protected Bridge and Library HTTP transport
 
-Production uses HTTPTransport, tests use MockHTTPTransport.
+HTTPTransport is the production implementation.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from dualeai.models.bridge import BridgeTaskContinueRequest, BridgeTaskCreateRequest
@@ -45,10 +45,10 @@ if TYPE_CHECKING:
 
 
 class HTTPTransportProtocol(Protocol):
-    """Protocol for HTTP/SSE bridge transport (RFC-051).
+    """Protocol implemented by every HTTP/SSE transport.
 
-    Abstracts HTTP bridge operations for clean dependency injection.
-    Production uses HTTPTransport, tests use MockHTTPTransport.
+    Abstracts protected Bridge and Library operations for dependency injection.
+    HTTPTransport is the production implementation.
 
     See: https://peps.python.org/pep-0544/
     """
@@ -59,39 +59,45 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def connect(self) -> None:
-        """Establish HTTP session to bridge endpoint."""
+        """Establish the Bridge and Library protected sessions."""
         ...
 
     async def disconnect(self) -> None:
-        """Close HTTP session and cleanup resources."""
+        """Close both protected service sessions and release resources."""
         ...
 
     async def stop_task(self, task_id: str, request: "TaskStopRequest") -> "TaskStopAccepted":
-        """Ask the platform to stop a running task and everything under it.
+        """Submit a Task stop request and return its acceptance receipt.
 
-        POST /v1/tasks/{task_id}/stop. Returns once the platform accepts the
-        request; the task ends with `task.stopped` on its event stream.
+        The receipt confirms that the caller may stop the Task. It proves
+        neither that the Task exists nor that it stopped: a permitted stop of a
+        Task that already ended, or that the Platform does not know, is also
+        accepted. Nothing in this SDK enforces this Platform behavior.
         """
         ...
 
     def run_task(
         self,
-        task_id: str,
         request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit a root create or child continuation and stream that task.
 
-        POST /v1/tasks/{task_id}. The typed body's discriminator selects
-        creation or continuation. The transport-level
-        retry loop in ``HTTPTransport._stream_request`` may
-        transparently switch to GET on retry once the bridge has
-        accepted the original POST (see that docstring).
+        Encrypted POST /v1/hpke/tasks with the typed body, whose discriminator
+        selects creation or continuation; the Platform accepts it with an empty
+        202. The stream is then read with encrypted GET
+        /v1/hpke/tasks/{task_id}, from the Task's first event; reconnects use
+        the same GET with the last event ID.
 
         Args:
-            task_id: Client-owned task ID in the URL. Root callers may select
-                it; otherwise the SDK generates UUID4. Continuations use a new
-                SDK-generated UUID4 child ID.
-            request: Fully validated bridge request body.
+            request: Fully validated bridge request body. Its ``task_id`` is
+                the client-owned Task ID: a caller selects it with the
+                ``task_id`` argument of ``ask``, ``submit_task`` or
+                ``AgentResponse.next``; otherwise the SDK generates UUID4.
+            accepted_callback: Called once when the Platform accepts the
+                request with its 202, before the stream is read; never called
+                for a refused request.
 
         Yields:
             BridgeSSEEvent objects from SSE stream.
@@ -104,17 +110,17 @@ class HTTPTransportProtocol(Protocol):
 
     def submit_tool_results(
         self,
-        task_id: str,
         request: "BridgeToolResultsRequest",
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator["BridgeSSEEvent"]:
         """Submit tool results and resume the same public task stream.
 
-        POST /v1/tasks/{task_id} with type=tool_results. The bridge publishes
-        an internal tool-result continuation beneath the URL task and returns
-        that URL task's existing stream. ``last_event_id`` is the exact
-        ``NATS-sequence:event-index`` cursor for the triggering ``tool.use``.
+        Encrypted POST /v1/hpke/tasks with type=tool_results; the body's
+        ``task_id`` names the Task that emitted the ``tool.use`` events. After
+        the 202, encrypted GET /v1/hpke/tasks/{task_id} reads that Task's
+        stream after ``last_event_id``, the opaque SSE cursor of the triggering
+        ``tool.use``.
         """
         ...
 
@@ -147,7 +153,7 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def delete_library(self, request: "LibraryDeleteRequest") -> None:
-        """Soft-delete one Library."""
+        """Send a delete request for one Library."""
         ...
 
     async def list_library_documents(self, request: "LibraryDocumentListRequest") -> "LibraryDocumentPage":
@@ -159,20 +165,18 @@ class HTTPTransportProtocol(Protocol):
         ...
 
     async def delete_library_document(self, request: "LibraryDocumentDeleteRequest") -> None:
-        """Soft-delete one document."""
+        """Send a delete request for one document."""
         ...
 
     async def create_document_upload(
         self,
         request: "LibraryDocumentUploadRequest",
     ) -> "LibraryDocumentUploadResponse":
-        """Request presigned URLs for document upload (RFC-113).
+        """Request presigned URLs for document upload.
 
-        ``POST /libraries/v1/tenants/{tenant_id}/document-uploads`` over plain
-        HTTPS with ``Authorization: Bearer <api_token>``. Caller identity is
-        carried by the bearer token (the server resolves
-        ``token:{sha512(api_token)}`` via Profile); the body is just
-        ``{size_bytes}``.
+        ``POST /v1/hpke/tenants/{tenant_id}/document-uploads`` runs inside
+        the HPKE tunnel authenticated by the issued platform token. The body
+        contains only ``size_bytes``.
 
         Args:
             request: Upload request body.
@@ -191,9 +195,9 @@ class HTTPTransportProtocol(Protocol):
     ) -> "LibraryDocumentCreateResponse":
         """Create a queued Library document after all parts uploaded.
 
-        ``POST /libraries/v1/tenants/{tenant_id}/{library_id}/documents`` over
-        plain HTTPS with ``Authorization: Bearer <api_token>`` (RFC-113,
-        §5). The body binds a temporary upload session to a stable Library id.
+        ``POST /v1/hpke/tenants/{tenant_id}/{library_id}/documents`` runs
+        inside the HPKE tunnel authenticated by the issued platform token. The body
+        binds a temporary upload session to a stable Library id.
 
         Args:
             request: Operation request with the stable Library identifier and

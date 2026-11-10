@@ -1,8 +1,8 @@
 """Performance benchmarks for Duale AI Python SDK.
 
 Covers the hot paths: Pydantic model validation (config, SSE events),
-cache key generation/validation, JSON serialization, SSE checksum,
-and utility functions (string truncation, backoff math).
+cache key generation/validation, JSON serialization, SSE parsing,
+and string truncation.
 
 Run with: make test-bench
 
@@ -19,7 +19,7 @@ from pytest_codspeed import BenchmarkFixture
 
 from dualeai.cache import CacheConfig, MockCacheBackend
 from dualeai.config import DualeAIConfig
-from dualeai.events.sse_parser import _compute_checksum, parse_sse_stream
+from dualeai.events.sse_parser import parse_sse_stream
 from dualeai.models.bridge import (
     BridgeContentDeltaResponse,
     BridgeSSEEvent,
@@ -48,8 +48,9 @@ def content_delta_json() -> str:
     return json.dumps(
         {
             "type": "content.delta",
-            "timestamp": "2025-01-01T00:00:00Z",
             "delta": "Hello, world!",
+            "generation": 1,
+            "sequence": 0,
         }
     )
 
@@ -76,8 +77,9 @@ def sse_event_content_delta() -> dict[str, object]:
         "id": "42:1",
         "data": {
             "type": "content.delta",
-            "timestamp": "2025-01-01T00:00:00Z",
             "delta": "streaming chunk",
+            "generation": 1,
+            "sequence": 0,
         },
         "timestamp": "2025-01-01T00:00:00Z",
     }
@@ -100,8 +102,7 @@ def sse_event_task_completed() -> dict[str, object]:
 @pytest.fixture(scope="module")
 def sse_content_delta_wire(content_delta_json: str) -> bytes:
     """One complete content-delta event in the Bridge wire format."""
-    checksum = _compute_checksum("content.delta", content_delta_json)
-    return (f": crc={checksum}\nid: 42:1\nevent: content.delta\ndata: {content_delta_json}\n\n").encode()
+    return f"id: 42:1\nevent: content.delta\ndata: {content_delta_json}\n\n".encode()
 
 
 # ===========================================================================
@@ -115,13 +116,13 @@ class TestConfigValidation:
     def test_config_create_minimal(self, benchmark: BenchmarkFixture) -> None:
         @benchmark
         def _() -> None:
-            DualeAIConfig(token="dualeai_test_token_12345")
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
 
     def test_config_create_full(self, benchmark: BenchmarkFixture) -> None:
         @benchmark
         def _() -> None:
             DualeAIConfig(
-                token="dualeai_test_token_12345",
+                token="dualeai_test_token_12345_padded_to_32bytes",
                 endpoint="https://api.duale.ai",
             )
 
@@ -193,27 +194,15 @@ class TestModelValidation:
 
 
 # ===========================================================================
-# SSE checksum computation
+# SSE parsing
 # ===========================================================================
 
 
-class TestSSEChecksum:
-    """CRC32 checksum computation (per-event overhead)."""
-
-    def test_checksum_short_payload(self, benchmark: BenchmarkFixture) -> None:
-        @benchmark
-        def _() -> None:
-            _compute_checksum("content.delta", '{"delta":"hello"}')
-
-    def test_checksum_large_payload(self, benchmark: BenchmarkFixture) -> None:
-        large_data = json.dumps({"delta": "x" * 10_000})
-
-        @benchmark
-        def _() -> None:
-            _compute_checksum("content.delta", large_data)
+class TestSSEParser:
+    """Parse events already authenticated by hpke-http."""
 
     async def test_parse_content_delta(self, sse_content_delta_wire: bytes) -> None:
-        """Parse one complete Bridge event through checksum and model validation."""
+        """Parse one complete Bridge event through model validation."""
 
         async def chunks() -> AsyncIterator[bytes]:
             yield sse_content_delta_wire
@@ -274,14 +263,13 @@ class TestCacheOperations:
         @benchmark
         def _() -> None:
             CacheConfig(
-                max_entries=50_000,
                 ttl_jitter_factor=0.15,
                 cleanup_interval=timedelta(minutes=5),
             )
 
 
 # ===========================================================================
-# Utility functions — string truncation, backoff math
+# Utility functions — string truncation
 # ===========================================================================
 
 
@@ -294,5 +282,3 @@ class TestUtilities:
         @benchmark
         def _() -> None:
             truncate_error_preview(error)
-
-    # Backoff-tracker benchmarks were removed alongside ConsecutiveTimeoutTracker.

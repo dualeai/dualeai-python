@@ -13,25 +13,25 @@ class TestObservabilityEndpoints:
     """Per-signal OTLP/HTTP endpoint construction.
 
     OTLP exporter spec: an endpoint passed explicitly to an exporter is used
-    AS-IS (no per-signal path appended) — verified against the installed
-    opentelemetry-exporter-otlp-proto-http source (1.41.0 and 1.44.0). The SDK
-    must therefore build ``{base}/v1/<signal>`` itself.
+    AS-IS (no per-signal path appended), per the
+    opentelemetry-exporter-otlp-proto-http source. The SDK must therefore build
+    ``{base}/v1/<signal>`` itself.
     """
 
     def test_default_observability_endpoint_uses_otlp_http_port(self):
         """Default endpoint targets the OTLP/HTTP port 4318, not gRPC 4317."""
-        config = DualeAIConfig(token="dualeai_test_token_12345")
+        config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
         assert config.observability.endpoint == "http://localhost:4318"
 
     def test_otel_traces_endpoint_appends_v1_traces(self):
         """Span exporter URL is the base endpoint plus /v1/traces."""
-        config = DualeAIConfig(token="dualeai_test_token_12345")
+        config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
         config.observability.endpoint = "https://telemetry.example.com"
         assert config.otel_traces_endpoint == "https://telemetry.example.com/v1/traces"
 
     def test_otel_metrics_endpoint_appends_v1_metrics(self):
         """Metric exporter URL is the base endpoint plus /v1/metrics."""
-        config = DualeAIConfig(token="dualeai_test_token_12345")
+        config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
         config.observability.endpoint = "https://telemetry.example.com/"
         # Trailing slash on the base must not produce a double slash.
         assert config.otel_metrics_endpoint == "https://telemetry.example.com/v1/metrics"
@@ -41,22 +41,21 @@ class TestObservabilityEndpoints:
 class TestConfigLoading:
     """Test configuration loading from various sources."""
 
-    def test_default_config_values(self):
-        """Test that default config values are set correctly in Field definitions."""
-        # Test the class field defaults directly (what would be used without env vars)
-        # Check Field defaults from the class definition
-        fields = DualeAIConfig.model_fields
-        assert fields["endpoint"].default == "https://api.duale.ai"
-        assert fields["debug"].default is False
-        # token's Field default is None (pydantic-settings fills it from
-        # DUALEAI_TOKEN); required-ness is enforced by validate_token_present_and_format
-        # at validation time, not by the Field declaration itself.
-        assert fields["token"].default is None
+    def test_a_token_alone_targets_the_hosted_api_origin_with_debug_off(self):
+        """An unset endpoint is the documented hosted API origin, and debug is off."""
+        config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes")
+        assert config.endpoint == "https://api.beta.duale.ai"
+        assert config.debug is False
+
+    def test_a_config_without_a_token_is_refused(self):
+        """A token is required; no default stands in for it."""
+        with pytest.raises(ValueError, match="token is required"):
+            DualeAIConfig()
 
     @patch.dict(
         os.environ,
         {
-            "DUALEAI_TOKEN": "dualeai_test_dev_token_12345",
+            "DUALEAI_TOKEN": "dualeai_test_dev_token_12345_padded_to_32bytes",
             "DUALEAI_ENDPOINT": "https://test-bridge:8080",
             "DUALEAI_DEBUG": "true",
             "DUALEAI_TENANT_ID": "test-tenant",
@@ -66,7 +65,7 @@ class TestConfigLoading:
         """Test that configuration loads from environment variables."""
         # Create config with mocked environment
         test_config = DualeAIConfig()
-        assert test_config.token == "dualeai_test_dev_token_12345"
+        assert test_config.token == "dualeai_test_dev_token_12345_padded_to_32bytes"
         assert test_config.endpoint == "https://test-bridge:8080"
         assert test_config.debug is True
 
@@ -81,7 +80,7 @@ class TestConfigLoading:
             with patch.dict(
                 os.environ,
                 {
-                    "DUALEAI_TOKEN": "dualeai_test_token_12345",
+                    "DUALEAI_TOKEN": "dualeai_test_token_12345_padded_to_32bytes",
                     "DUALEAI_DEBUG": "false",
                     "DUALEAI_TENANT_ID": "test-tenant",
                 },
@@ -94,7 +93,7 @@ class TestConfigLoading:
             with patch.dict(
                 os.environ,
                 {
-                    "DUALEAI_TOKEN": "dualeai_test_token_12345",
+                    "DUALEAI_TOKEN": "dualeai_test_token_12345_padded_to_32bytes",
                     "DUALEAI_TENANT_ID": "test-tenant",
                 },
             ):
@@ -108,7 +107,7 @@ class TestConfigLoading:
         with patch.dict(
             os.environ,
             {
-                "DUALEAI_TOKEN": "dualeai_test_token_12345",
+                "DUALEAI_TOKEN": "dualeai_test_token_12345_padded_to_32bytes",
                 # Lowercase var with a NON-default value: only case-insensitive
                 # loading can flip debug to True (default is False).
                 "dualeai_debug": "true",
@@ -123,7 +122,7 @@ class TestConfigLoading:
         with patch.dict(
             os.environ,
             {
-                "DUALEAI_TOKEN": "dualeai_test_token_12345",
+                "DUALEAI_TOKEN": "dualeai_test_token_12345_padded_to_32bytes",
                 "DUALEAI_OBSERVABILITY__ENDPOINT": "http://otel:4317",
                 "DUALEAI_TENANT_ID": "test-tenant",
             },
@@ -144,7 +143,7 @@ class TestConfigValidation:
         with patch.dict(
             os.environ,
             {
-                "DUALEAI_TOKEN": "dualeai_test_token_12345",
+                "DUALEAI_TOKEN": "dualeai_test_token_12345_padded_to_32bytes",
                 "DUALEAI_DEBUG": raw_value,
                 "DUALEAI_TENANT_ID": "test-tenant",
             },
@@ -167,27 +166,38 @@ class TestConfigValidation:
             DualeAIConfig()
 
     def test_endpoint_format_validation(self):
-        """Test that endpoint must be HTTP(S) URL."""
+        """The Gateway base is an HTTPS origin, without an operation path."""
         with (
             patch.dict(
                 os.environ,
                 {
-                    "DUALEAI_TOKEN": "dualeai_test_token_12345",
+                    "DUALEAI_TOKEN": "dualeai_test_token_12345_padded_to_32bytes",
                     "DUALEAI_ENDPOINT": "ftp://invalid-protocol",
                     "DUALEAI_TENANT_ID": "test-tenant",
                 },
             ),
-            pytest.raises(ValueError, match="endpoint must be an HTTP"),
+            pytest.raises(ValueError, match="endpoint must be an absolute HTTPS URL"),
         ):
             DualeAIConfig()
+
+        with pytest.raises(ValueError, match="absolute HTTPS URL"):
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes", endpoint="http://localhost/hpke")
+        with pytest.raises(ValueError, match="absolute HTTPS URL"):
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes", endpoint="https://host/hpke?x=1")
+        with pytest.raises(ValueError, match="HTTPS Gateway base URL"):
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes", endpoint="https://host/hpke/")
+        assert (
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes", endpoint="https://host/").endpoint
+            == "https://host"
+        )
 
     @pytest.mark.parametrize("redis_url", ["redis://cache.example:6379/0", "rediss://cache.example:6380/0"])
     def test_redis_url_accepts_plain_and_tls_schemes(self, redis_url: str):
         """Redis configuration accepts both redis-py connection schemes."""
-        config = DualeAIConfig(token="dualeai_test_token_12345", redis_url=redis_url)
+        config = DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes", redis_url=redis_url)
         assert config.redis_url == redis_url
 
     def test_redis_url_rejects_other_schemes(self):
         """Redis configuration rejects URLs that redis-py must not receive."""
         with pytest.raises(ValueError, match="redis:// or rediss://"):
-            DualeAIConfig(token="dualeai_test_token_12345", redis_url="http://cache.example:6379/0")
+            DualeAIConfig(token="dualeai_test_token_12345_padded_to_32bytes", redis_url="http://cache.example:6379/0")

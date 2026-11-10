@@ -46,7 +46,13 @@ TestOutput = str | int | float | bool | dict[str, str | int | float | bool] | li
 
 
 class MockLibrariesClient(LibrariesClient):
-    """In-memory implementation of the public Library client."""
+    """In-memory subset of the Library client for deterministic tests.
+
+    It performs no HTTP, authentication, object-store upload, or asynchronous
+    ingestion. ``wait_for_document`` changes a queued document to ``ready``
+    immediately, and deletes remove in-memory records rather than modelling
+    service retention or trash behavior.
+    """
 
     def __init__(self, *, tenant_id: str = "tenant-test") -> None:
         self._tenant_id = tenant_id
@@ -171,7 +177,7 @@ class MockLibrariesClient(LibrariesClient):
                 document_id=document_id,
                 library_id=library.id,
                 status="queued",
-                location=f"/v1/tenants/{self._tenant_id}/{library.id}/documents/{document_id}",
+                location=f"/v1/hpke/tenants/{self._tenant_id}/{library.id}/documents/{document_id}",
             )
         return receipts
 
@@ -222,8 +228,8 @@ class MockSDK(DualeAISDK):
     """Offline test helper with keyed responses and an in-memory Library client.
 
     ``mock_ask()`` is a deterministic lookup, not the production ``ask()``
-    transport. It does not simulate streaming, tool dispatch, or terminal
-    errors.
+    transport. It does not simulate streaming, Tool dispatch, terminal errors,
+    authentication, retries, object storage, or asynchronous document ingestion.
     """
 
     def __init__(self) -> None:
@@ -231,10 +237,10 @@ class MockSDK(DualeAISDK):
 
         Library methods use an in-memory tenant and never open a connection.
         """
-        test_token = "dualeai_test_mock_token_12345"
+        test_token = "dualeai_test_mock_token_12345_padded_to_32bytes"
 
         config = DualeAIConfig(
-            endpoint="http://mock-bridge:8080",
+            endpoint="https://mock-bridge:8080",
             token=test_token,
             tenant_id="tenant-test",
             redis_url="redis://localhost:6379",
@@ -243,12 +249,12 @@ class MockSDK(DualeAISDK):
         self._libraries = MockLibrariesClient(tenant_id="tenant-test")
         self._mock_responses: dict[str, TestOutput] = {}
 
-    def set_mock_response(self, action: str, response: TestOutput) -> None:
-        """Set a mock response for a specific action."""
-        self._mock_responses[action] = response
+    def set_mock_response(self, instruction: str, response: TestOutput) -> None:
+        """Set a mock response for a specific instruction."""
+        self._mock_responses[instruction] = response
 
-    async def mock_ask(self, action: str, **kwargs: object) -> TestOutput:  # noqa: ARG002  # kwargs needed for API compatibility
-        """Return the response registered for ``action``, or a stable fallback."""
-        if action in self._mock_responses:
-            return self._mock_responses[action]
-        return f"Mock response for: {action}"
+    async def mock_ask(self, instruction: str) -> TestOutput:
+        """Return the response registered for ``instruction``, or a stable fallback."""
+        if instruction in self._mock_responses:
+            return self._mock_responses[instruction]
+        return f"Mock response for: {instruction}"

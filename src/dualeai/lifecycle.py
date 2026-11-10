@@ -1,11 +1,8 @@
 """Hosted-agent liveness: registration, heartbeat, deregistration, server clock.
 
-``LifecycleManager`` is the RFC-121 liveness collaborator extracted from ``DualeAISDK``
-(the Temporal ``Worker`` role — execution/liveness that borrows a connection, never the
-front door). It owns the disjoint lifecycle state island (process id, clock offset,
-heartbeat task, registration bookkeeping) and depends on the SDK only through two
-injected callables — an events-client accessor and a tool-manifest accessor — so it
-never imports ``DualeAISDK`` (no object cycle).
+``LifecycleManager`` owns process id, clock offset, heartbeat tasks, and
+registration bookkeeping. It depends on the SDK through injected client and
+Tool-manifest accessors, avoiding a back-reference to ``DualeAISDK``.
 """
 
 from __future__ import annotations
@@ -62,12 +59,11 @@ class _ManifestSnapshot:
 
 
 class LifecycleManager:
-    """Owns agent registration + heartbeat + the server-time clock (RFC-121).
+    """Own agent registration, heartbeat, and server-time estimation.
 
-    Borrows (never imports a sibling): ``ensure_events_client`` (a
-    ``ConnectionManager``-style accessor on the SDK) and ``manifest`` (the tool
-    registry read, ``DualeAISDK.registered_tools``). Exports the clock via
-    :meth:`estimated_server_time`, which the tool-execution path reads for deadline math.
+    Receives an events-client accessor and a Tool-manifest accessor from the SDK
+    rather than importing the SDK facade. The Tool-execution path reads its
+    clock through :meth:`estimated_server_time`.
     """
 
     def __init__(
@@ -256,7 +252,7 @@ class LifecycleManager:
         return snapshot
 
     def _jittered_interval_seconds(self, *, base_seconds: float, jitter_seconds: float) -> float:
-        """Return a bounded jittered interval; zero base remains zero for tests."""
+        """Return a bounded jittered interval; a zero base stays zero."""
         if base_seconds <= 0:
             return 0.0
         jitter = self._lifecycle_jitter_random.uniform(-jitter_seconds, jitter_seconds)
@@ -309,9 +305,8 @@ class LifecycleManager:
         server_midpoint = response.server_received_at + (response.server_sent_at - response.server_received_at) / 2
         local_midpoint = local_sent_at + round_trip / 2
         self._clock_offset = server_midpoint - local_midpoint
-        # Diagnostic only: the platform never trusts SDK-sent time (it stamps its own
-        # received_at). The offset improves the advisory lifecycle `time` and local
-        # deadline estimation; surface it for troubleshooting clock skew.
+        # The SDK uses this offset for advisory lifecycle timestamps and local
+        # Tool-deadline estimation; surface it for clock-skew troubleshooting.
         logger.debug(
             "Updated heartbeat clock-offset estimate",
             clock_offset_seconds=round(self._clock_offset.total_seconds(), 3),
@@ -337,14 +332,10 @@ class LifecycleManager:
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeats until cleanup cancels the task.
 
-        A single auth failure is tolerated and retried on the next beat (a
-        token-rotation blip or a brief Profile authz-cache deny should not tear
-        down serve()); a second consecutive auth failure is a hard revocation and
-        stops the loop. Other failures are treated as transient and tolerated up
-        to TimingDefaults.MAX_CONSECUTIVE_HEARTBEAT_FAILURES consecutive misses, so
-        a single network blip does not tear down serve() — the platform holds the
-        agent online across two missed beats (RFC-121). A successful beat resets
-        both counters.
+        One authentication failure is retried; a second consecutive
+        authentication failure stops the loop. Other failures stop the loop at
+        ``TimingDefaults.MAX_CONSECUTIVE_HEARTBEAT_FAILURES`` consecutive
+        misses. A successful heartbeat resets both counters.
         """
         consecutive_failures = 0
         consecutive_auth_failures = 0

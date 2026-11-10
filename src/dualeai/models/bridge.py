@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from re import fullmatch
 from typing import Annotated, Literal, Union
@@ -23,10 +25,11 @@ from pydantic.json_schema import JsonSchemaValue, SkipJsonSchema
 from pydantic_core import CoreSchema
 from typing_extensions import TypeAliasType
 
-from dualeai.models import action_prompt as action_prompt_module
 from dualeai.models import agent_id as agent_id_module
+from dualeai.models import attachment as attachment_module
 from dualeai.models import json_value as json_value_module
 from dualeai.models import llm_result as llm_result_module
+from dualeai.models import priority_class as priority_class_module
 from dualeai.models import problem_details as problem_details_module
 from dualeai.models import response_format as response_format_module
 from dualeai.models import routing_policy as routing_policy_module
@@ -54,6 +57,7 @@ __all__: list[str] = [
     "BridgeToolUseResponse",
     "HeartbeatStatus",
     "RegisteredTool",
+    "TaskInstruction",
 ]
 _PortableJsonValue = TypeAliasType(
     "_PortableJsonValue",
@@ -79,10 +83,32 @@ def _validate_string_constraints_2(value: object) -> object:
 
 def _validate_string_constraints_3(value: object) -> object:
     if not isinstance(value, str):
+        if not isinstance(value, datetime):
+            raise ValueError("date-time input must be an RFC 3339 string or a datetime")
         return value
     if fullmatch("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})", value) is None:
         raise ValueError("string is not a canonical date-time")
     return value
+
+
+@dataclass(frozen=True)
+class _EnumSchemaMetadata:
+    choices: tuple[tuple[str, Union[str, None], Union[str, None]], ...]
+
+    def __get_pydantic_json_schema__(self, core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+        json_schema = handler.resolve_ref_schema(handler(core_schema)).copy()
+        json_schema.pop("enum", None)
+        json_schema.pop("const", None)
+        branches: list[JsonSchemaValue] = []
+        for value, title, description in self.choices:
+            branch: JsonSchemaValue = {"const": value}
+            if title is not None:
+                branch["title"] = title
+            if description is not None:
+                branch["description"] = description
+            branches.append(branch)
+        json_schema["oneOf"] = branches
+        return json_schema
 
 
 def _reject_explicit_null(value: object) -> object:
@@ -110,7 +136,7 @@ class AgentDeregistrationMessage(BaseModel):
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity for this lifecycle request. It must match the identity bound to the SDK token."
+            description="Agent Identity this lifecycle request acts on. IAM decides whether the caller may perform this action on that identity."
         ),
     ]
     process_id: Annotated[
@@ -136,18 +162,36 @@ class AgentDeregistrationMessage(BaseModel):
 
 
 class HeartbeatStatus(str, Enum):
-    """Whether this SDK process can serve registered Tool Calls. `healthy` and `degraded` renew Tool availability; `unhealthy` does not."""
+    """Whether this SDK process can serve registered Tool Calls."""
 
     healthy = "healthy"
     degraded = "degraded"
     unhealthy = "unhealthy"
 
+    @property
+    def display_title(self) -> Union[str, None]:
+        return {HeartbeatStatus.healthy: None, HeartbeatStatus.degraded: None, HeartbeatStatus.unhealthy: None}[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            HeartbeatStatus.healthy: "Renews Tool availability.",
+            HeartbeatStatus.degraded: "Renews Tool availability.",
+            HeartbeatStatus.unhealthy: "Does not renew Tool availability.",
+        }[self]
+
     @staticmethod
     def __get_pydantic_json_schema__(core_schema: CoreSchema, handler: GetJsonSchemaHandler) -> JsonSchemaValue:
-        json_schema = handler.resolve_ref_schema(handler(core_schema))
+        json_schema = _EnumSchemaMetadata(
+            (
+                ("healthy", None, "Renews Tool availability."),
+                ("degraded", None, "Renews Tool availability."),
+                ("unhealthy", None, "Does not renew Tool availability."),
+            )
+        ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "Whether this SDK process can serve registered Tool Calls. `healthy` and `degraded` renew Tool availability; `unhealthy` does not.",
+                "description": "Whether this SDK process can serve registered Tool Calls.",
                 "examples": ["healthy", "degraded", "unhealthy"],
             }
         )
@@ -155,13 +199,13 @@ class HeartbeatStatus(str, Enum):
 
 
 class AgentHeartbeatMessage(BaseModel):
-    """Request body for `POST /v1/agent/heartbeat`. Reports whether one SDK process can continue serving its registered Tools."""
+    """Reports whether one SDK process can continue serving its registered Tools."""
 
     model_config = ConfigDict(extra="forbid", title="AgentHeartbeatMessage", json_schema_extra=None)
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity for this lifecycle request. It must match the identity bound to the SDK token."
+            description="Agent Identity this lifecycle request acts on. IAM decides whether the caller may perform this action on that identity."
         ),
     ]
     process_id: Annotated[
@@ -191,7 +235,7 @@ class AgentHeartbeatMessage(BaseModel):
 
 
 class AgentHeartbeatResponse(BaseModel):
-    """Response to an accepted `POST /v1/agent/heartbeat`. Its timestamps let the SDK estimate server-clock offset."""
+    """Timestamps from an accepted heartbeat let the SDK estimate server-clock offset."""
 
     model_config = ConfigDict(extra="forbid", title="AgentHeartbeatResponse", json_schema_extra=None)
     server_received_at: Annotated[
@@ -204,7 +248,7 @@ class AgentHeartbeatResponse(BaseModel):
     ]
     client_sent_at: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="Client timestamp echoed from the accepted heartbeat."),
+        Field(description="SDK timestamp echoed from the accepted heartbeat."),
     ]
 
 
@@ -214,7 +258,9 @@ class RegisteredTool(BaseModel):
     model_config = ConfigDict(extra="forbid", title="RegisteredTool", json_schema_extra=None)
     tool: Annotated[
         tool_module.Tool,
-        Field(description="Model-facing Tool Definition, including its name, purpose, and parameter contract."),
+        Field(
+            description="Model-facing Tool Definition, including its name, purpose, and parameter contract. Duale AI reserves every top-level argument name that starts with `__`: it registers a Tool that uses one with the rest of the manifest but never offers it to a model, and the Tool catalog states the reason."
+        ),
     ]
     timeout_seconds: Annotated[
         Annotated[
@@ -227,13 +273,13 @@ class RegisteredTool(BaseModel):
 
 
 class AgentRegistrationMessage(BaseModel):
-    """Request body for `POST /v1/agent/registration`. Publishes the complete customer Tool manifest served by one SDK process for its Agent Identity."""
+    """Publishes the complete customer Tool manifest served by one SDK process for its Agent Identity."""
 
     model_config = ConfigDict(extra="forbid", title="AgentRegistrationMessage", json_schema_extra=None)
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity for this lifecycle request. It must match the identity bound to the SDK token."
+            description="Agent Identity this lifecycle request acts on. IAM decides whether the caller may perform this action on that identity."
         ),
     ]
     process_id: Annotated[
@@ -267,31 +313,35 @@ class AgentRegistrationMessage(BaseModel):
 
 
 class BridgeContentDeltaResponse(BaseModel):
-    """SSE `content.delta` event carrying streamed preview text to append."""
+    """SSE `content.delta` event carrying one fragment of the streamed answer text."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["content.delta"], Field(description="Identifies this payload as a streamed content chunk.")]
-    timestamp: Annotated[
-        Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="Time when this event was emitted."),
+    delta: Annotated[StrictStr, Field(description="Text fragment at this position of the streamed answer.")]
+    generation: Annotated[
+        Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=1)],
+        Field(
+            description="Stream attempt that produced this fragment. A higher generation replaces every fragment from earlier generations; display only the highest generation received."
+        ),
     ]
-    delta: Annotated[StrictStr, Field(description="Text to append to the current streamed preview.")]
+    sequence: Annotated[
+        Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=0)],
+        Field(
+            description="Position of this fragment within its generation. Events can arrive out of order; display fragments in ascending sequence."
+        ),
+    ]
 
 
 class BridgeContentResetResponse(BaseModel):
-    """Signals that previously streamed content must be discarded before rendering later chunks."""
+    """Signals that a new stream attempt starts: discard every fragment from earlier generations."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[
         Literal["content.reset"], Field(description="Identifies this payload as a streamed content replacement.")
     ]
-    timestamp: Annotated[
-        Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="Time when the replacement was emitted."),
-    ]
     generation: Annotated[
         Annotated[StrictInt, Field(ge=-9007199254740991, le=9007199254740991), Field(ge=1)],
-        Field(description="Replacement output version. Content received before this event must be discarded."),
+        Field(description="Stream attempt that starts with this replacement."),
     ]
 
 
@@ -391,71 +441,127 @@ class BridgeSSEEvent(BaseModel):
     ]
     timestamp: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="Time when the client parsed this event."),
+        Field(description="Time when the SDK parsed this event."),
     ]
+
+
+TaskInstruction = TypeAliasType(
+    "TaskInstruction",
+    Annotated[
+        Annotated[StrictStr, Field(min_length=1, max_length=100000, pattern="^[^\\u0000]*$")],
+        Field(
+            title="TaskInstruction",
+            description="Instruction a Task carries out, with the context it needs: non-empty text of at most 100,000 characters, without NUL characters. The model reads it as the requester's message. Treat user input, retrieved text, and document content in it as untrusted model input; none grants system authority.",
+            examples=[
+                "Extract key information from the document and summarize",
+                "Analyze the provided data and identify trends",
+                "Generate a comprehensive report based on the context",
+            ],
+        ),
+    ],
+)
 
 
 class BridgeTaskContinueRequest(BaseModel):
-    """Request body for `POST /v1/tasks/{child_task_id}` with `type` set to `continue`. Continues the accepted `parent_task_id` as a new Task whose client-selected identifier appears in the URL."""
+    """Creates a new Task that continues the task history of `parent_task_id`, a Task of the same Agent Identity. The new Task runs under that Agent Identity and inherits that task history. A setting this request omits takes the parent Task's value; the deadline and the priority are always the new Task's own. The parent can have completed, failed, or stopped, or can still be running."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["continue"], Field(description="Identifies this request as Task continuation.")]
+    task_id: Annotated[
+        task_id_module.TaskId,
+        Field(
+            description="Identifier of the new continuation Task, chosen by the caller. It must differ from `parent_task_id`. A Task identifier names a Task only within its tenant and Agent Identity. Read the continuation Task's events and stop it with this identifier. A repeated request with the same identifier starts no second Task."
+        ),
+    ]
+    priority: Annotated[
+        Union[priority_class_module.PriorityClass, SkipJsonSchema[None]],
+        BeforeValidator(_reject_explicit_null),
+        Field(
+            description="Scheduling class for this continuation Task. Omission selects standard even when the parent used fast. Fast reduces waiting time for the same work and uses the Fast Task price.",
+            json_schema_extra={"default": "standard"},
+        ),
+    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     parent_task_id: Annotated[
         task_id_module.TaskId,
         Field(
-            description="Accepted parent Task whose conversation this request continues. The URL contains a different, client-selected continuation Task identifier."
+            description="Task of the same Agent Identity whose task history this continuation Task continues. A Task identifier names a Task only within its tenant and Agent Identity. The parent can have completed, failed, or stopped, or can still be running; a running parent is continued from its last completed step. A continuation must name an immediate parent Task admitted less than 30 days ago. Task history content leaves the inherited context 30 days after the request that supplied it; instructions may remain available for up to 90 days after the request that supplied them. The continuation uses the inherited context that remains available."
         ),
     ]
-    message: Annotated[
-        Annotated[StrictStr, Field(max_length=100000, pattern="^[^\\u0000]*$")],
-        Field(description="User message that continues the conversation."),
+    instruction: Annotated[
+        TaskInstruction,
+        Field(description="Instruction for the continuation Task. It follows the inherited task history."),
+    ]
+    attachments: Annotated[
+        Union[Annotated[list[attachment_module.Attachment], Field(strict=True)], SkipJsonSchema[None]],
+        BeforeValidator(_reject_explicit_null),
+        Field(
+            description="Documents to add for the continuation Task. Upload each document before submitting, then send the matching attachment key, filename, and description here. The parent Task's documents stay available.",
+            json_schema_extra={"default": []},
+        ),
+    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
+    routing_policy: Annotated[
+        routing_policy_module.RoutingPolicy,
+        Field(
+            description="Model-selection preferences for this request. The object is required. A preference left unset takes the parent Task's value: the parent's own preference, resolved with Platform defaults when the parent Task was admitted. Capabilities the Platform inferred for the parent Task are not inherited."
+        ),
     ]
     response_format: Annotated[
         Union[response_format_module.ResponseFormat, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
-        Field(description="Expected format of the continuation Task Result."),
+        Field(
+            description="Expected format of the continuation Task Result. When omitted, the continuation Task uses the parent Task's response format. Send the `text` format for a free-text answer after a structured parent."
+        ),
+    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
+    response_stream: Annotated[
+        Union[StrictBool, SkipJsonSchema[None]],
+        BeforeValidator(_reject_explicit_null),
+        Field(
+            description="Stream the answer text while it is written. When omitted, the continuation Task streams if the parent Task did. Only free-text answers stream: no response format, or the `text` or `markdown` format. Streamed fragments can arrive out of order and can be replaced, so use them only for display and use the completed Task Result for processing. Streaming can add slight latency to the final Task Result."
+        ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     deadline: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(
-            description="Requested absolute UTC deadline for the continuation. It cannot extend the accepted parent Task's deadline or add another final-response grace period.",
+            description="Requested absolute deadline for the continuation Task, as a date-time with an offset (`Z` or `±hh:mm`). The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
             examples=["2025-08-30T15:00:00Z", "2025-08-30T15:00:00.000Z"],
         ),
     ]
 
 
-class Attachment(BaseModel):
-    model_config = ConfigDict(extra="forbid", title="Attachment", json_schema_extra=None)
-    key: Annotated[
-        StrictStr,
-        Field(description="Client-generated correlation key that links this Task attachment to its upload receipt."),
-    ]
-    filename: Annotated[StrictStr, Field(description="Original filename.")]
-    description: Annotated[
-        Annotated[StrictStr, Field(max_length=500)], Field(description="Model-facing description of the attachment.")
-    ]
-
-
 class BridgeTaskCreateRequest(BaseModel):
-    """Request body for `POST /v1/tasks/{task_id}` with `type` set to `create`. Creates a new Task using the client-selected `task_id` in the URL."""
+    """Creates a new Task with a task identifier that the developer selects. The `type` field is `create`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["create"], Field(description="Identifies this request as Task creation.")]
-    action_prompt: Annotated[
-        action_prompt_module.ActionPrompt, Field(description="Instruction and contextual material for the Task.")
+    task_id: Annotated[
+        task_id_module.TaskId,
+        Field(
+            description="Identifier of the new Task, chosen by the caller. A Task identifier names a Task only within its tenant and Agent Identity. Read the Task's events and stop the Task with this identifier. A repeated request with the same identifier starts no second Task."
+        ),
     ]
-    attachments: Annotated[
-        Union[Annotated[list[Attachment], Field(strict=True)], SkipJsonSchema[None]],
+    priority: Annotated[
+        Union[priority_class_module.PriorityClass, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Documents associated with this Task. Upload each document before submitting the Task, then send the matching client-side key, filename, and description here.",
+            description="Scheduling class for this Task. Omission selects standard. Fast reduces waiting time for the same work and uses the Fast Task price.",
+            json_schema_extra={"default": "standard"},
+        ),
+    ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
+    instruction: Annotated[TaskInstruction, Field(description="Instruction for the Task, with the context it needs.")]
+    attachments: Annotated[
+        Union[Annotated[list[attachment_module.Attachment], Field(strict=True)], SkipJsonSchema[None]],
+        BeforeValidator(_reject_explicit_null),
+        Field(
+            description="Documents associated with this Task. Upload each document before submitting the Task, then send the matching attachment key, filename, and description here.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     routing_policy: Annotated[
-        Union[routing_policy_module.RoutingPolicy, None],
-        Field(description="Task-scoped Routing Policy of soft preferences.", json_schema_extra={"default": None}),
-    ] = None
+        routing_policy_module.RoutingPolicy,
+        Field(
+            description="Model-selection preferences for this request. The object is required and may be empty. Omitted fields remain unspecified in the request."
+        ),
+    ]
     response_format: Annotated[
         Union[response_format_module.ResponseFormat, None],
         Field(description="Expected format of a completed Task Result.", json_schema_extra={"default": None}),
@@ -464,21 +570,14 @@ class BridgeTaskCreateRequest(BaseModel):
         Union[StrictBool, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Enable streamed preview chunks. Streaming can add slight latency to the final serialized Task Result. Use streamed content only for display; use the completed Task Result for processing.",
+            description="Stream the answer text while it is written. Only free-text answers stream: no response format, or the `text` or `markdown` format. Streamed fragments can arrive out of order and can be replaced, so use them only for display and use the completed Task Result for processing. Streaming can add slight latency to the final Task Result.",
             json_schema_extra={"default": False},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
-    tools: Annotated[
-        Union[Annotated[list[tool_module.Tool], Field(strict=True)], None],
-        Field(
-            description="Optional model-facing Tool Definitions for this Task. Definitions alone do not authorize Tool dispatch or any operation that can produce an External Effect.",
-            json_schema_extra={"default": None},
-        ),
-    ] = None
     deadline: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(
-            description="Requested absolute UTC deadline for the Task. The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
+            description="Requested absolute deadline for the Task, as a date-time with an offset (`Z` or `±hh:mm`). The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
             examples=["2025-08-30T15:00:00Z", "2025-08-30T15:00:00.000Z"],
         ),
     ]
@@ -519,10 +618,13 @@ class BridgeToolResultSuccess(BaseModel):
 
 
 class BridgeToolResultsRequest(BaseModel):
-    """Request body for `POST /v1/tasks/{task_id}` with `type` set to `tool_results`. Submits Tool Results and resumes that Task's existing event stream."""
+    """Submits Tool Results to the Task whose `tool.use` events requested them. The Task then continues. The `type` field is `tool_results`."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Annotated[Literal["tool_results"], Field(description="Identifies this request as Tool Result submission.")]
+    task_id: Annotated[
+        task_id_module.TaskId, Field(description="Task whose `tool.use` events these Tool Results answer.")
+    ]
     tool_results: Annotated[
         Annotated[
             list[

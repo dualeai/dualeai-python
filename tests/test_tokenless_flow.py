@@ -35,9 +35,9 @@ class TestTokenlessTaskFlow:
         mock_transport.inject_event(task_id, mock_transport.create_task_completed_event(llm_result))
 
         response = await ask(
-            action="Test tokenless task",
+            instruction="Test tokenless task",
             streaming=False,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -63,9 +63,9 @@ class TestTokenlessTaskFlow:
         )
 
         response = await ask(
-            action="Test tokenless streaming",
+            instruction="Test tokenless streaming",
             streaming=True,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -100,8 +100,8 @@ class TestTokenlessTaskFlow:
         responses = await asyncio.gather(
             *(
                 ask(
-                    action=f"Concurrent task {index}",
-                    request_id=task_id,
+                    instruction=f"Concurrent task {index}",
+                    task_id=task_id,
                     sdk=minimal_mock_sdk,
                 )
                 for index, task_id in enumerate(task_ids)

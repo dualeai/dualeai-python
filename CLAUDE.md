@@ -58,7 +58,7 @@ A test must fail when the implementation it covers is broken. Reproduce a defect
 a failing test before fixing it. Use the smallest assertion that proves the public
 contract.
 
-The suite has three markers:
+The suite registers these markers:
 
 - `unit` for tests with mocked dependencies;
 - `integration` for local multi-component tests; and
@@ -77,8 +77,11 @@ disabling a rule for the repository.
 ## Writing
 
 Use plain, specific language. Do not add marketing claims or superlatives. A statement
-about package behavior must be true in the current release and name the test that
-enforces it, or state that no automated test enforces it.
+about package behavior must be true in the current release. A test that enforces an
+invariant names it in its name or docstring. Outside `tests/`, state the invariant in
+words and never name, link or mention a test; write "nothing enforces this" when
+nothing does. Never count tests, cases, or items that code already lists, not even in
+a test.
 
 Use `Duale AI` in text, `dualeai` in URLs and package identifiers, and `DUALEAI_*`
 for this SDK's environment variables.

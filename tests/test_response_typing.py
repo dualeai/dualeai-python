@@ -48,9 +48,9 @@ class TestAgentResponseTyping:
         )
 
         response = await ask(
-            action="Get invoice",
+            instruction="Get invoice",
             res=Invoice,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         assert_type(response, AgentResponse[Invoice])
@@ -78,9 +78,9 @@ class TestAgentResponseTyping:
         )
 
         response = await ask(
-            action="Get nested",
+            instruction="Get nested",
             res=NestedData,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -93,13 +93,13 @@ class TestAgentResponseTyping:
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
     ) -> None:
         """``res=str`` exercises basic-type validation."""
-        task_id = "test-str"
+        task_id = "test-str-0001"
         inject_llm_completion(mock_transport, task_id, completion="hello world")
 
         response = await ask(
-            action="Get string",
+            instruction="Get string",
             res=str,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -111,13 +111,13 @@ class TestAgentResponseTyping:
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
     ) -> None:
         """``res=int`` exercises basic-type validation."""
-        task_id = "test-int"
+        task_id = "test-int-0001"
         inject_llm_completion(mock_transport, task_id, completion="42")
 
         response = await ask(
-            action="Get int",
+            instruction="Get int",
             res=int,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
         result = await response.model()
@@ -128,7 +128,7 @@ class TestAgentResponseTyping:
     async def test_response_streaming_flag(self, minimal_mock_sdk: DualeAISDK) -> None:
         """``streaming=True`` is preserved on the typed response."""
         response = await ask(
-            action="Stream",
+            instruction="Stream",
             res=Invoice,
             streaming=True,
             sdk=minimal_mock_sdk,
@@ -150,15 +150,15 @@ class TestAgentResponseTyping:
         inject_llm_completion(mock_transport, result_task_id, validated_data={"value": 100})
 
         response_invoice = await ask(
-            action="Get invoice",
+            instruction="Get invoice",
             res=Invoice,
-            request_id=invoice_task_id,
+            task_id=invoice_task_id,
             sdk=minimal_mock_sdk,
         )
         response_result = await ask(
-            action="Get result",
+            instruction="Get result",
             res=Result,
-            request_id=result_task_id,
+            task_id=result_task_id,
             sdk=minimal_mock_sdk,
         )
 

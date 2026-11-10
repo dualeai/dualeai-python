@@ -14,7 +14,7 @@ TaskId = TypeAliasType(
         Annotated[StrictStr, Field(min_length=10, max_length=128, pattern="^[a-zA-Z0-9_-]+$")],
         Field(
             title="TaskId",
-            description="Execution request identifier. At public admission, it is the client- or SDK-selected Task identifier.",
+            description="Execution request identifier. At public admission, it is the Task identifier that the developer or the SDK selects.",
             examples=["task-12345678901234567890", "req-abcdef123456"],
         ),
     ],

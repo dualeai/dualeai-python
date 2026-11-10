@@ -1,4 +1,10 @@
-"""Logging configuration for Duale AI SDK."""
+"""Process-global stdlib and structlog configuration used by the SDK.
+
+Creating ``DualeAISDK`` calls :func:`configure_logging`. Applications that own
+their logging configuration should account for its root-handler replacement or
+reapply their desired configuration afterward. This module does not install an
+OpenTelemetry log exporter.
+"""
 
 import logging
 import sys
@@ -87,9 +93,14 @@ def add_flow_metadata(_: object, __: str, event_dict: MutableMapping[str, object
 
 
 def configure_logging(level: str | int = logging.ERROR) -> None:
-    """Configure structured console logging.
+    """Replace process-wide logging with the SDK's structured console setup.
 
-    This sets up structlog with defaults that provide:
+    This function is intentionally global: it replaces every root logger
+    handler with one stdout handler, changes the root level, adjusts aiohttp,
+    aiojobs, and asyncio levels, and reconfigures structlog. Existing handlers
+    are not restored by ``DualeAISDK.cleanup``.
+
+    The installed processors provide:
     - Structured key-value logging
     - Consistent error formatting with stack traces
     - Each exception traceback rendered exactly once
@@ -97,7 +108,7 @@ def configure_logging(level: str | int = logging.ERROR) -> None:
     - Proper stdlib integration
 
     Args:
-        level: Application logging level (DEBUG, INFO, WARNING, ERROR)
+        level: Root logging level. Unknown strings fall back to ``ERROR``.
     """
     # Convert string level to int if needed using a type-safe mapping
     if isinstance(level, str):
@@ -172,7 +183,8 @@ def configure_logging(level: str | int = logging.ERROR) -> None:
             foreign_pre_chain=shared_processors,
             processors=[
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                structlog.dev.ConsoleRenderer(colors=True),
+                # Automatic Rich tracebacks include frame locals such as API tokens.
+                structlog.dev.ConsoleRenderer(colors=True, exception_formatter=structlog.dev.plain_traceback),
             ],
         )
     )

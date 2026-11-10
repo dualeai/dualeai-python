@@ -1,17 +1,9 @@
-"""Tests for utility functions.
-
-Covers ``get_exception_type_name``, ``get_type_name``, and the
-``truncate_*`` helpers used for log preview formatting.
-
-(``ConsecutiveTimeoutTracker`` was removed alongside its
-zero-production-callers cleanup; tests for it lived here previously.)
-"""
+"""Tests for type names and error-preview formatting."""
 
 import pytest
 
 from dualeai.constants import DisplayLimits
 from dualeai.utils import (
-    get_exception_type_name,
     get_type_name,
     truncate_error_preview,
 )
@@ -22,14 +14,6 @@ ERROR_PREVIEW_LENGTH = DisplayLimits.ERROR_PREVIEW_LENGTH
 @pytest.mark.unit
 class TestUtilityFunctions:
     """Test utility functions for type names and string processing."""
-
-    def test_get_exception_type_name(self):
-        """Standard and built-in exceptions return their type name."""
-        assert get_exception_type_name(ValueError("test")) == "ValueError"
-        assert get_exception_type_name(RuntimeError("error")) == "RuntimeError"
-        assert get_exception_type_name(TypeError("type")) == "TypeError"
-        assert get_exception_type_name(KeyError("key")) == "KeyError"
-        assert get_exception_type_name(Exception("base")) == "Exception"
 
     def test_get_type_name_basic(self):
         """get_type_name returns the type name string."""

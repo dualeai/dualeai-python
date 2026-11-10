@@ -186,8 +186,8 @@ class TestCacheConcurrencyScenarios:
 
 
 @pytest.mark.unit
-class TestCacheTenantIsolation:
-    """Test tenant isolation across different cache backends."""
+class TestCacheNamespaceIsolation:
+    """Test caller-supplied namespace separation across cache backends."""
 
     @pytest.mark.parametrize(
         "tenant_config",
@@ -197,14 +197,14 @@ class TestCacheTenantIsolation:
             (TestTenantIDs.CROSS_TENANT_A, TestTenantIDs.CROSS_TENANT_B),
         ],
     )
-    async def test_tenant_data_isolation(self, cache_factory: CacheFactory, tenant_config: tuple[str, str]):
-        """Test that different tenants cannot access each other's data."""
+    async def test_namespace_data_isolation(self, cache_factory: CacheFactory, tenant_config: tuple[str, str]):
+        """Different namespace prefixes return their respective values."""
         tenant1_id, tenant2_id = tenant_config
 
         cache1 = await cache_factory(tenant1_id)
         cache2 = await cache_factory(tenant2_id)
 
-        # Store data in first tenant
+        # Store data under each namespace.
         key = "shared_key_name"
         value1: CacheableValue = {"tenant": tenant1_id, "data": "secret_data_1"}
         value2: CacheableValue = {"tenant": tenant2_id, "data": "secret_data_2"}
@@ -212,7 +212,7 @@ class TestCacheTenantIsolation:
         await cache1.set(key, value1)
         await cache2.set(key, value2)
 
-        # Verify each tenant only sees their own data
+        # Verify each namespace resolves its own value.
         result1 = await cache1.get(key)
         result2 = await cache2.get(key)
 
@@ -220,12 +220,12 @@ class TestCacheTenantIsolation:
         assert result2 == value2
         assert result1 != result2
 
-    async def test_tenant_clear_isolation(self, cache_factory: CacheFactory):
-        """Test that clearing one tenant doesn't affect others."""
+    async def test_namespace_clear_isolation(self, cache_factory: CacheFactory):
+        """Clearing one namespace leaves the other namespace intact."""
         cache1 = await cache_factory(TestTenantIDs.DEFAULT)
         cache2 = await cache_factory(TestTenantIDs.INTEGRATION)
 
-        # Store data in both tenants
+        # Store data in both namespaces.
         keys = ["key1", "key2", "key3"]
         for key in keys:
             await cache1.set(key, f"tenant1_{key}")
@@ -239,7 +239,7 @@ class TestCacheTenantIsolation:
         # Clear first tenant
         await cache1.clear()
 
-        # First tenant should be empty, second should be unchanged
+        # First namespace is empty; the second is unchanged.
         for key in keys:
             assert await cache1.get(key) is None
             assert await cache2.get(key) == f"tenant2_{key}"

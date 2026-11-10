@@ -3,7 +3,7 @@
 Pure functions: a raised exception → the truncated ``message`` string the language
 model sees. The truncation length is read from the bridge
 ``BridgeToolResultError.message`` ``maxLength`` (the wire contract), never a
-hand-picked literal (RFC-121 §Tool Execution Errors & Retry).
+hand-picked literal.
 """
 
 from __future__ import annotations
@@ -18,9 +18,8 @@ from dualeai.models.bridge import BridgeToolResultError
 def _bridge_error_message_max_length() -> int:
     """Return the wire-declared max length of a tool error message.
 
-    The size bound lives in the schema (``bridge.json`` BridgeToolResultError
-    ``message.maxLength``), not in code, so the SDK truncates to whatever the
-    contract allows instead of a hand-picked literal.
+    The size bound comes from the generated ``BridgeToolResultError.message``
+    field metadata, so the SDK does not use a hand-picked literal.
     """
     for meta in BridgeToolResultError.model_fields["message"].metadata:
         if isinstance(meta, MaxLen):
@@ -41,11 +40,10 @@ def truncate_to_wire_max(text: str) -> str:
 def format_registered_tool_error(exc: BaseException) -> str:
     """Render a tool failure as ``<module>.<qualname>: <message>`` for the wire result.
 
-    The model and router receive a stable, typed-looking prefix instead of a bare
+    The model receives a stable, typed-looking prefix instead of a bare
     message; the rendered string is truncated to the schema-declared maximum so an
     oversized exception string cannot exceed the wire contract. No error enum and no
-    retryable flag are added — the tool error stays a free-form ``message`` string
-    (RFC-121 §Tool Execution Errors & Retry).
+    retryable flag are added — the Tool error stays a free-form ``message`` string.
     """
     qualified_name = f"{type(exc).__module__}.{type(exc).__qualname__}"
     message = str(exc)
@@ -58,8 +56,8 @@ def apply_tool_error(exc: Exception, transform: Callable[[Exception], str] | Non
 
     Without a transform the default ``<module>.<qualname>: <message>`` is used. With
     one (a per-@tool ``error_transform``), the customer controls the model-facing text
-    — the CWE-209 seam every peer ships — and the result is still truncated to the
-    schema-declared maximum.
+    and the result is still truncated to the schema-declared maximum. Use the
+    transform to remove secrets and internal details before they cross the wire.
     """
     if transform is None:
         return format_registered_tool_error(exc)

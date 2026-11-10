@@ -1,30 +1,38 @@
-"""Upload a document and ask the agent to analyze it through Library APIs.
+"""Upload a document and reference it in one live Task.
 
-Usage:
-    export DUALEAI_TOKEN=dualeai_your-token-here
-    export DUALEAI_TENANT_ID=tenant_example
-    export DUALEAI_AGENT_ID=agent_example
-    # Optional for local or test stacks; DualeAIConfig defaults to https://api.duale.ai.
-    export DUALEAI_ENDPOINT=http://localhost:8000
-    uv run python examples/document_upload.py path/to/document.pdf
+Requires ``DUALEAI_TOKEN``, ``DUALEAI_TENANT_ID``, ``DUALEAI_AGENT_ID``,
+access to a configured model, and a synthetic input file. The caller also needs
+``library:upload`` on the Tenant, and ``library:write`` and ``library:read`` on
+``library:agent/<DUALEAI_AGENT_ID>/task/*``. The supplied Agent default grants
+both on ``library:agent/{self}/*`` when the token belongs to that Agent Identity. Run with
+``python examples/document_upload.py path/to/document.pdf``. The example creates
+a call-scoped Library and uploads the file. Arrange later Dashboard cleanup by
+a Human Identity with ``library:delete`` and valid ``aal3`` authentication; the SDK's AAL2
+API-token session cannot delete the whole Library. CI does not execute this
+example.
+
+Set ``DUALEAI_ENDPOINT`` only when your access instructions name a non-default
+environment.
 """
 
 import asyncio
+import contextlib
 import sys
 import time
 from pathlib import Path
 from uuid import uuid4
 
 from dualeai import (
-    DualeAIConfig,
-    DualeAISDK,
     LibraryDocumentGetRequest,
     LibraryResponseDocumentStatus,
+    RoutingPolicy,
     ask,
+    create_sdk,
 )
 
 
 def parse_args() -> Path:
+    """Return the existing file path supplied on the command line."""
     if len(sys.argv) < 2:  # noqa: PLR2004
         print("Usage: python examples/document_upload.py <file_path>")  # noqa: T201
         sys.exit(1)
@@ -42,10 +50,12 @@ def parse_args() -> Path:
 
 
 async def main() -> None:
+    """Upload, await ingestion, and submit one Task referencing the document."""
     file_path = parse_args()
 
-    async with DualeAISDK(config=DualeAIConfig(), auto_start=False) as sdk:
-        # Step 1: Prepare attachment metadata (instant, no I/O beyond stat)
+    async with create_sdk() as sdk:
+        # Step 1: Validate the path and record attachment metadata without
+        # reading the file contents.
         attachments = sdk.prepare_attachments(
             [
                 (file_path, f"Document: {file_path.name}"),
@@ -60,11 +70,14 @@ async def main() -> None:
         receipts = await sdk.upload_attachments(
             task_id=task_id,
             attachments=attachments,
-            agent_id=sdk.agent_id,
         )
         print(f"Uploaded in {time.monotonic() - start:.1f}s")  # noqa: T201
 
         receipt = receipts[attachments[0].key]
+        print(  # noqa: T201
+            f"Cleanup required after this example: delete Library {receipt.library_id} "
+            "in the Dashboard with library:delete and valid aal3 authentication; sign in when prompted."
+        )
         document = await sdk.libraries.wait_for_document(
             LibraryDocumentGetRequest(
                 library_id=receipt.library_id,
@@ -74,26 +87,24 @@ async def main() -> None:
         if document.status is LibraryResponseDocumentStatus.failed:
             raise RuntimeError(f"Document ingestion failed: {document.failure}")
 
-        # Step 3: Ask only after the document is readable. When an image-capable
-        # model handles the task, images embedded in the document (charts,
-        # diagrams, scanned figures) reach the model as input, not only their
-        # extracted text — so a question about a figure is answered from the
-        # figure itself.
-        print("\nAsking agent to summarize the document and its figures...")  # noqa: T201
-        prompt = (
-            "Summarize the attached document. If it contains figures, charts,"
-            " or diagrams, describe each one and what it shows."
-        )
+        # Step 3: Ask only after the document is readable. This example proves
+        # upload and Task-reference wiring; interpretation depends on the
+        # provisioned Platform/model capabilities.
+        print("\nAsking agent to summarize the document...")  # noqa: T201
+        prompt = "Summarize the attached document and list its main sections."
         response = await ask(
-            action=prompt,
+            instruction=prompt,
+            routing=RoutingPolicy(
+                cost_sensitivity=1.0,
+                target_accuracy=0.3,
+            ),
             attachments=attachments,
-            streaming=True,
-            request_id=task_id,
+            task_id=task_id,
             sdk=sdk,
         )
 
-        # Step 4: Wait for result
-        print("\n--- Agent response ---")  # noqa: T201
+        # Step 4: Wait for the authoritative result.
+        print("\n--- Task result ---")  # noqa: T201
         result = await response.model()
         print(result)  # noqa: T201
 
@@ -101,4 +112,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(main())

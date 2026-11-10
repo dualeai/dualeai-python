@@ -1,70 +1,22 @@
-"""Duale AI SDK - Central orchestration point for AI agent development.
+"""Async facade for Duale AI Tasks, hosted Tools, Libraries, and activities.
 
-The SDK provides a unified interface for building and deploying AI agents
-with enterprise-grade features like caching, streaming, and multi-tenant isolation.
+Task submissions return :class:`dualeai.response.AgentResponse` objects backed
+by protected Bridge HTTP/SSE calls. Registered Tools execute in the caller's
+process when they are delivered on a Task stream. Library metadata uses
+HPKE requests; presigned S3 parts use their signed HTTPS URLs.
 
-Architecture Overview (RFC-051):
---------------------------------
-SDK → HTTP Bridge (SSE) → Platform → LLM Workers
+Cached activities use a process-local scheduler and a Redis backend when it is
+available, otherwise SQLite. Invalidation is TTL-, backend-, or caller-driven;
+the SDK does not detect function changes or upstream data changes.
 
-All operations are:
-- Tenant-scoped via API token authentication
-- Agent-isolated using unique agent_id per SDK instance
-- Real-time streaming via Server-Sent Events (SSE)
+Constructing the SDK reconfigures process-global stdlib and structlog logging.
+When telemetry is enabled it may also install process-global OpenTelemetry
+providers and optional instrumentors. See :mod:`dualeai.logging_config` and
+:mod:`dualeai.observability` before embedding the SDK in an application that
+already owns either subsystem.
 
-Core Capabilities:
------------------
-1. Agent Registration & Lifecycle:
-   - Bind one centrally provisioned agent_id to the SDK instance
-   - Publish registered tool manifests through sdk.serve()
-   - Automatic heartbeat monitoring
-   - Graceful shutdown and resource cleanup
-
-2. Task Submission & Orchestration:
-   - Submit tasks with routing policies
-   - Real-time streaming with SSE
-   - Process-local dependency circuit breaking
-   - Type-safe responses with Pydantic validation
-
-3. Activity Caching:
-   - TTL-based caching for expensive operations
-   - Redis primary, SQLite fallback
-   - Automatic cache invalidation
-
-4. Multi-Tenant Isolation:
-   - Complete tenant separation via API authentication
-   - Agent-specific message routing
-   - No cross-tenant data leakage
-
-Performance Optimizations:
--------------------------
-- SSE streaming for real-time updates
-- Auto-reconnect with Last-Event-ID
-- Connection pooling and reuse
-- Per-task ``asyncio.Task`` lifecycle: cancel propagates to bridge
-
-Usage Pattern:
--------------
-async with DualeAISDK(config) as sdk:
-    # Register agents
-    sdk.register_agent("my-agent", process_func, agent_config)
-
-    # Submit a task — returns AgentResponse[T]; await response.model() for the result.
-    response = await sdk.submit_task(
-        action="Process document",
-        skills=[SkillEnum.ocr, SkillEnum.parsing],
-        streaming=True,
-    )
-    async for delta in response.stream():
-        print(delta.delta, end="", flush=True)
-    final = await response.model()
-
-    # Execute a cached activity
-    result = await sdk.execute_activity(
-        expensive_operation,
-        cache_ttl=timedelta(hours=1),
-        *args,
-    )
+Nothing in this SDK enforces service-side authorization and execution
+outcomes.
 """
 
 import asyncio
@@ -111,7 +63,7 @@ from dualeai.constants import TimingDefaults
 from dualeai.decorators import tool as _tool_decorator
 from dualeai.events.client import CloudEventsClient
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
-from dualeai.exceptions import DualeAIConnectionError
+from dualeai.exceptions import DualeAIConnectionError, DualeAIError
 from dualeai.libraries import LibrariesClient
 from dualeai.lifecycle import LifecycleManager
 from dualeai.logging_config import (
@@ -121,12 +73,9 @@ from dualeai.logging_config import (
     get_task_logger,
     operation_context,
 )
-from dualeai.messages import AgentConfig
 from dualeai.models.agent_id import AgentId
+from dualeai.models.attachment import Attachment
 from dualeai.models.bridge import (
-    Attachment,
-    BridgeContentDeltaResponse,
-    BridgeContentResetResponse,
     BridgeTaskContinueRequest,
     BridgeTaskCreateRequest,
     BridgeTaskErrorResponse,
@@ -137,12 +86,13 @@ from dualeai.models.bridge import (
     BridgeToolUseResponse,
     RegisteredTool,
 )
+from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.models.library import LibraryCreateRequest, LibraryDocumentCreateResponse
+from dualeai.models.priority_class import PriorityClass
 from dualeai.models.reserved_tool_names import ReservedToolName
 from dualeai.models.response_format import JsonSchemaResponseFormat, ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
 from dualeai.models.tool import Tool
 from dualeai.observability import OTELStructlogProcessor, SDKObservability
@@ -154,7 +104,7 @@ from dualeai.tools._json import json_schema_adapter
 from dualeai.tools._util import callable_name
 from dualeai.tools.errors import apply_tool_error, format_registered_tool_error
 from dualeai.tools.serialization import tool_success_output
-from dualeai.utils import tenant_id_from_token
+from dualeai.utils import token_fingerprint
 
 # Type variables and definitions
 T = TypeVar("T")
@@ -200,11 +150,17 @@ class ScheduledToolUse:
 
     expires_at: datetime
     result: BridgeToolResultSuccess | BridgeToolResultError | None = None
+    resubmission: asyncio.Task[None] | None = None
+    """The resubmission of ``result``; it is in flight until this Task is done."""
+    redelivered: bool = False
+    """A delivery arrived during the current resubmission attempt."""
+    redelivery_event_id: str | None = None
+    """Cursor of the latest delivery that the resubmission in flight answers."""
 
 
 @lru_cache(maxsize=128)
 def _generate_json_schema_cached(response_type: type) -> dict[str, JsonValue | None]:
-    """Generate JSON Schema from Python type for router validation (cached, module-level).
+    """Generate response-format JSON Schema from a Python type.
 
     This is a module-level cached function to avoid memory leaks from instance-level caching.
     All SDK instances share this cache, preventing unbounded memory growth.
@@ -234,36 +190,57 @@ def _generate_json_schema_cached(response_type: type) -> dict[str, JsonValue | N
 
 
 class DualeAISDK:
-    """Simplified SDK manager for agents, activities, and caching."""
+    """Manage Tasks, hosted Tools, Libraries, attachments, and activities.
 
-    def __init__(  # Wide constructor: many independent field initializations
+    Instances lazily create their network, cache, and activity-scheduler
+    resources. Use the async context manager or call :meth:`cleanup` to release
+    those resources. Task and Library authorization remains a server concern;
+    local cache namespacing uses a SHA-256 fingerprint of the configured token.
+    """
+
+    def __init__(
         self,
         config: DualeAIConfig | None = None,
+        *,
         agent_id: str | None = None,
         max_jobs: int = TimingDefaults.DEFAULT_MAX_JOBS,
         job_timeout: int = TimingDefaults.DEFAULT_TASK_TIMEOUT_SECONDS,
-        auto_start: bool = True,  # noqa: FBT001, FBT002
+        auto_start: bool = True,
         backpressure_config: BackpressureConfig | None = None,
         max_concurrent_tools: int | None = None,
         graceful_shutdown_timeout: float = 0.0,
         transport: HTTPTransportProtocol | None = None,
     ):
-        """Initialize SDK with configuration.
+        """Initialize an SDK instance.
+
+        Construction calls :func:`dualeai.logging_config.configure_logging`,
+        which replaces root handlers and changes process-wide logging settings.
+        Enabled observability can also affect global OpenTelemetry state.
 
         Args:
-            config: Configuration object (creates default if not provided)
-            agent_id: Pre-provisioned agent identifier used by lifecycle endpoints.
+            config: Configuration object. Omission loads ``DUALEAI_*`` settings.
+            agent_id: Provisioned identity for hosted-tool lifecycle calls.
+                Overrides ``config.agent_id`` and is exposed as ``sdk.agent_id``;
+                attachment uploads use it when no per-call ID is supplied.
             max_jobs: Default concurrent cached-activity and registered-tool limit.
             job_timeout: Cached-activity timeout in seconds.
-            auto_start: Automatically start heartbeat and registration
+            auto_start: Schedule hosted-tool registration and heartbeats when an
+                event loop is running, and start them on async context entry.
+                Direct construction defaults to ``True``; :func:`dualeai.create_sdk`
+                defaults to ``False``.
             backpressure_config: Activity scheduler and task circuit-breaker policy.
             max_concurrent_tools: Max concurrent registered-tool executions. Defaults to
                 ``max_jobs`` so tool concurrency is decoupled from the job-scheduler pool
                 only when explicitly set.
             graceful_shutdown_timeout: Seconds to let in-flight tool results finish on
                 shutdown before cancelling them. Default 0.0 cancels immediately.
-            transport: Optional pre-configured HTTP transport for dependency injection.
-                       If None, HTTPTransport will be created during connect().
+            transport: Preconfigured HTTP transport for dependency injection.
+                Omission creates the production transport on first use.
+
+        Raises:
+            RuntimeError: If default configuration cannot be loaded.
+            pydantic.ValidationError: If ``agent_id`` or a supplied configuration
+                value fails validation.
         """
         # If no config provided, try to load from environment variables
         if config is None:
@@ -287,13 +264,11 @@ class DualeAISDK:
         configure_logging(level=log_level)
         self._setup_enhanced_logging()
 
-        self.agents: dict[str, tuple[Callable[..., object], AgentConfig]] = {}
-        resolved_agent_id = agent_id or self.config.agent_id
+        resolved_agent_id = agent_id if agent_id is not None else self.config.agent_id
         self.agent_id = _agent_id_adapter.validate_python(resolved_agent_id) if resolved_agent_id is not None else None
         self._tools: dict[str, RegisteredToolCallable] = {}
-        # In-flight task runners keyed by task_id. Used by cleanup() for
-        # cancel-on-shutdown and by tests for assertion. Each runner removes
-        # itself when its terminal task ends.
+        # In-flight task runners keyed by task_id. cleanup() cancels them on
+        # shutdown. Each runner removes itself when its terminal task ends.
         self._inflight_tasks: dict[str, asyncio.Task[TerminalEvent]] = {}
         self.max_jobs = max_jobs
         self.job_timeout = job_timeout
@@ -312,7 +287,7 @@ class DualeAISDK:
         )
         self._tool_result_tasks: set[asyncio.Task[None]] = set()
         # Bound concurrent registered-tool executions so a burst of tool.use
-        # events cannot spawn unbounded in-flight customer work (RFC-121).
+        # events cannot spawn unbounded in-flight customer work.
         # Bounded pool: a registered tool must not synchronously block on a
         # sibling registered tool, or the pool cannot drain.
         self._max_concurrent_tools = max_concurrent_tools if max_concurrent_tools is not None else max_jobs
@@ -355,35 +330,40 @@ class DualeAISDK:
     # --- Lifecycle delegators (state + machine live in dualeai.lifecycle.LifecycleManager) ---
 
     async def start(self) -> None:
-        """Start SDK agent registration and heartbeat (delegates to the lifecycle manager)."""
+        """Publish the hosted Tool manifest and start lifecycle heartbeats.
+
+        The call is idempotent. A configured ``agent_id`` is required when any
+        hosted Tools are registered; with neither an agent id nor Tools it is a
+        no-op.
+        """
         await self._lifecycle.start()
 
     async def serve(self, *, stop_event: asyncio.Event | None = None) -> None:
-        """Run the hosted-agent lifecycle until stopped; teardown ownership stays on the SDK."""
+        """Run the hosted-Tool lifecycle until stopped or a heartbeat fails.
+
+        ``serve`` publishes the manifest and maintains heartbeats; Tool calls
+        themselves arrive on Task streams opened by this same SDK instance. On
+        exit, ``serve`` calls :meth:`cleanup` for the whole SDK.
+        """
         await self._lifecycle.serve(stop_event=stop_event, on_stop=self.cleanup)
 
     def _estimated_server_time(self, local_now: datetime | None = None) -> datetime:
         """Server-time estimate adjusted by the heartbeat clock offset (lifecycle clock)."""
         return self._lifecycle.estimated_server_time(local_now)
 
-    def _config_hash(self) -> str:
-        """Cross-tier config hash over the tool manifest (lifecycle manager owns the recipe)."""
-        return self._lifecycle.config_hash()
-
     async def _ensure_cache(self) -> CacheBackend[CacheableValue]:
         """Ensure cache backend is initialized."""
         cache = self._cache
         if cache is None:
-            # Try Redis first, fallback to SQLite with production cache configuration
-            # RFC-051: tenant_id derived from token hash for cache isolation
-            # Server-side identity resolution handles actual tenant mapping
+            # Try Redis first, then fall back to SQLite. The namespace is a
+            # token fingerprint, not the configured Library tenant id.
             cache_config = CacheConfig()
             sqlite_path_value = str(self.config.sqlite_path) if self.config.sqlite_path else None
-            # Use token hash for cache tenant isolation (token resolves to tenant server-side)
+            # Token rotation intentionally selects a different cache namespace.
             # config.token is always str — field_validator raises if None/missing
             token = self.config.token
             assert token is not None, "config.token must be set (validated by DualeAIConfig)"
-            tenant_id = tenant_id_from_token(token)
+            tenant_id = token_fingerprint(token)
             cache = await create_cache_backend(
                 tenant_id=tenant_id,
                 redis_url=self.config.redis_url,
@@ -415,15 +395,10 @@ class DualeAISDK:
         if self._scheduler is None or self._scheduler.closed:
             self._scheduler = create_production_scheduler(
                 max_jobs=self._backpressure_config.max_concurrent_activities,
-                close_timeout=5.0,  # Increased for CI environments - was 1.0s
+                close_timeout=5.0,  # Long enough for cancelled activities to finish on slow CI runners
                 pending_limit=self._backpressure_config.max_pending_activities,
             )
         return self._scheduler
-
-    def register_agent(self, agent_id: str, func: Callable[..., object], agent_config: AgentConfig) -> None:
-        """Register an agent function."""
-        self.agents[agent_id] = (func, agent_config)
-        # Hosted-agent lifecycle registration is sent separately by sdk.serve().
 
     def _get_sync_tool_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         """Lazily create the dedicated bounded thread pool for sync-tool offload."""
@@ -443,7 +418,32 @@ class DualeAISDK:
         retries: int = 0,
         error_transform: Callable[[Exception], str] | None = None,
     ) -> RegisteredTool:
-        """Register a customer-hosted tool (``async def`` or plain ``def``) on this SDK."""
+        """Compile and register one customer-hosted Tool on this SDK.
+
+        The callable can be synchronous or asynchronous. Registration compiles
+        its annotated signature into the same Pydantic contract used for the
+        published schema and invocation validation. See
+        :func:`dualeai.decorators.tool` for the execution, retry, cancellation,
+        return-value, and idempotency contract.
+
+        Args:
+            func: Annotated callable to expose under its Python name.
+            description: Non-empty model-facing Tool description. The callable's
+                docstring is not published.
+            timeout: Positive per-attempt timeout shared with the absolute
+                invocation deadline.
+            retries: Non-negative additional attempts after the first.
+            error_transform: Optional redactor for model-facing exception text.
+
+        Returns:
+            A detached copy of the generated wire manifest entry.
+
+        Raises:
+            RuntimeError: If this SDK has no provisioned ``agent_id``.
+            ValueError: If description, timeout, retries, name, or registration
+                uniqueness is invalid.
+            TypeError: If the callable signature cannot form a Tool contract.
+        """
         if self.agent_id is None:
             raise RuntimeError("SDK tools require agent_id. Configure DualeAISDK(agent_id=...) or DUALEAI_AGENT_ID.")
         if not description.strip():
@@ -545,21 +545,20 @@ class DualeAISDK:
         """Submit tool outputs and consume the emitting task's stream to terminal.
 
         Args:
-            task_id: Child task that emitted the matching ``tool.use`` events.
-                Never substitute its continuation parent.
-            results: Successful or failed outputs keyed by tool-call ID.
-            last_event_id: Exact ``NATS-sequence:event-index`` cursor of the
-                triggering ``tool.use`` event. Passing it resumes after that
-                event on the same child stream.
+            task_id: Public Task that emitted the matching ``tool.use`` events,
+                either a root Task or a continuation. Never substitute its
+                continuation parent.
+            results: Successful or failed outputs, each carrying its Tool-call id.
+            last_event_id: Opaque SSE cursor of the triggering ``tool.use``
+                event. Passing it resumes after that event on the same Task
+                stream.
 
         Returns:
-            The terminal event from the same public ``task_id`` stream. Bridge
-            may use a hidden internal continuation to carry the tool results;
-            that internal ID is not a public SDK task.
+            The terminal event from the same public ``task_id`` stream.
         """
-        request = BridgeToolResultsRequest(type="tool_results", tool_results=results)
+        request = BridgeToolResultsRequest(type="tool_results", task_id=task_id, tool_results=results)
         client = await self._ensure_events_client()
-        return await client.submit_tool_results(task_id=task_id, request=request, last_event_id=last_event_id)
+        return await client.submit_tool_results(request=request, last_event_id=last_event_id)
 
     def _schedule_tool_use(
         self,
@@ -590,13 +589,30 @@ class DualeAISDK:
         scheduled = self._scheduled_tool_uses.get(dedup_key)
         if scheduled is not None:
             if scheduled.result is not None:
+                if scheduled.resubmission is not None and not scheduled.resubmission.done():
+                    # ONE RESUBMISSION AT A TIME. Every submission reads the Task's stream to its terminal, so it
+                    # replays each later tool.use it passes; a resubmission per delivery would start one more stream
+                    # per replay, and those streams replay again. The resubmission in flight answers this delivery,
+                    # and submits once more if it fails. Its Task is done in the step that ends its last attempt,
+                    # before its done callbacks run, so a delivery after a final failure starts the next one.
+                    scheduled.redelivered = True
+                    scheduled.redelivery_event_id = last_event_id
+                    logger.info(
+                        "Leaving tool-use redelivery to the resubmission in flight",
+                        task_id=task_id,
+                        tool_call_id=tool_use.tool_call_id,
+                        tool_name=tool_use.name,
+                    )
+                    return
                 logger.info(
                     "Resubmitting cached tool-use result",
                     task_id=task_id,
                     tool_call_id=tool_use.tool_call_id,
                     tool_name=tool_use.name,
                 )
-                self._schedule_tool_result_submission(task_id, scheduled.result, last_event_id=last_event_id)
+                self._schedule_tool_result_submission(
+                    task_id, scheduled.result, scheduled=scheduled, last_event_id=last_event_id
+                )
                 return
             logger.info(
                 "Ignoring duplicate tool-use delivery",
@@ -632,19 +648,24 @@ class DualeAISDK:
         task_id: str,
         result: BridgeToolResultSuccess | BridgeToolResultError,
         *,
+        scheduled: ScheduledToolUse,
         last_event_id: str | None = None,
     ) -> None:
         """Schedule a cached tool result submission without re-running customer code."""
         task = asyncio.create_task(
-            self._submit_single_tool_result(
+            self._resubmit_tool_result(
                 task_id,
                 result,
+                scheduled=scheduled,
                 last_event_id=last_event_id,
             )
         )
+        scheduled.resubmission = task
         self._tool_result_tasks.add(task)
 
         def _on_done(done_task: asyncio.Task[None]) -> None:
+            if scheduled.resubmission is done_task:
+                scheduled.resubmission = None
             self._tool_result_tasks.discard(done_task)
             with contextlib.suppress(asyncio.CancelledError):
                 exc = done_task.exception()
@@ -652,6 +673,33 @@ class DualeAISDK:
                     logger.warning("Tool-result submission task failed", task_id=task_id, error=str(exc))
 
         task.add_done_callback(_on_done)
+
+    async def _resubmit_tool_result(
+        self,
+        task_id: str,
+        result: BridgeToolResultSuccess | BridgeToolResultError,
+        *,
+        scheduled: ScheduledToolUse,
+        last_event_id: str | None,
+    ) -> None:
+        """Resubmit a cached result; a failed attempt resubmits again when the tool.use was redelivered during it."""
+        cursor = last_event_id
+        while True:
+            scheduled.redelivered = False
+            try:
+                await self._submit_single_tool_result(task_id, result, last_event_id=cursor)
+            except DualeAIError as error:
+                if not scheduled.redelivered:
+                    raise
+                logger.warning(
+                    "Tool-result resubmission failed; resubmitting for the redelivery it answers",
+                    task_id=task_id,
+                    tool_call_id=result.tool_call_id,
+                    error=str(error),
+                )
+                cursor = scheduled.redelivery_event_id
+            else:
+                return
 
     def _prune_scheduled_tool_uses(self, now: datetime) -> None:
         """Drop completed tool-use ids after their replay margin expires."""
@@ -724,10 +772,8 @@ class DualeAISDK:
         docstring); a per-attempt timeout cancels the coroutine mid-run, so a
         retried side effect may have partially applied.
         """
-        # TODO(RFC-121 §Out of Scope): add a per-client retry-ratio budget and a
-        # suppress-when-failing throttle before enabling wide fan-out retries.
-        # V1 bounds retry by the per-call attempt count and the absolute deadline
-        # only (Google SRE Ch. 21 fan-out amplification; Bronson et al. HotOS 2021).
+        # Only the per-call attempt count and the absolute deadline bound retries;
+        # no retry-ratio budget limits fan-out amplification.
         deadline_budget = max(0.0, (deadline_at - self._estimated_server_time()).total_seconds())
         # Surface when the deadline is too short for the configured retries to fire —
         # otherwise `retries=N` silently degrades to fewer (or zero) real attempts.
@@ -763,8 +809,8 @@ class DualeAISDK:
                     attempt=attempt.retry_state.attempt_number,
                     deadline_at=deadline_at,
                 )
-                # One OTel GenAI execute_tool span per attempt (semantic-conventions
-                # v1.37 — the client-side "function" tool case).
+                # One OTel GenAI execute_tool span per attempt (the OTel GenAI semantic
+                # conventions' client-side "function" tool case).
                 tool_name = registered_tool.tool.tool.name
                 with (
                     self._observability.trace_operation(
@@ -834,10 +880,9 @@ class DualeAISDK:
         last_event_id: str | None = None,
     ) -> None:
         """Submit one generated Bridge tool result and schedule nested tool-use events."""
-        request = BridgeToolResultsRequest(type="tool_results", tool_results=[result])
+        request = BridgeToolResultsRequest(type="tool_results", task_id=task_id, tool_results=[result])
         client = await self._ensure_events_client()
         await client.submit_tool_results(
-            task_id=task_id,
             request=request,
             last_event_id=last_event_id,
             tool_use_callback=lambda next_tool_use, next_event_id: self._schedule_tool_use(
@@ -855,7 +900,39 @@ class DualeAISDK:
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> CacheableValue:
-        """Execute activity with caching, retry logic, and job management."""
+        """Execute and cache a callable through the activity scheduler.
+
+        The cache key is derived from the callable name and ``repr`` of its
+        arguments. Changing a callable's implementation does not invalidate old
+        entries, and different inputs with identical representations can collide.
+        Version inputs explicitly when that distinction matters. A cached JSON
+        ``null`` is indistinguishable from a cache miss.
+
+        A synchronous callable runs directly on the event-loop thread. Use an
+        async callable, or perform blocking work in your own executor. Every
+        ordinary ``Exception`` is retried, so side-effecting activities must be
+        idempotent before ``max_retries`` is greater than zero.
+
+        Args:
+            func: Synchronous or asynchronous callable returning a JSON value.
+            cache_ttl: Entry lifetime. ``None`` stores without backend expiry;
+                it does not disable caching.
+            max_retries: Additional attempts after the first call. Use a
+                non-negative integer; this method does not proactively validate
+                negative values.
+            *args: Positional arguments forwarded to ``func`` and included in
+                the cache-key input.
+            **kwargs: Keyword arguments forwarded to ``func`` and included in
+                the cache-key input.
+
+        Returns:
+            The cached or newly computed JSON-compatible result.
+
+        Raises:
+            TimeoutError: If scheduler execution exceeds ``job_timeout``.
+            Exception: The final callable failure after retries, or an error
+                raised while initializing a non-best-effort backend.
+        """
         # Extract function name: FunctionType has __name__; fallback to class name for callables
         func_name = func.__name__ if isinstance(func, types.FunctionType) else type(func).__name__
         # Start observability tracking
@@ -921,10 +998,11 @@ class DualeAISDK:
         self,
         operation_name: str,
         operation_func: Callable[[], Awaitable[R]],
+        *,
         task_type: str,
-        streaming: bool,  # noqa: FBT001
+        streaming: bool,
         trace_attributes: dict[str, object],
-        rejection_context: str | None = None,
+        rejection_context: str,
     ) -> R:
         """Execute a task submission with tracing and circuit classification.
 
@@ -972,41 +1050,14 @@ class DualeAISDK:
 
         Returns:
             List of PreparedAttachment with key, filename, description, size.
-        """
-        return prepare_attachments(files)
-
-    def _resolve_attachment_agent_id(self, agent_id: str | None) -> str:
-        """Resolve the agent identity used to route attachment uploads.
-
-        Single-agent SDKs (the common shape) need not pass ``agent_id`` — the
-        sole registered agent is used. Multi-agent or zero-agent SDKs must pass
-        it explicitly because the call-scope library path encodes a single
-        ``agent_id`` segment.
-
-        Args:
-            agent_id: Explicit agent identifier, or ``None`` to resolve from
-                the SDK's registry.
-
-        Returns:
-            Resolved agent identifier.
 
         Raises:
-            ValueError: If ``agent_id`` is ``None`` and the registry does not
-                hold exactly one agent.
+            FileNotFoundError: If a path does not exist.
+            ValueError: If a path is not a regular, non-empty file.
+            pydantic.ValidationError: If generated metadata or a description
+                violates ``PreparedAttachment`` bounds.
         """
-        if agent_id is not None:
-            return agent_id
-        registered = list(self.agents)
-        if len(registered) == 1:
-            return registered[0]
-        if not registered:
-            raise ValueError(
-                "upload_attachments: agent_id is required — no agents registered on this SDK.",
-            )
-        raise ValueError(
-            "upload_attachments: agent_id is required when multiple agents are registered "
-            f"({len(registered)} agents: {sorted(registered)}).",
-        )
+        return prepare_attachments(files)
 
     async def upload_attachments(
         self,
@@ -1015,38 +1066,44 @@ class DualeAISDK:
         *,
         agent_id: str | None = None,
     ) -> dict[str, LibraryDocumentCreateResponse]:
-        """Upload attachments in parallel via presigned URLs.
+        """Upload prepared attachments to a Task-scoped Library.
 
         Resolve the call-scoped Library once, then create an upload session,
         upload presigned S3 parts, and create a queued Library document for
-        each attachment. All attachments upload concurrently.
-
-        Library calls go through the transport over plain HTTPS with
-        ``Authorization: Bearer <api_token>`` (RFC-113 — end-to-end
-        body encryption for Library is deferred). The Bridge SSE pipeline
-        on the same transport keeps HPKE for its task stream.
-        S3 presigned URL PUTs use a plain aiohttp session.
+        each attachment. At most eight file pipelines and eight presigned-part
+        requests are active at once. The batch is not transactional.
 
         Args:
-            task_id: Client-selected task identifier (UUID4 by default).
-            attachments: Prepared attachments from prepare_attachments().
-            agent_id: Agent identifier (keyword-only). Optional when a single
-                agent is registered on this SDK — resolved automatically. Required
-                when zero or multiple agents are registered because the
-                call-scope library path encodes a single agent identifier.
+            task_id: The Task identifier that the developer or the SDK selects.
+                Submit the Task with the same ``task_id``.
+            attachments: Values returned by :meth:`prepare_attachments`.
+            agent_id: Agent identifier for the Library path (keyword-only).
+                Overrides the configured Agent ID for path selection; credentials
+                still identify the caller. Required when the SDK has no configured
+                Agent ID.
 
         Returns:
             Queued Library document receipts keyed by prepared attachment key.
 
         Raises:
-            ValueError: If ``agent_id`` is omitted but cannot be unambiguously
-                resolved from the SDK's registered agents.
+            ValueError: If neither an explicit nor a configured Agent ID exists,
+                an attachment key is duplicated, or a prepared file is no longer
+                a regular non-empty file of the recorded size.
+            FileNotFoundError: If a prepared file no longer exists.
+            LibraryUploadError: If a local read or object-store upload fails.
+                ``completed_receipts`` contains documents already queued by the
+                non-transactional batch.
+            DualeAIAuthError: If the Library request is unauthorized.
+            BusinessError: If the Library request is rejected.
+            DualeAIConnectionError: If a Library transport or server failure occurs.
         """
         if not attachments:
             return {}
 
         _validate_prepared_attachments(attachments)
-        resolved_agent_id = self._resolve_attachment_agent_id(agent_id)
+        resolved_agent_id = agent_id if agent_id is not None else self.agent_id
+        if resolved_agent_id is None:
+            raise ValueError("upload_attachments: agent_id is required when the SDK has no configured Agent ID")
 
         library_path = _call_scope_library_path(
             agent_id=resolved_agent_id,
@@ -1056,18 +1113,34 @@ class DualeAISDK:
         return await self._libraries.upload(library.id, attachments)
 
     async def stop_task(self, task_id: str, reason: str) -> TaskStopAccepted:
-        """Stop a running task and every task started under it.
+        """Request that the platform stop a Task.
 
-        The call returns as soon as the platform accepts the request. The task
-        ends with a stopped result carrying this reason, and awaiting the
-        response raises :class:`TaskStoppedError`.
+        The returned receipt does not prove that the Task stopped. If a
+        ``task.stopped`` event is observed, awaiting
+        :meth:`AgentResponse.model <dualeai.response.AgentResponse.model>` raises
+        :class:`dualeai.exceptions.TaskStoppedError` with the event's reason.
 
-        Usage measured before the stop is billed as for a task that finished on
-        its own. Work the stop prevents is never started, so it costs nothing.
+        Requires ``agent:stop_task`` on the Task; an Agent Identity holds it on
+        its own Tasks by default. Without the permission the call raises
+        ``DualeAIAuthError`` (``AUTHORIZATION_FAILED``) at once. A permitted
+        stop is accepted even when the Task already ended or the Platform does
+        not know it; a stop of a Task that already ended changes nothing.
+
+        Nothing in this SDK enforces that the Platform accepts a permitted
+        stop of an ended or unknown Task.
 
         Args:
-            task_id: The task to stop.
-            reason: Why it is being stopped. Returned with the stopped result.
+            task_id: A Task of the API token's Agent Identity.
+            reason: Non-empty explanation sent with the request.
+
+        Returns:
+            The request-acceptance receipt.
+
+        Raises:
+            ValueError: If ``reason`` is empty or whitespace.
+            DualeAIAuthError: If the Platform refuses the stop (403).
+            DualeAIError: If the request fails before acceptance for any other
+                reason.
         """
         if not reason or not reason.strip():
             raise ValueError("Stop reason cannot be empty")
@@ -1077,47 +1150,81 @@ class DualeAISDK:
 
     async def submit_task(
         self,
-        action: str,
-        skills: list[SkillEnum],
+        instruction: str,
+        capabilities: list[Capability],
+        *,
+        priority: PriorityClass = PriorityClass.standard,
         routing_policy: RoutingPolicy | None = None,
         response_type: type[T] | None = None,
         response_schema: dict[str, JsonValue | None] | None = None,
         response_format: ResponseFormat | None = None,
-        streaming: bool = False,  # noqa: FBT001, FBT002
+        streaming: bool = False,
         deadline: datetime | None = None,
-        request_id: str | None = None,
+        task_id: str | None = None,
         task_type: str = "completion",
         attachments: list[PreparedAttachment] | None = None,
     ) -> "AgentResponse[T]":
-        """Submit an agent execution request under the dependency circuit breaker.
+        """Submit a root Task under the process-local dependency circuit breaker.
 
         Returns an :class:`AgentResponse` whose ``task`` attribute is
         the ``asyncio.Task`` running the bridge SSE iteration. Cancel
         via ``response.task.cancel()`` propagates to the bridge
-        connection (TCP closed). Router-side cancel is a separate
-        concern.
+        connection (TCP closed). Use :meth:`stop_task` to send a separate
+        platform stop request.
 
-        BREAKING CHANGE (pre-1.0): previously returned a ``str`` task_id;
-        now returns an ``AgentResponse``. Read ``response.task_id`` for the
-        prior value, ``await response.model()`` / ``response.stream()`` for
-        the result.
+        Args:
+            instruction: Task instruction: non-empty, at most 100,000 characters, without NUL characters.
+            capabilities: Capabilities used to derive ``required_capabilities`` when
+                ``routing_policy`` is omitted.
+            priority: Task scheduling class. Fast favors lower waiting time for
+                the same work and uses the Fast Task price; standard is the default.
+            routing_policy: Explicit routing policy. Takes precedence over the
+                policy derived from ``capabilities``.
+            response_type: Optional type for local ``AgentResponse.model()``
+                validation and, unless overridden, request-schema derivation.
+            response_schema: Optional JSON Schema used when deriving a response
+                format from ``response_type``.
+            response_format: Explicit wire response format. Takes precedence
+                over ``response_schema`` derivation.
+            streaming: Request content delta/reset events.
+            deadline: Optional absolute deadline. Omission uses the SDK default.
+                A timezone-naive value fails with ``TypeError`` during deadline
+                arithmetic.
+            task_id: Optional root Task id, the Task identifier that the developer
+                or the SDK selects; omission generates UUID4. Use the same id
+                previously used for attachment upload.
+            task_type: Observability label only; it does not change routing.
+            attachments: Prepared metadata for files already uploaded under
+                ``task_id``. This method does not upload or verify them.
+
+        Returns:
+            A response handle whose runner may still be in flight.
+
+        Raises:
+            pydantic.ValidationError: If ``instruction`` is empty, is longer
+                than 100,000 characters, or contains a NUL character, or if
+                ``task_id`` is not a Task identifier that
+                ``dualeai.BridgeTaskCreateRequest.task_id`` accepts.
+            TypeError: If a supplied ``deadline`` is timezone-naive.
+            RuntimeError: If the process-local Task dependency circuit is open.
+
+        Transport failures after the runner is created surface through
+        ``response.model()`` or by awaiting ``response.task``.
         """
-        if not action or not action.strip():
-            raise ValueError("Action cannot be empty")
 
         async def operation() -> AgentResponse[T]:
             return await self._submit_task_internal(
-                action,
-                skills,
-                routing_policy,
-                response_type,
-                response_schema,
-                response_format,
-                streaming,
-                deadline,
-                request_id,
-                task_type,
-                attachments,
+                instruction,
+                capabilities,
+                priority=priority,
+                routing_policy=routing_policy,
+                response_type=response_type,
+                response_schema=response_schema,
+                response_format=response_format,
+                streaming=streaming,
+                deadline=deadline,
+                task_id=task_id,
+                attachments=attachments,
             )
 
         return await self._execute_task_operation(
@@ -1126,31 +1233,45 @@ class DualeAISDK:
             task_type=task_type,
             streaming=streaming,
             trace_attributes={
-                # Never log prompt/action CONTENT (PII). Metadata only.
-                "action_length": len(action),
-                "skills_count": len(skills),
+                # Never log instruction CONTENT (PII). Metadata only.
+                "instruction_length": len(instruction),
+                "capabilities_count": len(capabilities),
                 "streaming_enabled": streaming,
                 "has_routing_policy": routing_policy is not None,
                 "response_type": response_type.__name__ if response_type else None,
                 "task_type": task_type,
-                "request_id": request_id,
+                "task_id": task_id,
             },
-            rejection_context=f"action_length={len(action)}",
+            rejection_context=f"instruction_length={len(instruction)}",
         )
 
     async def _continue_task(
         self,
         parent_task_id: str,
-        message: str,
+        instruction: str,
         deadline: datetime | None = None,
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
+        *,
+        priority: PriorityClass,
+        streaming: bool | None = None,
+        local_streaming: bool,
+        routing_policy: RoutingPolicy | None = None,
+        attachments: list[PreparedAttachment] | None = None,
+        task_id: str | None = None,
     ) -> "AgentResponse[T]":
-        """Submit a child for a successful ``AgentResponse``.
+        """Submit a continuation Task of ``parent_task_id``, running or ended.
 
-        The SDK creates the child ID before submission. It sends that ID in the
-        HTTP task path and sends ``parent_task_id`` in the continuation
-        body. The returned ``AgentResponse.task_id`` is the child ID.
+        The continuation's Task id is ``task_id``, or a new UUID4. The SDK
+        sends that id and ``parent_task_id`` in the continuation body. It
+        always sends a ``routing_policy`` object, empty when the caller sets no
+        policy fields, and the new Task's ``priority``. It sends
+        ``response_format``, ``response_stream`` and ``attachments`` only when
+        the caller set them;
+        an omitted criterion takes the parent Task's value on the Platform.
+        ``local_streaming`` selects the returned response's local buffering.
+        Nothing in this SDK enforces the Platform's inheritance of an omitted
+        field.
         """
         if deadline is not None and (deadline.tzinfo is None or deadline.utcoffset() is None):
             raise ValueError("Continuation deadline must be timezone-aware")
@@ -1160,13 +1281,19 @@ class DualeAISDK:
             operation_func=partial(
                 self._continue_task_internal,
                 parent_task_id,
-                message,
+                instruction,
                 deadline,
                 response_type,
                 response_format,
+                priority=priority,
+                streaming=streaming,
+                local_streaming=local_streaming,
+                routing_policy=routing_policy,
+                attachments=attachments,
+                task_id=task_id,
             ),
             task_type="continuation",
-            streaming=False,
+            streaming=local_streaming,
             trace_attributes={
                 "parent_task_id": parent_task_id,
             },
@@ -1175,19 +1302,22 @@ class DualeAISDK:
 
     def _prepare_task_submission(
         self,
+        *,
         operation_type: str,
-        task_id: str,
-        deadline: datetime | None = None,
-        streaming: bool = False,  # noqa: FBT001, FBT002
-    ) -> tuple[datetime, StructuredLogger]:
+        task_id: str | None,
+        deadline: datetime | None,
+        streaming: bool,
+    ) -> tuple[str, datetime, StructuredLogger]:
         """Common preparation logic for both submit and continue operations.
 
+        The new Task's id is the caller-selected ``task_id``, or a new UUID4
+        when the caller selects none. It is chosen here, before any HTTP work.
+
         Returns:
-            Resolved deadline and task-scoped logger.
+            Resolved Task id, resolved deadline and task-scoped logger.
         """
-        # Calculate deadline if not provided
+        task_id = task_id or str(uuid4())
         if deadline is None:
-            # Default timeout from platform constants
             default_timeout_seconds = TimingDefaults.DEFAULT_TASK_TIMEOUT_SECONDS
             deadline = datetime.now(timezone.utc) + timedelta(seconds=default_timeout_seconds)
             logger.debug(
@@ -1200,14 +1330,12 @@ class DualeAISDK:
         now = datetime.now(timezone.utc)
         deadline_remaining = (deadline - now).total_seconds()
 
-        # Create task-specific logger with bound context
         task_logger = get_task_logger(
             f"dualeai.sdk.{operation_type}",
             task_id=task_id,
             streaming=streaming,
         )
 
-        # Log deadline telemetry with task logger
         task_logger.info(
             f"Task {operation_type} deadline telemetry",
             deadline=deadline.isoformat(),
@@ -1215,7 +1343,7 @@ class DualeAISDK:
             task_id=task_id,
         )
 
-        return deadline, task_logger
+        return task_id, deadline, task_logger
 
     def _response_format_default(
         self,
@@ -1237,54 +1365,66 @@ class DualeAISDK:
         task_id: str,
     ) -> tuple[
         asyncio.Queue[StreamingContentEvent] | None,
-        list[BridgeContentDeltaResponse] | None,
-        Callable[[BridgeContentDeltaResponse], None] | None,
-        Callable[[BridgeContentResetResponse], None] | None,
-        Callable[[BridgeToolUseResponse, str | None], None] | None,
+        list[StreamingContentEvent] | None,
+        Callable[[StreamingContentEvent], None] | None,
+        Callable[[BridgeToolUseResponse, str | None], None],
     ]:
         """Build streaming buffers + spawn-time callbacks.
 
-        Returns ``(delta_queue, deltas_list, delta_callback,
-        reset_callback, tool_use_callback)``. The content callbacks close
-        over the buffers, which are then passed into ``AgentResponse`` so
-        ``response.stream()`` reads what the callbacks write.
+        Returns ``(delta_queue, deltas, content_callback, tool_use_callback)``.
+        The content callback closes over the buffers, which are then passed
+        into ``AgentResponse`` so ``response.stream()`` reads what the callback
+        writes. The replay list keeps every content event, resets included, in
+        arrival order: events can arrive out of order, so only the consumer can
+        apply a reset.
 
-        With ``streaming=False`` no streaming queues are allocated. The
-        tool-use callback still schedules registered SDK tool execution, because
-        bridge ``tool.use`` events are delivery events rather than user-visible
-        content streaming.
+        With ``streaming=False`` the buffers and the content callback are
+        ``None``, so content events are dropped. The tool-use callback still schedules registered SDK
+        tool execution, because bridge ``tool.use`` events are delivery events
+        rather than user-visible content streaming.
         """
-        delta_queue: asyncio.Queue[StreamingContentEvent] | None = asyncio.Queue() if streaming else None
-        deltas: list[BridgeContentDeltaResponse] | None = [] if streaming else None
+        on_tool_use = partial(self._schedule_tool_use, task_id)
+        if not streaming:
+            return None, None, None, on_tool_use
 
-        def on_delta(delta: BridgeContentDeltaResponse) -> None:
-            if deltas is None or delta_queue is None:
-                return
-            deltas.append(delta)
-            delta_queue.put_nowait(delta)
+        delta_queue: asyncio.Queue[StreamingContentEvent] = asyncio.Queue()
+        deltas: list[StreamingContentEvent] = []
 
-        def on_reset(reset: BridgeContentResetResponse) -> None:
-            if deltas is None or delta_queue is None:
-                return
-            deltas.clear()
-            delta_queue.put_nowait(reset)
+        def on_content(event: StreamingContentEvent) -> None:
+            deltas.append(event)
+            delta_queue.put_nowait(event)
 
-        return delta_queue, deltas, on_delta, on_reset, partial(self._schedule_tool_use, task_id)
+        return delta_queue, deltas, on_content, on_tool_use
 
-    async def _run_task_with_circuit_breaker(  # noqa: PLR0912 - explicit terminal outcome classification
+    async def _run_task_with_circuit_breaker(  # noqa: PLR0912, PLR0915 - explicit terminal and local outcome classification
         self,
         *,
         admission: asyncio.Future[None],
-        task_id: str,
         request: BridgeTaskRequest,
-        delta_callback: Callable[[BridgeContentDeltaResponse], None] | None,
-        reset_callback: Callable[[BridgeContentResetResponse], None] | None,
-        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None] | None,
+        content_callback: Callable[[StreamingContentEvent], None] | None,
+        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None],
+        accepted_callback: Callable[[], None],
     ) -> TerminalEvent:
-        """Run one terminal bridge task under the SDK-local breaker."""
+        """Run one terminal bridge task under the SDK-local breaker.
+
+        An admitted run without a terminal records a local ``task_stream``
+        failure or cancellation, leaving Task result counters unchanged.
+        The breaker tracks dependency health separately: a stream failure can
+        count there, while a non-retryable Task error increments ``tasks_failed``
+        without counting against the breaker.
+
+        ``accepted_callback`` runs when the Platform accepts the request, and
+        again when this runner ends, so a runner that ends before acceptance (a
+        refused or failed submission, a local cancellation) never leaves a
+        continuation waiting.
+
+        A local failure never counts as a remote failure, and a stream failure
+        stays a local outcome in every metric view.
+        """
         controller = self._backpressure_controller
 
         admitted = False
+        cancelled = False
         terminal: TerminalEvent | None = None
         spawn_time = time.time()
         task_type = "continuation" if request.type == "continue" else "completion"
@@ -1297,11 +1437,10 @@ class DualeAISDK:
                 try:
                     events_client = await self._ensure_events_client()
                     terminal = await events_client.run_task(
-                        task_id=task_id,
                         request=request,
-                        delta_callback=delta_callback,
-                        reset_callback=reset_callback,
+                        content_callback=content_callback,
                         tool_use_callback=tool_use_callback,
+                        accepted_callback=accepted_callback,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -1324,14 +1463,20 @@ class DualeAISDK:
                     attempt.ignore()
                 return terminal
         except BaseException as exc:
+            cancelled = isinstance(exc, asyncio.CancelledError)
             if not admission.done():
                 admission.set_exception(exc)
             raise
         finally:
-            self._inflight_tasks.pop(task_id, None)
+            self._inflight_tasks.pop(request.task_id, None)
+            accepted_callback()
             if admitted:
                 duration = time.time() - spawn_time
-                if terminal is None or isinstance(terminal, BridgeTaskErrorResponse):
+                if terminal is None:
+                    self._observability.record_operation(
+                        "task_stream", "cancelled" if cancelled else "failed", duration=duration
+                    )
+                elif isinstance(terminal, BridgeTaskErrorResponse):
                     controller.record_failure()
                     self._observability.task_failed(duration=duration, task_type=task_type)
                 elif not isinstance(terminal, BridgeTaskStoppedResponse):
@@ -1341,25 +1486,23 @@ class DualeAISDK:
     async def _spawn_run_task(
         self,
         *,
-        task_id: str,
         request: BridgeTaskRequest,
-        delta_callback: Callable[[BridgeContentDeltaResponse], None] | None,
-        reset_callback: Callable[[BridgeContentResetResponse], None] | None,
-        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None] | None,
+        content_callback: Callable[[StreamingContentEvent], None] | None,
+        tool_use_callback: Callable[[BridgeToolUseResponse, str | None], None],
+        accepted_callback: Callable[[], None],
     ) -> asyncio.Task[TerminalEvent]:
         """Spawn one task and wait until the breaker admits or rejects it."""
         admission = asyncio.get_running_loop().create_future()
         task = asyncio.create_task(
             self._run_task_with_circuit_breaker(
                 admission=admission,
-                task_id=task_id,
                 request=request,
-                delta_callback=delta_callback,
-                reset_callback=reset_callback,
+                content_callback=content_callback,
                 tool_use_callback=tool_use_callback,
+                accepted_callback=accepted_callback,
             )
         )
-        self._inflight_tasks[task_id] = task
+        self._inflight_tasks[request.task_id] = task
         try:
             await admission
         except asyncio.CancelledError:
@@ -1377,7 +1520,6 @@ class DualeAISDK:
         self,
         *,
         operation_name: str,
-        task_id: str,
         request: BridgeTaskRequest,
         streaming: bool,
         response_type: type[T] | None,
@@ -1390,33 +1532,36 @@ class DualeAISDK:
         - a fully validated create or continuation ``request``;
         - ``task_logger`` (via ``_prepare_task_submission``, with any
           op-specific bindings already attached);
-        - ``task_id`` (the *new* spawn id, never the parent — see
-          continue path which mints a fresh UUID).
+        - the request's ``task_id`` (the *new* spawn id, never the parent: a
+          continuation's Task id is its caller-selected ``task_id``, or a new
+          UUID4).
 
         Pipeline: open ``operation_context`` → ``FlowLogger.start`` → build
-        streaming buffers → spawn the protected bridge-iteration task → build
-        the ``AgentResponse`` →
-        ``FlowLogger.step`` / ``FlowLogger.end`` → ``await
+        streaming buffers and the acceptance Event → spawn the protected
+        bridge-iteration task, which sets the Event when the Platform accepts
+        the request or when the runner ends → build the ``AgentResponse`` with
+        that Event → ``FlowLogger.step`` / ``FlowLogger.end`` → ``await
         asyncio.sleep(0)`` so the spawned task reaches its first
         suspension before the caller sees the response.
 
         ``FlowLogger.start`` / ``end`` share ``task_id`` so the
         timing cache resolves and ``duration_ms`` is populated.
         """
+        task_id = request.task_id
         with operation_context(operation_name):
             FlowLogger.start(task_logger, operation_name, task_id)
 
-            delta_queue, deltas, on_delta, on_reset, on_tool_use = self._build_streaming_buffers(
+            delta_queue, deltas, on_content, on_tool_use = self._build_streaming_buffers(
                 streaming,
                 task_id,
             )
+            accepted = asyncio.Event()
             try:
                 task = await self._spawn_run_task(
-                    task_id=task_id,
                     request=request,
-                    delta_callback=on_delta,
-                    reset_callback=on_reset,
+                    content_callback=on_content,
                     tool_use_callback=on_tool_use,
+                    accepted_callback=accepted.set,
                 )
             except BaseException:
                 FlowLogger.end(task_logger, operation_name, task_id, success=False)
@@ -1426,7 +1571,7 @@ class DualeAISDK:
                 task=task,
                 expected_type=response_type,
                 sdk=self,
-                streaming=streaming,
+                accepted=accepted,
                 delta_queue=delta_queue,
                 deltas=deltas,
             )
@@ -1439,81 +1584,100 @@ class DualeAISDK:
     async def _continue_task_internal(
         self,
         parent_task_id: str,
-        message: str,
+        instruction: str,
         deadline: datetime | None = None,
         response_type: type[T] | None = None,
         response_format: ResponseFormat | None = None,
+        *,
+        priority: PriorityClass,
+        streaming: bool | None = None,
+        local_streaming: bool,
+        routing_policy: RoutingPolicy | None = None,
+        attachments: list[PreparedAttachment] | None = None,
+        task_id: str | None = None,
     ) -> "AgentResponse[T]":
         """Internal task continuation: spawn task, return AgentResponse.
 
-        ``parent_task_id`` is the public parent. The SDK creates the child ID before
-        any HTTP work and keeps it on the returned ``AgentResponse``.
+        ``parent_task_id`` is the public parent. The continuation's Task id is
+        ``task_id``, or a new UUID4, chosen by ``_prepare_task_submission`` and
+        kept on the returned ``AgentResponse``. The required policy object
+        carries only the fields the caller set; an omitted policy is an empty
+        object.
         """
-        continuation_task_id = str(uuid4())
-        deadline, task_logger = self._prepare_task_submission(
+        continuation_task_id, deadline, task_logger = self._prepare_task_submission(
             operation_type="task_continuation",
-            task_id=continuation_task_id,
+            task_id=task_id,
             deadline=deadline,
-            streaming=False,
+            streaming=local_streaming,
         )
+        criteria: dict[str, object] = {}
         resolved_response_format = self._response_format_default(response_format, response_type, None)
-        if resolved_response_format is None:
-            request = BridgeTaskContinueRequest(
-                type="continue",
-                parent_task_id=parent_task_id,
-                message=message,
-                deadline=deadline,
-            )
-        else:
-            request = BridgeTaskContinueRequest(
-                type="continue",
-                parent_task_id=parent_task_id,
-                message=message,
-                deadline=deadline,
-                response_format=resolved_response_format,
-            )
+        if resolved_response_format is not None:
+            criteria["response_format"] = resolved_response_format
+        if streaming is not None:
+            criteria["response_stream"] = streaming
+        if attachments:
+            criteria["attachments"] = [
+                Attachment(key=attachment.key, filename=attachment.filename, description=attachment.description)
+                for attachment in attachments
+            ]
+        request = BridgeTaskContinueRequest.model_validate(
+            {
+                "type": "continue",
+                "task_id": continuation_task_id,
+                "parent_task_id": parent_task_id,
+                "instruction": instruction,
+                "deadline": deadline,
+                "priority": priority,
+                "routing_policy": routing_policy if routing_policy is not None else RoutingPolicy(),
+                **criteria,
+            }
+        )
         return await self._spawn_and_wrap_response(
             operation_name="task_continuation",
-            task_id=continuation_task_id,
             request=request,
-            streaming=False,
+            streaming=local_streaming,
             response_type=response_type,
             task_logger=task_logger.bind(parent_task_id=parent_task_id),
         )
 
     async def _submit_task_internal(
         self,
-        action: str,
-        skills: list[SkillEnum],
-        routing_policy: RoutingPolicy | None = None,
-        response_type: type[T] | None = None,
-        response_schema: dict[str, JsonValue | None] | None = None,
-        response_format: ResponseFormat | None = None,
-        streaming: bool = False,  # noqa: FBT001, FBT002
-        deadline: datetime | None = None,
-        request_id: str | None = None,
-        _task_type: str = "completion",
-        attachments: list[PreparedAttachment] | None = None,
+        instruction: str,
+        capabilities: list[Capability],
+        *,
+        priority: PriorityClass,
+        routing_policy: RoutingPolicy | None,
+        response_type: type[T] | None,
+        response_schema: dict[str, JsonValue | None] | None,
+        response_format: ResponseFormat | None,
+        streaming: bool,
+        deadline: datetime | None,
+        task_id: str | None,
+        attachments: list[PreparedAttachment] | None,
     ) -> "AgentResponse[T]":
         """Internal task submission: spawn task, return AgentResponse."""
-        routing_policy_obj = routing_policy or (RoutingPolicy(required_skills=skills) if skills else None)
-        task_id_preview = request_id or str(uuid4())
-
-        deadline, task_logger = self._prepare_task_submission(
+        routing_policy_obj = (
+            routing_policy
+            if routing_policy is not None
+            else RoutingPolicy(required_capabilities=capabilities)
+            if capabilities
+            else RoutingPolicy()
+        )
+        task_id_preview, deadline, task_logger = self._prepare_task_submission(
             operation_type="task_submission",
-            task_id=task_id_preview,
+            task_id=task_id,
             deadline=deadline,
             streaming=streaming,
         )
 
-        task_logger = task_logger.bind(skills=[skill.value for skill in skills])
-        if routing_policy_obj:
-            task_logger = task_logger.bind(
-                has_required_skills=bool(routing_policy_obj.required_skills),
-                has_preferred_skills=bool(routing_policy_obj.preferred_skills),
-            )
+        task_logger = task_logger.bind(capabilities=[capability.value for capability in capabilities])
+        task_logger = task_logger.bind(
+            has_required_capabilities=bool(routing_policy_obj.required_capabilities),
+            has_preferred_capabilities=bool(routing_policy_obj.preferred_capabilities),
+        )
 
-        task_logger.info("Task submission details", action_length=len(action))
+        task_logger.info("Task submission details", instruction_length=len(instruction))
         resolved_response_format = self._response_format_default(response_format, response_type, response_schema)
         bridge_attachments = (
             [
@@ -1529,8 +1693,10 @@ class DualeAISDK:
         )
         request = BridgeTaskCreateRequest(
             type="create",
-            action_prompt=action,
+            task_id=task_id_preview,
+            instruction=instruction,
             deadline=deadline,
+            priority=priority,
             routing_policy=routing_policy_obj,
             response_format=resolved_response_format,
             response_stream=streaming,
@@ -1539,7 +1705,6 @@ class DualeAISDK:
 
         return await self._spawn_and_wrap_response(
             operation_name="task_submission",
-            task_id=task_id_preview,
             request=request,
             streaming=streaming,
             response_type=response_type,
@@ -1602,7 +1767,14 @@ class DualeAISDK:
             )
 
     def get_health_status(self) -> dict[str, object]:
-        """Get SDK health status with observability metrics."""
+        """Return a local component snapshot and record its metrics.
+
+        This is diagnostic state, not a remote service readiness probe. Optional
+        components that have not been initialized report healthy. Cache health
+        means only that the SDK has not observed a local cache-state failure;
+        this method performs no backend I/O. If component inspection itself
+        raises, the pre-inspection healthy value is retained.
+        """
         components = self._component_health()
         self._update_health_metrics(components)
 
@@ -1613,11 +1785,10 @@ class DualeAISDK:
             "components": components,
             "uptime_seconds": int(time.time() - self._startup_time),
             "inflight_tasks": len(self._inflight_tasks),
-            "registered_agents": len(self.agents),
             "registered_tools": len(self._tools),
         }
 
-    # Public properties for test and introspection access
+    # Public properties for introspection and dependency injection
     @property
     def observability(self) -> SDKObservability:
         """SDK observability instance."""
@@ -1625,12 +1796,12 @@ class DualeAISDK:
 
     @property
     def events_client(self) -> CloudEventsClient | None:
-        """Cloud events client."""
+        """Lower-level HTTP/SSE client after first connection, otherwise ``None``."""
         return self._events_client
 
     @events_client.setter
     def events_client(self, value: CloudEventsClient | None) -> None:
-        """Set the cloud events client (used for DI in tests)."""
+        """Set the cloud events client (dependency injection)."""
         self._events_client = value
 
     @property
@@ -1669,14 +1840,18 @@ class DualeAISDK:
 
     @property
     def backpressure_controller(self) -> BackpressureController:
-        """Task circuit-breaker controller."""
+        """Process-local Task dependency circuit-breaker controller.
+
+        Activity queue bounds live in the same configuration, but this
+        controller does not impose a universal limit on Task streams, Library
+        operations, or Tool delivery.
+        """
         return self._backpressure_controller
 
     async def _cleanup_scheduler(self) -> None:
         """Close scheduler with graceful shutdown."""
         if self._scheduler and not self._scheduler.closed:
             try:
-                # Use wait_and_close for graceful shutdown with longer timeout
                 await asyncio.wait_for(self._scheduler.wait_and_close(), timeout=3.0)
             except (asyncio.CancelledError, RuntimeError, AttributeError, asyncio.TimeoutError):
                 # Force close if graceful close fails or times out
@@ -1718,7 +1893,7 @@ class DualeAISDK:
         tasks = list(self._tool_result_tasks)
         # Graceful drain: give in-flight tool work the configured window to COMPLETE
         # before cancelling, so a rolling deploy does not cancel a tool mid-side-effect
-        # (graceful_shutdown_timeout, default 0.0 = cancel immediately as before).
+        # (graceful_shutdown_timeout; its default 0.0 cancels immediately).
         if self._graceful_shutdown_timeout > 0:
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
                 await asyncio.wait_for(
@@ -1739,7 +1914,14 @@ class DualeAISDK:
         self._scheduled_tool_uses.clear()
 
     async def cleanup(self) -> None:
-        """Clean up resources (heartbeat, startup tasks, scheduler, cache, connections)."""
+        """Close resources owned directly by this SDK instance.
+
+        This cancels Task runners and Tool-result work, stops lifecycle tasks,
+        and closes the scheduler, network transport, cache, and dedicated Tool
+        executor. It does not flush or shut down process-global OpenTelemetry
+        providers and does not call
+        :meth:`SDKObservability.cleanup <dualeai.observability.SDKObservability.cleanup>`.
+        """
         # Cancel in-flight task runners first so they stop touching the bridge.
         await self._cleanup_inflight_tasks()
         await self._cleanup_tool_result_tasks()
@@ -1754,10 +1936,8 @@ class DualeAISDK:
         # Then cleanup lifecycle tasks + deregister (owned by the lifecycle manager)
         await self._lifecycle.aclose()
 
-        # Cleanup scheduler with enhanced error suppression
         await self._cleanup_scheduler()
 
-        # Cleanup events client connection
         async with self._events_client_lock:
             if self._events_client:
                 with contextlib.suppress(Exception):
@@ -1769,7 +1949,7 @@ class DualeAISDK:
                 await self._cache.close()
             self._cache = None
 
-        # Give async tasks a moment to complete cleanup with shortened delay
+        # Give async tasks a moment to complete cleanup.
         await asyncio.sleep(0.01)
 
     async def __aenter__(self) -> Self:

@@ -4,8 +4,6 @@ from dualeai.constants import TimingDefaults
 
 # Timeout constants (in seconds)
 DEFAULT_TIMEOUT_SECONDS = TimingDefaults.DEFAULT_TASK_TIMEOUT_SECONDS
-ROUTER_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS - 1  # Router timeout (1 second less than SDK)
-WORKER_TIMEOUT_SECONDS = DEFAULT_TIMEOUT_SECONDS - 2  # Worker timeout (2 seconds less than SDK)
 SHORT_TIMEOUT_SECONDS = 30  # 30 seconds
 VERY_SHORT_TIMEOUT_SECONDS = 29  # 29 seconds (allows for execution time)
 TEST_NETWORK_DELAY_SECONDS = 0.1  # Network delay simulation

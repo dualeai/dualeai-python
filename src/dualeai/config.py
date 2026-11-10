@@ -1,32 +1,38 @@
-"""Configuration management for Duale AI SDK using Pydantic Settings (RFC-051).
+"""Pydantic settings for the Duale AI SDK.
 
-Identity Resolution:
-- tenant_id and agent_id are resolved server-side from the API token
-- Profile service validates token and returns canonical identity
-- SDK task streaming only needs token + endpoint for authentication
-- SDK Library operations need tenant_id for the public URL path
+Task and Agent requests use the Bridge hpke-http/3 endpoint derived from the
+HTTPS Gateway base. Library metadata requests use a separate protected
+endpoint; ``tenant_id`` is part of their URL. Both endpoints authenticate with
+the platform token issued for the API token. Hosted-tool lifecycle operations
+require ``agent_id``. Attachment uploads
+use the configured Agent ID unless a per-call ID is supplied.
 """
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import find_dotenv
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from dualeai._platform_token import API_TOKEN_PREFIX
 
 
 class ObservabilityConfig(BaseModel):
     """OpenTelemetry observability configuration."""
 
     endpoint: str = Field(
-        description="Base OpenTelemetry OTLP endpoint for traces and metrics (SDK logs are never exported)",
+        description=(
+            "Base OTLP/HTTP endpoint for SDK traces and metrics. The SDK does not "
+            "install an OTLP log exporter; host-application logging remains separate."
+        ),
     )
-    # TODO(ingest-auth) RFC-132 §Deferred: today this is a client-side enable
-    # gate sent as a Bearer header the relay does not validate. When ingest
-    # auth lands, the value becomes a backend-minted per-tenant ingest JWT
-    # (validated by the collector oidc extension) with no SDK code change.
     token: str | None = Field(
         default=None,
-        description="Telemetry token for the OTLP endpoint (never the dualeai_ API token)",
+        description=(
+            "Bearer token sent to the OTLP endpoint. Setting it enables SDK telemetry; "
+            "do not reuse the Duale AI API token."
+        ),
     )
 
     def get_headers(self) -> dict[str, str]:
@@ -37,24 +43,26 @@ class ObservabilityConfig(BaseModel):
 
 
 class DualeAIConfig(BaseSettings):
-    """Duale AI SDK configuration with HTTP bridge transport (RFC-051).
+    """Configuration loaded from arguments, environment variables, and ``.env``.
 
-    The SDK communicates via HTTP/SSE bridge:
-    - POST /v1/tasks/{task_id} → SSE stream (create task, type=create)
-    - POST /v1/tasks/{task_id} → SSE stream (tool results, type=tool_results)
-    - POST /v1/tasks/{task_id} → SSE stream (continue, type=continue)
-    - GET /v1/tasks/{task_id} → SSE stream (reconnect)
+    Task operations are encrypted, including their method and path. Discovery
+    GET and encrypted POST requests use /http-bridge/v1/hpke. The encrypted
+    operations use these paths without the /http-bridge service name:
+    - POST /v1/hpke/tasks → 202 (create task, type=create)
+    - POST /v1/hpke/tasks → 202 (continue, type=continue)
+    - POST /v1/hpke/tasks → 202 (tool results, type=tool_results)
+    - GET /v1/hpke/tasks/{task_id} → SSE stream (read and reconnect)
+    - POST /v1/hpke/tasks/{task_id}/stop → acceptance receipt (stop request)
 
-    Identity Resolution (RFC-051 §7.2):
-    - tenant_id and agent_id are resolved by Profile from the API token
-    - SDK sends token, bridge computes hash, Profile resolves to canonical identity
-    - tenant_id is only used for RFC-113 Library URL paths
+    ``tenant_id`` and ``agent_id`` are not interchangeable with the API token:
+    Library logical routes need ``tenant_id`` and hosted-tool lifecycle calls
+    need ``agent_id``. Ordinary task requests need only the token and endpoint.
 
     Environment variables:
-    - DUALEAI_TOKEN: API token for HTTP bridge authentication; starts with dualeai_ [required]
-    - DUALEAI_ENDPOINT: Duale AI API endpoint URL [optional]
+    - DUALEAI_TOKEN: API token identifying the caller to Duale AI [required]
+    - DUALEAI_ENDPOINT: HTTPS Gateway base URL [optional]
     - DUALEAI_TENANT_ID: Library tenant path segment [required for Library operations]
-    - DUALEAI_AGENT_ID: Provisioned agent identity [required for hosted tools and task attachments]
+    - DUALEAI_AGENT_ID: Provisioned identity [required for hosted Tools unless passed to the SDK]
     - DUALEAI_REDIS_URL: Redis server URL for caching [optional]
     - DUALEAI_OBSERVABILITY__ENDPOINT: OTLP endpoint URL [optional]
     - DUALEAI_OBSERVABILITY__TOKEN: OTLP authentication token [optional]
@@ -68,15 +76,15 @@ class DualeAIConfig(BaseSettings):
         use_attribute_docstrings=True,
     )
 
-    # HTTP Bridge Authentication (RFC-051)
+    # Protected API authentication.
     # Default None — pydantic-settings fills from DUALEAI_TOKEN env var.
     # Validator ensures a valid token is present after all sources are loaded.
     token: str | None = Field(
         default=None,
-        min_length=10,
         max_length=256,
         description=(
-            "API token for HTTP bridge authentication; starts with dualeai_. "
+            f"API token identifying the caller to Duale AI, which exchanges it for the credential "
+            f"that opens every tunnel; starts with {API_TOKEN_PREFIX}. "
             "Provided through the Duale AI workspace access handoff. "
             "Set via DUALEAI_TOKEN environment variable."
         ),
@@ -85,29 +93,42 @@ class DualeAIConfig(BaseSettings):
     @field_validator("token")
     @classmethod
     def validate_token_present_and_format(cls, v: str | None) -> str:
-        """Validate token is provided (from env or constructor) and has correct format."""
+        """Validate the token is present and carries the platform's credential prefix.
+
+        THE PREFIX IS THE ONLY LOCAL RULE, and there is no length floor. This
+        token identifies the caller to Duale AI, which exchanges it for the
+        credential that opens every tunnel; the 32-byte floor RFC 9180 sets is
+        on that derived credential and belongs to the issuer, not here.
+        Everything else about this credential's shape is the issuer's to
+        choose, so a second bound here would go stale unnoticed.
+
+        The prefix holds in both directions: a token the platform mints is
+        accepted, and one carrying the ``duale_`` package prefix instead is
+        refused.
+        """
         if v is None:
             raise ValueError(
                 "token is required. Set DUALEAI_TOKEN environment variable or pass token= to DualeAIConfig(). "
                 "Obtain a token through your Duale AI workspace access handoff."
             )
-        if not v.startswith("dualeai_"):
+        if not v.startswith(API_TOKEN_PREFIX):
             raise ValueError(
-                "token must start with 'dualeai_'. Obtain a valid token through your Duale AI workspace access handoff."
+                f"token must start with {API_TOKEN_PREFIX!r}. "
+                "Obtain a valid token through your Duale AI workspace access handoff."
             )
         return v
 
-    # Duale AI API endpoint
+    # Gateway base for the two protected service endpoints.
     endpoint: str = Field(
-        default="https://api.duale.ai",
-        description="Shared API endpoint for task, lifecycle, and Library requests",
+        default="https://api.beta.duale.ai",
+        description="HTTPS Gateway base URL for protected Task, Agent, and Library metadata APIs",
     )
 
     tenant_id: str | None = Field(
         default=None,
         min_length=1,
         description=(
-            "Tenant path segment for Library operations. Task streaming still resolves identity from the API token."
+            "Tenant URL segment required by Library operations; ordinary task requests do not read this field."
         ),
     )
 
@@ -116,15 +137,28 @@ class DualeAIConfig(BaseSettings):
         min_length=3,
         max_length=50,
         pattern="^[a-zA-Z][a-zA-Z0-9_-]*$",
-        description="Pre-provisioned agent identifier used by SDK lifecycle endpoints.",
+        description=(
+            "Provisioned agent identifier used by hosted-tool lifecycle calls. "
+            "Attachment uploads use it unless an agent_id is supplied for that call."
+        ),
     )
 
     @field_validator("endpoint")
     @classmethod
     def validate_endpoint(cls, v: str) -> str:
-        """Validate endpoint is valid HTTP(S) URL."""
-        if not v.startswith(("http://", "https://")):
-            raise ValueError("endpoint must be an HTTP or HTTPS URL")
+        """Validate the HTTPS Gateway base URL."""
+        parts = urlsplit(v)
+        if (
+            parts.scheme != "https"
+            or not parts.netloc
+            or parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError("endpoint must be an absolute HTTPS URL without credentials, query, or fragment")
+        if parts.path not in ("", "/"):
+            raise ValueError("endpoint must be an HTTPS Gateway base URL without a path")
         return v.rstrip("/")
 
     # Cache configuration

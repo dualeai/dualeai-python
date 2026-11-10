@@ -7,6 +7,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from dualeai.models import json_value as json_value_module
+from dualeai.models import tool_call_id as tool_call_id_module
 
 __all__: list[str] = ["ToolCall"]
 
@@ -29,9 +30,9 @@ class ToolCall(BaseModel):
         },
     )
     id: Annotated[
-        Annotated[StrictStr, Field(min_length=1, max_length=256)],
+        tool_call_id_module.ToolCallId,
         Field(
-            description="Provider-supplied Tool Call correlation identifier containing 1 to 256 unrestricted characters. It is not guaranteed unique. Customer Tool delivery accepts only the narrower ToolCallId shape, so some values accepted here cannot cross that boundary unchanged."
+            description="Identifier that correlates this Tool Call with its Tool Result. Return it unchanged in the matching Tool Result. It is not guaranteed unique."
         ),
     ]
     name: Annotated[

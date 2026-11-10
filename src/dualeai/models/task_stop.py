@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from re import fullmatch
 from typing import Annotated, Union
 
@@ -37,6 +38,8 @@ _PortableJsonValue = TypeAliasType(
 
 def _validate_string_constraints_2(value: object) -> object:
     if not isinstance(value, str):
+        if not isinstance(value, datetime):
+            raise ValueError("date-time input must be an RFC 3339 string or a datetime")
         return value
     if fullmatch("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})", value) is None:
         raise ValueError("string is not a canonical date-time")
@@ -53,7 +56,7 @@ TaskStop = TypeAliasType(
 
 
 class TaskStopAccepted(BaseModel):
-    """Confirmation that a Stop request was accepted for asynchronous processing. Acceptance does not confirm that the target exists, is eligible, or will stop. If the Stop takes effect, its terminal task.stopped outcome arrives on the Task event stream."""
+    """The caller may stop this Task. Acceptance does not confirm that the Task exists or is still running. The Stop is processed asynchronously; if it takes effect, the terminal task.stopped outcome arrives on the Task event stream."""
 
     model_config = ConfigDict(
         extra="forbid",

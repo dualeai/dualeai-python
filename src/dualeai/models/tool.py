@@ -27,7 +27,7 @@ def _reject_explicit_null(value: object) -> object:
 
 
 class Parameters(BaseModel):
-    """JSON Schema for tool parameters"""
+    """JSON Schema of the Tool's arguments: an object schema that lists its properties and its required property names, and allows no other property."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     type: Literal["object"]
@@ -50,17 +50,18 @@ class Parameters(BaseModel):
         BeforeValidator(_reject_explicit_null),
         Field(alias="$defs"),
         Field(
-            description="Reusable subschema definitions referenced via $ref (faithful schemas). Optional; absent for flat/inlined schemas."
+            description="Named subschemas that `$ref` values in this schema point to. Omit when the schema uses no `$ref`."
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
 
 
 class Tool(BaseModel):
-    """Model-facing Tool Definition for requesting a typed operation. It describes the name, purpose, and arguments; it grants no dispatch eligibility, host availability, Platform access authorization, or external-action authority."""
+    """Definition of a Tool that a model can call: its name, its purpose and the JSON Schema of its arguments. Offering a definition does not make the Tool available or authorize its call."""
 
     model_config = ConfigDict(extra="forbid", title="Tool", json_schema_extra=None)
     name: Annotated[
-        tool_name_module.ToolName, Field(description="Tool name (letters, numbers, underscores, hyphens only)")
+        tool_name_module.ToolName,
+        Field(description="Tool name: 1 to 64 ASCII letters, digits, underscores or hyphens."),
     ]
     description: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=1024)], Field(description="Tool description for the model")
@@ -73,7 +74,7 @@ RequireToolUse = TypeAliasType(
     Annotated[
         StrictBool,
         Field(
-            description="Ask the model to call at least one of the Tool Definitions carried on this request. Providers apply it through their own tool-selection control and a few omit it in modes that cannot express it — extended thinking on Anthropic and Bedrock, for two — so it constrains the request rather than guaranteeing the outcome.",
+            description="Require the response to contain at least one call to a Tool Definition carried on this request. Duale AI retries a response that has no Tool Call, on another model when needed, and fails the request when no model produces one.",
             json_schema_extra={"default": False},
         ),
     ],

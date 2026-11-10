@@ -1,18 +1,20 @@
-"""Agent response handling with HTTP bridge streaming support.
+"""Task response handling for terminal results and optional SSE content events.
 
 This module provides the AgentResponse class that wraps an
 ``asyncio.Task`` running the bridge SSE iteration.
 
-Key Features:
-- SSE streaming via bridge API (real-time deltas)
-- Type-safe response validation with Pydantic models
-- ``response.task.cancel()`` closes the local bridge connection only; the
-  platform keeps running the task. ``response.stop()`` stops the work itself.
+``response.task.cancel()`` cancels the local stream runner and closes its
+connection; it is not a platform stop request. ``response.stop()`` submits a
+stop request and returns its acceptance receipt, which does not by itself prove
+that the Task has stopped.
+
+Parent result validation and stream-runner failures during streaming are
+unproved.
 """
 
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import TYPE_CHECKING, Generic, TypeVar, overload
 
@@ -33,12 +35,15 @@ from dualeai.models.bridge import (
     BridgeTaskStoppedResponse,
 )
 from dualeai.models.llm_result import LLMResult
+from dualeai.models.priority_class import PriorityClass
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.response_format import ResponseFormat
+from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.models.task_stop import TaskStopAccepted
 from dualeai.utils import get_type_name
 
 if TYPE_CHECKING:
+    from dualeai.attachments import PreparedAttachment
     from dualeai.sdk import DualeAISDK
 
 logger = structlog.get_logger(__name__)
@@ -56,13 +61,14 @@ def _exception_from_terminal(terminal: BridgeTaskErrorResponse, task_id: str) ->
     The SDK does NOT re-bucket platform error codes into an artificial
     timeout/auth/connection taxonomy. The canonical wire identifier is
     ``terminal.data.error_code`` (e.g. ``TASK_DEADLINE_EXCEEDED``,
-    ``BILLING_LIMIT_EXCEEDED``, ``AUTHORIZATION_FAILED``,
-    ``RESOURCE_NOT_FOUND``, ``TOOL_VALIDATION_FAILED``,
-    ``LOOP_DETECTED``, ``INTERNAL_ROUTING``) and callers branch on it
-    directly. Cloudflare extension fields (``retryable``,
-    ``retry_after_seconds``, ``owner_action_required``, ``error_category``,
-    ``ai_hints``) live on ``exc.problem_details`` so retry logic reads them
-    without an SDK-side mapping table.
+    ``BILLING_LIMIT_EXCEEDED``, ``LLM_NO_PROGRESS``, ``INTERNAL_ERROR``) and
+    callers branch on it directly. ``error_code`` is a string, and the public
+    errors page ("Errors and reliability", https://duale.ai/en/docs/sdk/errors)
+    lists every code. Additional envelope fields (``retryable``,
+    ``retry_after_seconds``, ``owner_action_required``, ``error_category``) live
+    on ``exc.problem_details`` so retry logic reads them without an SDK-side
+    mapping table. When ``errors`` is present, each item can carry ``ai_hints``
+    at ``exc.problem_details.errors[i].ai_hints``.
 
     Example:
         try:
@@ -79,9 +85,12 @@ def _exception_from_terminal(terminal: BridgeTaskErrorResponse, task_id: str) ->
 
 
 class AgentResponse(Generic[T]):
-    """Response from an agent execution with HTTP bridge streaming support.
+    """Handle one Task's content events and terminal result.
 
-    Generic over T, the expected response type.
+    ``T`` is the optional local result type used by :meth:`model`. Iterating
+    :meth:`stream` exposes content deltas and resets in arrival order, each with
+    a ``generation``; call :meth:`model`
+    afterward to apply terminal error and result-validation semantics.
     """
 
     def __init__(
@@ -91,34 +100,34 @@ class AgentResponse(Generic[T]):
         expected_type: type[T] | None = None,
         *,
         sdk: "DualeAISDK",
-        streaming: bool = False,
+        accepted: asyncio.Event,
         delta_queue: asyncio.Queue[StreamingContentEvent] | None = None,
-        deltas: list[BridgeContentDeltaResponse] | None = None,
+        deltas: list[StreamingContentEvent] | None = None,
     ) -> None:
         """Initialize agent response.
 
         Args:
             task_id: ID of the task being executed.
-            task: The ``asyncio.Task`` running the bridge SSE
-                iteration (returned by
-                :meth:`DualeAISDK._spawn_run_task`). It awaits to a
-                ``BridgeTaskCompletedResponse`` or
-                ``BridgeTaskErrorResponse``.
+            task: The ``asyncio.Task`` running SSE iteration for a Task created
+                by ``DualeAISDK.submit_task`` or ``AgentResponse.next``. It
+                resolves to a completed, error, or stopped terminal event.
             expected_type: Expected result type for ``model()``
                 validation.
             sdk: SDK instance — kept on the response so ``next()`` can
                 start a continuation.
-            streaming: Whether streaming deltas were requested.
+            accepted: Set when the Platform accepts this Task's request, or
+                when this response's runner ends; ``next`` waits on it.
             delta_queue / deltas: Shared streaming buffers populated by
                 the spawn-time callbacks. SDK passes these in so the spawn
                 callback can close over them without needing the response
-                object yet.
+                object yet. ``streaming`` is True exactly when both are given.
         """
         self.task_id: str = task_id
         self.task: asyncio.Task[TerminalEvent] = task
         self.expected_type: type[T] | None = expected_type
         self.sdk: DualeAISDK = sdk
-        self.streaming: bool = streaming
+        self._accepted: asyncio.Event = accepted
+        self.streaming: bool = delta_queue is not None and deltas is not None
         # LLMResult cached after first model() call.
         self._llm_result: LLMResult | None = None
         self._llm_result_loaded: bool = False
@@ -129,11 +138,9 @@ class AgentResponse(Generic[T]):
         self._delta_queue = delta_queue
         self._deltas = deltas
 
-    async def _await_terminal(self, *, isolate_waiter_cancellation: bool = False) -> "TerminalEvent":
-        """Await the terminal event, optionally preserving shared task ownership."""
+    async def _await_terminal(self) -> "TerminalEvent":
+        """Await the terminal event of this response's runner."""
         try:
-            if isolate_waiter_cancellation:
-                return await asyncio.shield(self.task)
             return await self.task
         except asyncio.CancelledError:
             if self.task.cancelled():
@@ -149,15 +156,15 @@ class AgentResponse(Generic[T]):
             )
             raise
         except Exception as task_err:
-            logger.error("Task failed", task_id=self.task_id, error=str(task_err))
+            logger.error("Task stream failed", task_id=self.task_id, error=str(task_err))
             raise
 
     def _unwrap_llm_result(self, result: LLMResult, *, warn_on_empty: bool = False) -> object:
         """Cache the LLMResult and return its inner payload.
 
-        Order: ``validated_data`` (router-validated against the
-        expected schema) → ``completion`` (raw LLM text) → the wrapper
-        itself. Both model and stream extraction funnel through here so
+        Order: ``validated_data`` (when supplied in the terminal envelope) →
+        ``completion`` (raw LLM text) → the wrapper itself. Both model and
+        stream extraction funnel through here so
         the LLMResult cache and the field-precedence rule live in one
         place.
         """
@@ -196,7 +203,8 @@ class AgentResponse(Generic[T]):
         return ValidationError(
             f"Result validation failed for type {self.expected_type.__name__}",
             context={
-                # Never include result CONTENT (PII). Type metadata only.
+                # The complete result is not attached directly. Pydantic's
+                # validation text can still contain rejected input fragments.
                 "expected_type": self.expected_type.__name__,
                 "result_type": get_type_name(result),
                 "validation_error": str(error),
@@ -288,14 +296,27 @@ class AgentResponse(Generic[T]):
             The task result, validated against expected_type if provided.
 
         Raises:
-            DualeAIError: If the router emitted a `task.error` terminal event. The
+            TaskStoppedError: If the stream ended with ``task.stopped``.
+            DualeAIError: If the platform emitted a ``task.error`` terminal event. The
                 raised instance carries the canonical RFC 9457 ProblemDetails on
-                `exc.problem_details` (with `error_code`, `detail`, and Cloudflare
-                extension fields `retryable`, `retry_after_seconds`,
-                `owner_action_required`, `error_category`, `ai_hints`). Callers
-                branch on `exc.problem_details.error_code` directly — there is
+                ``exc.problem_details`` (with ``error_code``, ``detail``, and
+                extension fields ``retryable``, ``retry_after_seconds``,
+                ``owner_action_required``, ``error_category``). When ``errors``
+                is present, each item can carry ``ai_hints`` at
+                ``exc.problem_details.errors[i].ai_hints``. Callers branch on
+                ``exc.problem_details.error_code`` directly — there is
                 no SDK-side re-mapping table.
-            ValidationError: If result doesn't match expected_type schema.
+            DualeAIConnectionError: If Task observation fails after applicable
+                recovery attempts. This does not prove a failed remote Task.
+                The default HTTP transport supplies diagnostics in ``exc.context``;
+                ``exc.problem_details`` can be absent for a local failure.
+            ValidationError: If the result does not match ``expected_type``.
+                Its context, and debug-level validation logs, can contain
+                rejected result fragments; treat both as potentially sensitive.
+            asyncio.CancelledError: If the local Task runner is cancelled.
+
+        Exceptions raised by the underlying stream or transport task propagate
+        unchanged.
         """
         terminal = await self._await_terminal()
 
@@ -307,7 +328,7 @@ class AgentResponse(Generic[T]):
         result = self._extract_result(terminal)
 
         logger.debug(
-            # Never log result CONTENT (PII). Type metadata only.
+            # This log call includes type metadata only.
             "SDK received result - checking type",
             task_id=self.task_id,
             result_type=get_type_name(result),
@@ -351,29 +372,33 @@ class AgentResponse(Generic[T]):
     async def stream(self) -> AsyncGenerator[StreamingContentEvent, None]:
         """Stream real-time content changes from agent execution.
 
-        Yields content deltas as the bridge produces them. A content reset
-        tells consumers to discard previously rendered deltas before applying
-        later replacement output. Backed by ``asyncio.Queue`` (event-driven,
-        no busy-poll).
+        Yields content deltas and resets in arrival order, which can differ
+        from answer order. Keep only the highest ``generation``, which a reset
+        starts, and display its deltas by ``sequence``. Backed by
+        ``asyncio.Queue`` (event-driven, no busy-poll).
 
-        Replay: iterating ``stream()`` after the task is done yields
-        the buffered ``_deltas`` list — useful for re-rendering on UI
-        re-mount.
+        Replay: iterating ``stream()`` after the task is done yields every
+        buffered content event, resets included, in arrival order — useful
+        for re-rendering on UI re-mount.
 
-        With ``streaming=False`` this method just awaits the task and
-        returns without yielding.
+        With ``streaming=False`` this method just awaits the task and returns
+        without yielding. Terminal ``task.error`` and ``task.stopped`` events
+        end iteration; this method does not translate them into
+        ``DualeAIError`` or ``TaskStoppedError``. Call :meth:`model` for the
+        authoritative terminal result, including stream-runner exceptions and
+        cancellation. With ``streaming=True``, a failed or cancelled runner
+        ends iteration without propagating its exception; with
+        ``streaming=False``, awaiting that runner propagates it.
         """
-        if not self.streaming:
+        delta_queue, deltas = self._delta_queue, self._deltas
+        if delta_queue is None or deltas is None:
             await self.task
             return
 
-        if self._delta_queue is None or self._deltas is None:
-            raise RuntimeError("Streaming response is missing its content buffers")
-
         # Replay path after the terminal task has completed.
         if self.task.done():
-            for delta in self._deltas:
-                yield delta
+            for event in deltas:
+                yield event
             return
 
         # Live path. Two phases per iteration:
@@ -387,13 +412,13 @@ class AgentResponse(Generic[T]):
         #    still running, race the next ``queue.get`` against
         #    ``self.task`` completion.
         while True:
-            while not self._delta_queue.empty():
-                yield self._delta_queue.get_nowait()
+            while not delta_queue.empty():
+                yield delta_queue.get_nowait()
 
             if self.task.done():
                 return
 
-            get_task: asyncio.Task[StreamingContentEvent] = asyncio.create_task(self._delta_queue.get())
+            get_task: asyncio.Task[StreamingContentEvent] = asyncio.create_task(delta_queue.get())
             done, _pending = await asyncio.wait(
                 {get_task, self.task},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -407,95 +432,179 @@ class AgentResponse(Generic[T]):
                     await get_task
 
     async def cache_hit(self) -> bool | None:
-        """Check if the response was served from cache."""
+        """Return the terminal LLM result's cache flag when available.
+
+        ``None`` means the completed result was not an ``LLMResult`` or no
+        completed result was available. Terminal error/stop events and ordinary
+        stream-runner exceptions also produce ``None`` here; call :meth:`model`
+        when that distinction matters. Local Task cancellation still propagates.
+        """
         await self._ensure_llm_result_loaded()
         return self._llm_result.cache_hit if self._llm_result else None
 
     async def llm_metrics(self) -> LLMResult | None:
-        """Get the full LLM metrics object."""
+        """Return the terminal ``LLMResult`` envelope when available.
+
+        ``LLMResult`` exposes completion, validated data, cache status, and
+        Tool calls, but no token, cost, or latency measurements. Terminal
+        error/stop events and ordinary stream-runner exceptions return ``None``;
+        local Task cancellation propagates.
+        """
         await self._ensure_llm_result_loaded()
         return self._llm_result
 
     async def next(
         self,
-        message: str,
+        instruction: str,
         *,
+        priority: PriorityClass = PriorityClass.standard,
         res: type[T] | None = None,
         deadline: datetime | None = None,
         response_format: ResponseFormat | None = None,
+        streaming: bool | None = None,
+        routing: RoutingPolicy | None = None,
+        attachments: "list[PreparedAttachment] | None" = None,
+        task_id: str | None = None,
     ) -> "AgentResponse[T]":
-        """Continue this task with the next message, maintaining conversation context.
+        """Start a continuation Task that carries this Task's task history forward.
 
-        Waits for this response to finish successfully before the SDK creates
-        and submits a distinct child task. A parent error or cancellation is
-        propagated without submitting a child.
+        Sends it as soon as the Platform has accepted this Task's request,
+        without waiting for this Task's outcome: the Platform continues the
+        task history of this Task's last finished step, whether this Task is
+        still running, completed, failed or stopped. A continuation that
+        arrives before this Task finishes its first step waits for that step
+        until its own deadline, then fails with ``PARENT_TASK_UNAVAILABLE``.
+        The new Task has its own identifier (``task_id``, or a new UUID4),
+        deadline, priority, result and stop. Priority defaults to standard for
+        each new Task. A setting left as None takes this Task's
+        value; attachments add documents. The new Task inherits only the
+        task history. The description of
+        ``dualeai.BridgeTaskContinueRequest.parent_task_id`` states which
+        parent the Platform accepts and how long the inherited context stays
+        available. The Agent Identity can separately search and read the
+        requests and final answers of its earlier Tasks for a limited period.
+        Tool Calls of the last finished step that have no recorded reply
+        appear to the model as 'status unknown'.
+        The inherited context does not carry this Task's final answer text;
+        the Agent Identity can recall that answer from its recorded history.
 
-        The platform preserves the canonical conversation lineage, routing
-        context, and original attachment references. Each model call receives
-        the history allowed by its context budget and checkpoints. Every call
-        creates an independent, non-streaming child of this response; it does
-        not mutate this parent or another sibling continuation.
+        Requires ``agent:continue_task`` and ``agent:read_task`` on this Task,
+        plus ``agent:read_task`` on the new Task. The new Task runs under this
+        Task's Agent Identity.
+
+        This method never raises this Task's outcome; call ``model()`` for it.
+        Cancelling this call before it sends the continuation sends nothing and
+        leaves this Task and its other pending continuations running.
+
+        Nothing in this SDK enforces the Platform behavior described here.
 
         Args:
-            message: New user turn for the child task.
-            res: Optional result type for local validation. When
-                ``response_format`` is absent, the SDK also derives its JSON
-                Schema for the request.
-            deadline: Timezone-aware child deadline. Omission uses the SDK task
-                timeout; the platform bounds it by the parent route deadline.
+            instruction: Instruction for the continuation Task: non-empty, at
+                most 100,000 characters, without NUL characters. It follows the
+                inherited task history.
+            priority: This continuation's scheduling class. Omission selects
+                standard independently of this Task's class. Fast favors lower
+                waiting time for the same work and uses the Fast Task price.
+            res: Optional continuation result type for local validation.
+                Omission does not inherit the parent's type. When
+                ``response_format`` is absent, the SDK also derives the type's
+                JSON Schema for the request. When neither ``res`` nor
+                ``response_format`` is given, the Platform keeps this Task's
+                response format.
+            deadline: Timezone-aware continuation deadline. Omission uses the
+                SDK's default Task timeout, not this Task's deadline.
             response_format: Explicit wire response format. It takes precedence
-                over schema derivation from ``res``.
+                over schema derivation from ``res``. None keeps this Task's
+                value when ``res`` is also None.
+            streaming: Request content delta/reset events for the continuation's
+                ``stream()``. None keeps this Task's value, on the Platform and
+                for the returned response's local buffering.
+            routing: Routing Policy of the continuation Task. None keeps this
+                Task's value.
+            attachments: Prepared attachments already uploaded under
+                ``task_id``. None adds no document.
+            task_id: Task identifier of the continuation Task, never this
+                Task's; upload its attachments under it with
+                ``upload_attachments(task_id, attachments)``; None generates
+                a UUID4.
 
         Returns:
-            An ``AgentResponse`` whose ``task_id`` is the new UUID4 child ID.
+            An ``AgentResponse`` whose ``task_id`` is the ``task_id`` argument,
+            or a new UUID4.
 
         Raises:
-            DualeAIError: If the parent finished with a task error.
             ValueError: If ``deadline`` is timezone-naive.
+            pydantic.ValidationError: If ``instruction`` is empty, longer than
+                100,000 characters, or contains a NUL character, or if
+                ``task_id`` is not a Task identifier that
+                ``dualeai.BridgeTaskContinueRequest.task_id`` accepts.
+            asyncio.CancelledError: If this call is cancelled before it sends
+                the continuation; this Task keeps running.
 
-        Cancelling this waiter does not cancel the shared parent task or other
-        callers waiting to create sibling continuations.
+        A refused continuation (``AUTHORIZATION_FAILED``) raises
+        ``DualeAIAuthError`` when the returned response's ``model()`` is
+        awaited. A continuation of a parent that the Platform never admitted,
+        or that does not exist, waits until its own deadline; ``model()`` then
+        raises ``DualeAIError`` with ``PARENT_TASK_UNAVAILABLE``. A known parent
+        Task that expired and whose record the Platform still holds ends the
+        continuation with ``PARENT_TASK_NOT_FOUND``. A ``task_id`` already
+        used by this Agent Identity names that existing Task: the returned
+        response streams it, and no second Task starts. ``model()`` raises the
+        continuation's error code with its problem details. Nothing in this
+        SDK enforces these Platform answers.
 
         Example:
-            response = await ask(action="What's 2+2?", sdk=sdk)
-            result = await response.model()  # "4"
-
-            continued = await response.next(message="and times two?")
-            final = await continued.model()  # "8"
+            response = await ask(instruction="What's 2+2?", sdk=sdk)
+            branch = await response.next(instruction="and times two?")
+            result = await response.model()
+            final = await branch.model()
         """
-        terminal = await self._await_terminal(isolate_waiter_cancellation=True)
-        if isinstance(terminal, BridgeTaskStoppedResponse):
-            # A stop is not a task failure, so it carries no problem details.
-            raise TaskStoppedError(terminal.reason, task_id=self.task_id)
-        if isinstance(terminal, BridgeTaskErrorResponse):
-            raise _exception_from_terminal(terminal, self.task_id)
+        await self._accepted.wait()
         return await self.sdk._continue_task(  # noqa: SLF001 - paired SDK response implementation
             parent_task_id=self.task_id,
-            message=message,
+            instruction=instruction,
+            priority=priority,
             response_type=res,
             deadline=deadline,
             response_format=response_format,
+            streaming=streaming,
+            local_streaming=streaming if streaming is not None else self.streaming,
+            routing_policy=routing,
+            attachments=attachments,
+            task_id=task_id,
         )
 
     async def stop(self, reason: str) -> TaskStopAccepted:
-        """Stop this task and every task started under it.
+        """Submit a stop request for this Task.
 
-        Unlike :meth:`next`, this does not wait for the task to finish — waiting
-        would defeat the purpose. It returns as soon as the platform accepts the
-        request; the task then ends with a stopped result, so awaiting
-        :meth:`model` raises :class:`TaskStoppedError` carrying this reason.
+        This does not wait for the Task to finish — waiting would defeat the
+        purpose. The returned receipt does not prove that the Task stopped. If
+        ``task.stopped`` later arrives, :meth:`model` raises
+        :class:`TaskStoppedError` with the event's reason.
 
-        A stopped task is still billed for what it already consumed, and work
-        already sent to a model provider or a tool is not undone.
+        Requires ``agent:stop_task`` on the Task; an Agent Identity holds it on
+        its own Tasks by default. Without the permission the call raises
+        ``DualeAIAuthError`` (``AUTHORIZATION_FAILED``) at once. A permitted
+        stop is accepted even when the Task already ended or the Platform does
+        not know it; a stop of a Task that already ended changes nothing.
+
+        Nothing in this SDK enforces that the Platform accepts a permitted
+        stop of an ended or unknown Task.
 
         Args:
             reason: Why the task is being stopped. Required, non-empty.
 
         Returns:
-            ``TaskStopAccepted``, naming the task and the moment of acceptance.
+            ``TaskStopAccepted`` request receipt.
+
+        Raises:
+            ValueError: If ``reason`` is empty or whitespace.
+            DualeAIAuthError: If the Platform refuses the stop (403).
+            DualeAIError: If the stop request fails before acceptance for any
+                other reason.
 
         Example:
-            response = await ask(action="Analyse this contract", sdk=sdk)
+            response = await ask(instruction="Analyse this contract", sdk=sdk)
             await response.stop(reason="Wrong document supplied")
 
             try:
@@ -504,7 +613,3 @@ class AgentResponse(Generic[T]):
                 print(stopped.reason)
         """
         return await self.sdk.stop_task(self.task_id, reason)
-
-    def __or__(self, message: str) -> Coroutine[object, object, "AgentResponse[T]"]:
-        """Pipe operator for continuing conversations."""
-        return self.next(message)

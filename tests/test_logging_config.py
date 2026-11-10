@@ -1,54 +1,62 @@
-"""Logging render tests.
-
-Regression guard for the double-traceback defect: structlog's stdlib
-``BoundLogger`` leaves ``exc_info`` on the emitted ``LogRecord``, so the stdlib
-``Formatter`` re-renders the traceback on top of the structlog renderer's own —
-one ``logger.exception`` printed the traceback twice. ``ProcessorFormatter``
-moves rendering onto the handler and nulls ``record.exc_info``, so it renders
-once.
-"""
+"""Console logging renders each traceback once without exposing frame locals."""
 
 import logging
+from collections.abc import Iterator
+from uuid import uuid4
 
 import pytest
 import structlog
 
 from dualeai.logging_config import configure_logging
 
-# Plain header line emitted once per rendered traceback by the stdlib/plain
-# formatter. Rich's panel header carries ANSI + no trailing colon, so this exact
-# literal isolates each real traceback render regardless of whether rich is
-# installed (it is, via the dev extra) — the count equals the number of renders.
 _PLAIN_TRACEBACK_HEADER = "Traceback (most recent call last):"
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging() -> Iterator[None]:
+    root = logging.getLogger()
+    handlers = root.handlers[:]
+    root_level = root.level
+    library_levels = {name: logging.getLogger(name).level for name in ("aiohttp", "aiojobs", "asyncio")}
+    structlog_config = structlog.get_config()
+    try:
+        yield
+    finally:
+        root.handlers = handlers
+        root.setLevel(root_level)
+        for name, level in library_levels.items():
+            logging.getLogger(name).setLevel(level)
+        structlog.configure(**structlog_config)
 
 
 @pytest.mark.unit
 class TestLoggingExceptionRender:
-    def test_tool_error_traceback_renders_once(
-        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("logger_kind", ["structlog", "stdlib"])
+    @pytest.mark.parametrize("level", [logging.ERROR, logging.DEBUG])
+    def test_tracebacks_exclude_credentials_from_frame_locals(
+        self, capsys: pytest.CaptureFixture[str], logger_kind: str, level: int
     ) -> None:
-        """One ``logger.exception`` renders the traceback exactly once.
+        """Console output keeps exception causes and frames without their secrets."""
+        configure_logging(level=level)
+        logger_name = f"test_logging_credentials_{logger_kind}_{level}"
+        log = structlog.get_logger(logger_name) if logger_kind == "structlog" else logging.getLogger(logger_name)
+        credential = uuid4().hex
 
-        Force plain exception formatting so the count is deterministic (rich's
-        panel would otherwise leak the payload into a locals block). The bug is
-        the *second* render, independent of formatter style.
-        """
-        real_console = structlog.dev.ConsoleRenderer
+        try:
+            _raise_with_credential_in_frame(credential)
+        except RuntimeError:
+            log.exception("connection failed")
 
-        def _plain_console(*, colors: bool = True) -> structlog.dev.ConsoleRenderer:
-            # configure_logging constructs ConsoleRenderer(colors=...); force plain
-            # tracebacks so the render count is deterministic (rich would spread the
-            # payload across a locals panel).
-            return real_console(colors=colors, exception_formatter=structlog.dev.plain_traceback)
+        out = capsys.readouterr().out
+        assert credential not in out
+        assert "ValueError: synthetic issuer refusal" in out
+        assert "RuntimeError: synthetic connection failure" in out
+        assert "_raise_with_credential_in_frame" in out
+        assert "The above exception was the direct cause" in out
 
-        # This seam works because configure_logging references
-        # structlog.dev.ConsoleRenderer by attribute at call time; a
-        # ``from structlog.dev import ConsoleRenderer`` in production would defeat it.
-        monkeypatch.setattr(structlog.dev, "ConsoleRenderer", _plain_console)
-
+    def test_tool_error_traceback_renders_once(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """One ``logger.exception`` renders the traceback exactly once."""
         configure_logging(level=logging.ERROR)
-        # Fresh logger name: cache_logger_on_first_use bakes the resolved logger,
-        # so a name not used by earlier tests picks up this reconfigure.
         log = structlog.get_logger("test_logging_render")
 
         try:
@@ -61,3 +69,10 @@ class TestLoggingExceptionRender:
         assert out.count(_PLAIN_TRACEBACK_HEADER) == 1, (
             f"expected exactly one traceback render, got {out.count(_PLAIN_TRACEBACK_HEADER)}"
         )
+
+
+def _raise_with_credential_in_frame(credential: str) -> None:
+    try:
+        raise ValueError("synthetic issuer refusal")
+    except ValueError as cause:
+        raise RuntimeError("synthetic connection failure") from cause

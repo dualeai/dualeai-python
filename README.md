@@ -1,38 +1,32 @@
 # Duale AI Python SDK
 
-Submit bounded AI agent work to the Duale AI managed runtime and receive typed results in Python. The SDK is not a
-direct model-provider client.
+Use `dualeai` to submit Tasks, validate results, and expose Python functions as Tools.
+Duale AI runs the Tasks; your async Python application runs its registered Tools.
 
 **Status:** Public preview. Interfaces can change before a stable release.
 
 ## Install
 
-The distribution is named `dualeai`; import it as `dualeai`. Python 3.10 or newer is required.
+Use CPython 3.10 through 3.14 on Linux or macOS:
 
 ```bash
 python -m pip install dualeai
 ```
 
-## Before the first request
+## Run the first live Task
 
-Before you start, you need a Tenant, an API token, and an eligible model pool. The token identifies the Agent Identity
-for a Task. Set that identity's public identifier in `DUALEAI_AGENT_ID` only when you host Tools.
-
-Set `DUALEAI_TENANT_ID` for Library work. Every Library route takes the Tenant as a path segment, and task-scoped
-attachments create a Library, so uploads need it too. `upload_attachments()` does not read `DUALEAI_AGENT_ID`: it takes
-an `agent_id` keyword, and falls back to the sole agent registered on the SDK when exactly one is registered. Pass
-`agent_id=sdk.agent_id` to route an upload through the configured identity.
-
-Set the token shown during provisioning:
+Ask your administrator for an API token and access to a configured model; the SDK creates neither.
+Use synthetic, non-sensitive input: live requests can consume metered or limited service resources.
+Set your provisioned token in the current shell:
 
 ```bash
-export DUALEAI_TOKEN=dualeai_your_token_here
+export DUALEAI_TOKEN=dualeai_your_provisioned_token_here
 ```
 
-Requests use `https://api.duale.ai` by default. Set `DUALEAI_ENDPOINT` only when your access instructions name another
-environment.
+<!-- Provisioning, model eligibility, and service usage are Platform
+requirements, unproved in this SDK. -->
 
-## Submit a typed Task request
+Save this as `quickstart.py`:
 
 ```python
 import asyncio
@@ -50,7 +44,7 @@ class SupportDecision(BaseModel):
 async def main() -> None:
     async with create_sdk() as sdk:
         response = await ask(
-            action="Review this support case and return the next safe action.",
+            instruction="Review this synthetic support case and return the next safe action.",
             res=SupportDecision,
             sdk=sdk,
         )
@@ -62,69 +56,63 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Save the example as `quickstart.py`, then run it:
+Run `python quickstart.py`. A successful run prints the Task ID, then the validated `next_action`; values depend on the model.
+`ask()` returns a response handle. `await response.model()` waits for the final Task result and validates it against
+`SupportDecision`.
 
-```bash
-python quickstart.py
-```
+Before retrying a failure, use [Errors and reliability](https://duale.ai/en/docs/sdk/errors) to identify its cause.
 
-A successful run prints a Task identifier and the validated next action.
+<!-- Nothing executes this live quickstart or enforces its printed shape. -->
 
-`ask()` returns an `AgentResponse` handle before the Platform has necessarily accepted the submission.
-`await response.model()` waits for the observable outcome and validates a completed Task Result against
-`SupportDecision`. Persist `response.task_id` before waiting so you can reconcile a transport or replay failure.
+## Configuration
 
-## Before live use
+`DUALEAI_TOKEN` is required for live requests. Set the other values only when your workflow needs them:
 
-Three boundaries matter before live use:
+| Setting | When to use it |
+| --- | --- |
+| `DUALEAI_ENDPOINT` | A different API environment; the default is `https://api.beta.duale.ai` |
+| `DUALEAI_AGENT_ID` | Hosting Tools or uploading Task attachments |
+| `DUALEAI_TENANT_ID` | Managing Libraries or uploading Task attachments |
+| `DUALEAI_OBSERVABILITY__TOKEN` | Exporting telemetry, with a separate telemetry token |
 
-- Streaming output can be replaced. Clear accumulated content on `BridgeContentResetResponse` and take the final result
-  from `response.model()`.
-- Customer Tool handling is not exactly once. For a state-changing Customer Tool, authorize each action and reconcile
-  uncertain External Effects against a durable record.
-- Uncaught Tool exception text can reach a model provider. Do not put credentials, personal data, or other secrets in
-  exception messages.
+Attachment uploads also accept `agent_id=` in place of `DUALEAI_AGENT_ID`.
+`dualeai[telemetry]` adds automatic instrumentation; configuration is still required to enable it.
+See the [configuration example](https://github.com/dualeai/dualeai-python/blob/main/.env.example) for all settings.
 
-## Next steps
+## Examples and next steps
 
-- [Agent harness](https://duale.ai/en/docs/agent-harness) defines Agent, Task, Executor, Tool, Context, and the other
-  runtime terms.
-- [SDK concepts](https://duale.ai/en/docs/sdk/concepts) explains Task outcomes, routing, streaming, and continuation.
-- [Authoring Tools](https://duale.ai/en/docs/sdk/tools) covers Tool publication, delivery, retries, identifiers, and
-  model-facing errors.
-- [Attachments](https://duale.ai/en/docs/sdk/attachments) and [Library
-  management](https://duale.ai/en/docs/sdk/manage-libraries) cover documents.
-- [Errors and reliability](https://duale.ai/en/docs/sdk/errors) defines typed failures and recovery.
-- [API reference](https://duale.ai/en/docs/sdk/reference) lists the supported application-facing interfaces.
+The [examples guide](https://github.com/dualeai/dualeai-python/tree/main/examples) lists setup and permissions.
+Arrange Dashboard cleanup before running document examples: they leave stored Libraries.
 
-## Test without the Platform
+For application tests without a live connection, use the
+[MockSDK reference](https://duale.ai/en/docs/sdk/reference#mocksdk).
 
-`MockSDK` provides keyed responses and an in-memory Library client for local tests:
+## Integrate into an application
 
-```python
-import asyncio
+- **Results:** streamed text is a live view of the answer and can arrive out of order. Order it by `generation` and
+  `sequence` as the [examples guide](https://github.com/dualeai/dualeai-python/blob/main/examples/README.md#order-and-replace-streamed-content)
+  shows, and use `await response.model()` for the validated result.
+- **Stopping:** cancelling `response.task` stops local observation. Use `await response.stop(reason)` to request a
+  Platform Stop. The response confirms acceptance of the Stop request, not that the Task has stopped.
+  A Stop without the permission is refused at once with `DualeAIAuthError`. A permitted Stop is accepted even when
+  the Task has already ended or the Platform does not know it.
+  Keep `response.task_id` for diagnosis; the SDK cannot reattach to a Task using only its saved ID.
+- **Tools:** calls execute on Task streams opened by the same SDK instance that registered the functions. Protect
+  side effects with durable duplicate detection and redact exception text with `error_transform`. The
+  [inventory example](https://github.com/dualeai/dualeai-python/blob/main/examples/inventory_agent.py) demonstrates
+  redaction and explains where your application must record side effects durably.
+- **Logging and telemetry:** SDK initialization replaces the process's root logging handlers; cleanup does not restore
+  them. Optional telemetry instrumentation also acts across the process. Coordinate these settings with your host
+  application.
 
-from dualeai.testing import MockSDK
+<!-- Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings; nothing enforces them. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; nothing in this SDK enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; nothing in this SDK enforces it. -->
 
+## Project links
 
-async def main() -> None:
-    mock = MockSDK()
-    mock.set_mock_response("Summarize invoice", {"result": "data"})
-    result = await mock.mock_ask("Summarize invoice")
-    print(result)
-
-
-asyncio.run(main())
-```
-
-`mock_ask()` is a keyed lookup. It does not simulate the real Task transport, streaming, Tool dispatch, or terminal
-errors.
-
-## Contributing and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow. Report suspected vulnerabilities through the
-private routes in [SECURITY.md](SECURITY.md), not through a public issue.
-
-## License
-
-Apache-2.0.
+- [SDK documentation](https://duale.ai/en/docs/sdk)
+- [Release notes](https://github.com/dualeai/dualeai-python/releases)
+- [Issues](https://github.com/dualeai/dualeai-python/issues)
+- [Contributing](https://github.com/dualeai/dualeai-python/blob/main/CONTRIBUTING.md)
+- [Security policy](https://github.com/dualeai/dualeai-python/security/policy) — report suspected vulnerabilities through
+  the private routes there, not through a public issue
+- [Apache-2.0 license](https://github.com/dualeai/dualeai-python/blob/main/LICENSE)

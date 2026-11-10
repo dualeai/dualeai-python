@@ -1,30 +1,21 @@
-"""Priority 16 tests for health check feature.
+"""Tests for the SDK's local health snapshot.
 
-Tests get_health_status() with real SDK logic using minimal_mock_sdk.
-
-CRITICAL RULES:
-1. Use minimal_mock_sdk for ALL tests - NATS mocked at network boundary
-2. Test REAL SDK code behavior
-3. All tests use @pytest.mark.unit and TestUnit* class naming
+The fixture uses the real SDK with its HTTP transport boundary replaced.
 """
 
-import asyncio
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 
 from dualeai import DualeAISDK
 from dualeai.cache import MockCacheBackend
-from dualeai.messages import AgentConfig
-from dualeai.models.bridge import BridgeTaskCompletedResponse
-from dualeai.models.llm_result import LLMResult
-from dualeai.models.skill_enum import SkillEnum
-from dualeai.response import TerminalEvent
+from dualeai.orchestrator import ask
 from dualeai.sdk import ComponentHealth
 from tests.conftest import TestTenantIDs
+from tests.mocks.mock_http import require_mock_http_transport
 
 
 def _component_bool(raw_components: dict[str, object], name: str) -> bool:
@@ -49,15 +40,6 @@ def _health_components(health: dict[str, object]) -> ComponentHealth:
     }
 
 
-async def _sleeping_terminal_event() -> TerminalEvent:
-    await asyncio.sleep(60)
-    return BridgeTaskCompletedResponse(
-        type="task.completed",
-        timestamp=datetime.now(timezone.utc),
-        result=LLMResult(completion="done", cache_hit=False),
-    )
-
-
 @pytest.mark.unit
 class TestUnitHealthFeature:
     """Test get_health_status() with REAL SDK logic."""
@@ -75,7 +57,7 @@ class TestUnitHealthFeature:
         assert "components" in health
         assert "uptime_seconds" in health
         assert "inflight_tasks" in health
-        assert "registered_agents" in health
+        assert "registered_tools" in health
 
         # minimal_mock_sdk has no failing component — status is deterministic.
         assert health["status"] == "healthy"
@@ -86,7 +68,7 @@ class TestUnitHealthFeature:
         # Verify numeric fields
         assert isinstance(health["uptime_seconds"], int)
         assert isinstance(health["inflight_tasks"], int)
-        assert isinstance(health["registered_agents"], int)
+        assert isinstance(health["registered_tools"], int)
 
     async def test_health_includes_component_status(self, minimal_mock_sdk: DualeAISDK):
         """Test health check includes status for each component."""
@@ -119,7 +101,7 @@ class TestUnitHealthFeature:
         components_before = _health_components(health_before)
         assert components_before["sdk"] is True
 
-        # Events should be healthy (minimal_mock_sdk has mocked NATS connection)
+        # Events are healthy because the injected HTTP transport is connected.
         assert components_before["events"] is True
 
         # Initialize scheduler
@@ -194,64 +176,34 @@ class TestUnitHealthFeature:
         # Uptime should have increased
         assert uptime2 >= uptime1
 
-    async def test_health_inflight_tasks_count(self, minimal_mock_sdk: DualeAISDK):
-        """Test inflight_tasks reflects actual in-flight task count.
-
-        After the Future→asyncio.Task migration, in-flight tasks are
-        spawned by submit_task (real bridge iteration). This test
-        directly populates the inflight set with sentinel tasks.
-        """
-        import asyncio
-
+    async def test_health_counts_each_submitted_task_until_its_terminal(self, minimal_mock_sdk: DualeAISDK):
+        """``inflight_tasks`` counts a submitted Task from submission until its terminal event, then drops it."""
         sdk = minimal_mock_sdk
-
-        # No tasks yet
+        transport = require_mock_http_transport(sdk)
         assert sdk.get_health_status()["inflight_tasks"] == 0
 
-        # Spawn sentinel tasks and register
-        t1 = asyncio.create_task(_sleeping_terminal_event())
-        t2 = asyncio.create_task(_sleeping_terminal_event())
-        sdk._inflight_tasks["task-1"] = t1
-        sdk._inflight_tasks["task-2"] = t2
+        first = await ask(instruction="First", task_id="task-health-0001", sdk=sdk)
+        second = await ask(instruction="Second", task_id="task-health-0002", sdk=sdk)
+        assert sdk.get_health_status()["inflight_tasks"] == 2
 
-        try:
-            assert sdk.get_health_status()["inflight_tasks"] == 2
+        transport.inject_event(first.task_id, transport.create_task_completed_event())
+        await first.model()
+        assert sdk.get_health_status()["inflight_tasks"] == 1
 
-            t1.cancel()
-            try:
-                await t1
-            except asyncio.CancelledError:
-                pass
-            sdk._inflight_tasks.pop("task-1", None)
+        transport.inject_event(second.task_id, transport.create_task_completed_event())
+        await second.model()
+        assert sdk.get_health_status()["inflight_tasks"] == 0
 
-            assert sdk.get_health_status()["inflight_tasks"] == 1
-        finally:
-            t2.cancel()
-            try:
-                await t2
-            except asyncio.CancelledError:
-                pass
-            sdk._inflight_tasks.clear()
-
-    async def test_health_registered_agents_count(self, minimal_mock_sdk: DualeAISDK):
-        """Test registered_agents reflects actual registered agent count."""
+    def test_health_registered_tools_count(self, minimal_mock_sdk: DualeAISDK) -> None:
+        """The local health snapshot counts Tools registered through the SDK."""
         sdk = minimal_mock_sdk
+        assert sdk.get_health_status()["registered_tools"] == 0
 
-        # Get initial health (no registered agents)
-        health_initial = sdk.get_health_status()
-        assert health_initial["registered_agents"] == 0
+        @sdk.tool(description="Echo a value.", timeout=timedelta(seconds=1))
+        async def echo(value: str) -> str:
+            return value
 
-        # Register some agents
-        async def dummy_func():
-            return SkillEnum.general
-
-        agent_config = AgentConfig(name="test-agent", capabilities=[SkillEnum.general])
-        sdk.register_agent("agent-1", dummy_func, agent_config)
-        sdk.register_agent("agent-2", dummy_func, agent_config)
-
-        # Get health with registered agents
-        health_with_agents = sdk.get_health_status()
-        assert health_with_agents["registered_agents"] == 2
+        assert sdk.get_health_status()["registered_tools"] == 1
 
     async def test_health_scheduler_closed_detection(self, minimal_mock_sdk: DualeAISDK):
         """Test health detects scheduler state."""
@@ -276,7 +228,7 @@ class TestUnitHealthFeature:
         """Test health detects when events client is connected via mock."""
         sdk = minimal_mock_sdk
 
-        # minimal_mock_sdk has events connected via MockNATSClient
+        # minimal_mock_sdk has a connected client backed by MockHTTPTransport.
         health = sdk.get_health_status()
 
         # Events should be healthy (connected via mock)
@@ -322,13 +274,10 @@ class TestUnitHealthFeature:
             sdk._update_health_metrics()  # no args → auto path, exactly as __init__ does
 
         recorded = {call.kwargs["component"]: (call.args[1], call.kwargs["value"]) for call in spy.call_args_list}
-        # Absent optional components record healthy(+1); pre-fix wrongly
-        # recorded unhealthy(-1) here while the status reader said healthy.
+        # Absent optional components record healthy(+1), the same state the status reader reports.
         assert recorded["scheduler"] == ("healthy", 1)
         assert recorded["cache"] == ("healthy", 1)
         assert recorded["sdk"] == ("healthy", 1)
 
-    # Component-metric recording is pinned exactly (all four components,
-    # call_count == 4) in test_feature_observability.py::
-    # test_get_health_status_records_component_metrics — the weaker duplicate
-    # that lived here was deleted.
+    # test_feature_observability.py::test_get_health_status_records_component_metrics
+    # pins one component-metric recording per component.

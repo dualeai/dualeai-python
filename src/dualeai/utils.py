@@ -1,23 +1,13 @@
-"""Utility functions and classes for the Duale AI SDK."""
+"""Utility functions for the Duale AI SDK."""
 
 import hashlib
 
 from dualeai.constants import DisplayLimits
 
 
-def tenant_id_from_token(token: str) -> str:
-    """Derive the logical tenant id from an API token (RFC-051).
-
-    One definition so the OpenTelemetry ``tenant.id`` attribute and the cache
-    backend namespace stay byte-identical — deriving them separately risks
-    telemetry silently drifting from the cache isolation boundary.
-    """
+def token_fingerprint(token: str) -> str:
+    """Return the SHA-256 token fingerprint used by cache and telemetry."""
     return hashlib.sha256(token.encode()).hexdigest()
-
-
-def get_exception_type_name(exception: BaseException) -> str:
-    """Get exception type name for logging."""
-    return type(exception).__name__
 
 
 def get_type_name(obj: object) -> str:

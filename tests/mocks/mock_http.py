@@ -10,14 +10,11 @@ Key features:
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Annotated, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 from uuid import UUID
 
-from pydantic import Field
-
-from dualeai._wire import dump_wire_model
 from dualeai.events.http_transport import HTTPTransportError
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
 from dualeai.models.bridge import (
@@ -29,9 +26,7 @@ from dualeai.models.bridge import (
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
     BridgeTaskErrorResponse,
-    BridgeToolResultError,
     BridgeToolResultsRequest,
-    BridgeToolResultSuccess,
     BridgeToolUseResponse,
 )
 from dualeai.models.json_value import JsonValue
@@ -66,22 +61,13 @@ _MOCK_TENANT_ID = "tenant-default-001"
 if TYPE_CHECKING:
     from dualeai.sdk import DualeAISDK
 
-# Union type for tool results
-ToolResult = Annotated[
-    BridgeToolResultSuccess | BridgeToolResultError,
-    Field(discriminator="type"),
-]
-
 
 class RequestRecord(TypedDict, total=False):
-    """Recorded HTTP request made through the mock transport."""
+    """Typed call made through the SDK's transport interface."""
 
-    method: str
-    path: str
+    operation: str
     task_id: str
-    body: Mapping[str, object]
     request: object
-    query: Mapping[str, object]
     last_event_id: str | None
 
 
@@ -105,7 +91,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
     Test helpers:
     - inject_event(): Add event to task queue
     - inject_events(): Add multiple events
-    - get_requests(): All HTTP requests made
+    - get_requests(): All calls made at the transport interface
     - stop_event: Set to make all streams return immediately
     """
 
@@ -118,6 +104,8 @@ class MockHTTPTransport(HTTPTransportProtocol):
         self._tool_result_event_queues: dict[str, asyncio.Queue[BridgeSSEEvent]] = {}
         self._event_counter = 0
         self._next_task_error: HTTPTransportError | None = None
+        self._next_acceptance_hold: asyncio.Event | None = None
+        self._next_stop_error: HTTPTransportError | None = None
         self._next_heartbeat_error: Exception | None = None
         self._next_tool_results_error: Exception | None = None
         now = datetime.now(timezone.utc)
@@ -167,8 +155,9 @@ class MockHTTPTransport(HTTPTransportProtocol):
 
     async def run_task(
         self,
-        task_id: str,
         request: BridgeTaskRequest,
+        *,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         """Record one typed task request and stream events to terminal.
 
@@ -177,17 +166,19 @@ class MockHTTPTransport(HTTPTransportProtocol):
         specific outcome should call ``inject_events()`` before
         invoking the SDK; tests that drive the future manually can
         leave the queue empty — the generator then suspends until
-        ``signal_stop`` fires.
+        ``signal_stop`` fires. A request that ``fail_next_task`` refuses is
+        never accepted; any other request waits for a hold from
+        ``hold_next_acceptance``, then calls ``accepted_callback`` before it
+        streams.
 
         Yields:
             BridgeSSEEvent objects from the injected queue.
         """
+        task_id = request.task_id
         self._requests.append(
             {
-                "method": "POST",
-                "path": f"/v1/tasks/{task_id}",
+                "operation": "run_task",
                 "task_id": task_id,
-                "body": dump_wire_model(request),
                 "request": request,
             }
         )
@@ -197,6 +188,14 @@ class MockHTTPTransport(HTTPTransportProtocol):
             self._next_task_error = None
             raise error
 
+        if self._next_acceptance_hold is not None:
+            hold = self._next_acceptance_hold
+            self._next_acceptance_hold = None
+            await hold.wait()
+
+        if accepted_callback is not None:
+            accepted_callback()
+
         if task_id not in self._event_queues:
             self._event_queues[task_id] = asyncio.Queue()
 
@@ -204,32 +203,32 @@ class MockHTTPTransport(HTTPTransportProtocol):
             yield event
 
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
-        """Record one stop request and accept it."""
+        """Record one stop request, then raise a ``fail_next_stop`` error once or accept it."""
         self._requests.append(
             {
-                "method": "POST",
-                "path": f"/v1/tasks/{task_id}/stop",
+                "operation": "stop_task",
                 "task_id": task_id,
-                "body": dump_wire_model(request),
                 "request": request,
             }
         )
+        if self._next_stop_error is not None:
+            error = self._next_stop_error
+            self._next_stop_error = None
+            raise error
         return TaskStopAccepted(task_id=task_id, accepted_at=datetime.now(timezone.utc))
 
     async def submit_tool_results(
         self,
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         """Mock tool-results continuation stream."""
+        task_id = request.task_id
         self._requests.append(
             {
-                "method": "POST",
-                "path": f"/v1/tasks/{task_id}",
+                "operation": "submit_tool_results",
                 "task_id": task_id,
-                "body": dump_wire_model(request),
                 "request": request,
                 "last_event_id": last_event_id,
             }
@@ -248,9 +247,8 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock agent manifest registration."""
         self._requests.append(
             {
-                "method": "POST",
-                "path": "/v1/agent/registration",
-                "body": dump_wire_model(request),
+                "operation": "register_agent_manifest",
+                "request": request,
             }
         )
 
@@ -259,9 +257,8 @@ class MockHTTPTransport(HTTPTransportProtocol):
         now = datetime.now(timezone.utc)
         self._requests.append(
             {
-                "method": "POST",
-                "path": "/v1/agent/heartbeat",
-                "body": dump_wire_model(request),
+                "operation": "send_agent_heartbeat",
+                "request": request,
             }
         )
         if self._next_heartbeat_error is not None:
@@ -278,9 +275,8 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock agent process deregistration."""
         self._requests.append(
             {
-                "method": "POST",
-                "path": "/v1/agent/deregistration",
-                "body": dump_wire_model(request),
+                "operation": "deregister_agent_process",
+                "request": request,
             }
         )
 
@@ -288,9 +284,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock general Library creation."""
         self._requests.append(
             {
-                "method": "POST",
-                "path": f"/libraries/v1/tenants/{self._tenant_id}",
-                "body": dump_wire_model(request),
+                "operation": "create_library",
                 "request": request,
             }
         )
@@ -302,8 +296,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock accessible Library listing."""
         self._requests.append(
             {
-                "method": "GET",
-                "path": f"/libraries/v1/tenants/{self._tenant_id}",
+                "operation": "list_libraries",
             }
         )
         return LibraryListResponse(libraries=[self._mock_library])
@@ -312,8 +305,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock one Library read."""
         self._requests.append(
             {
-                "method": "GET",
-                "path": f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}",
+                "operation": "get_library",
                 "request": request,
             }
         )
@@ -323,9 +315,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock one Library revision update."""
         self._requests.append(
             {
-                "method": "PATCH",
-                "path": f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}",
-                "body": dump_wire_model(request.patch),
+                "operation": "update_library",
                 "request": request,
             }
         )
@@ -341,8 +331,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock one Library delete."""
         self._requests.append(
             {
-                "method": "DELETE",
-                "path": f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}",
+                "operation": "delete_library",
                 "request": request,
             }
         )
@@ -354,9 +343,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock one Library document page."""
         self._requests.append(
             {
-                "method": "GET",
-                "path": (f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}/documents"),
-                "query": {"limit": request.limit, "cursor": request.cursor},
+                "operation": "list_library_documents",
                 "request": request,
             }
         )
@@ -369,10 +356,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock one document poll."""
         self._requests.append(
             {
-                "method": "GET",
-                "path": (
-                    f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}/documents/{request.document_id}"
-                ),
+                "operation": "get_library_document",
                 "request": request,
             }
         )
@@ -382,10 +366,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock one document delete."""
         self._requests.append(
             {
-                "method": "DELETE",
-                "path": (
-                    f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}/documents/{request.document_id}"
-                ),
+                "operation": "delete_library_document",
                 "request": request,
             }
         )
@@ -397,9 +378,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock upload session creation with a fake presigned URL."""
         self._requests.append(
             {
-                "method": "POST",
-                "path": f"/libraries/v1/tenants/{self._tenant_id}/document-uploads",
-                "body": dump_wire_model(request),
+                "operation": "create_document_upload",
                 "request": request,
             }
         )
@@ -427,9 +406,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Mock Library document creation."""
         self._requests.append(
             {
-                "method": "POST",
-                "path": (f"/libraries/v1/tenants/{self._tenant_id}/{request.library_id}/documents"),
-                "body": dump_wire_model(request.document),
+                "operation": "create_library_document",
                 "request": request,
             }
         )
@@ -437,7 +414,7 @@ class MockHTTPTransport(HTTPTransportProtocol):
             document_id=UUID(_MOCK_DOCUMENT_ID),
             library_id=request.library_id,
             status="queued",
-            location=(f"/v1/tenants/{self._tenant_id}/{request.library_id}/documents/{_MOCK_DOCUMENT_ID}"),
+            location=(f"/v1/hpke/tenants/{self._tenant_id}/{request.library_id}/documents/{_MOCK_DOCUMENT_ID}"),
         )
 
     async def _stream_events_from_queue(
@@ -522,15 +499,25 @@ class MockHTTPTransport(HTTPTransportProtocol):
         """Fail the next task request after recording it."""
         self._next_task_error = error
 
+    def hold_next_acceptance(self) -> asyncio.Event:
+        """Hold the next task request's acceptance until the returned Event is set."""
+        hold = asyncio.Event()
+        self._next_acceptance_hold = hold
+        return hold
+
+    def fail_next_stop(self, error: HTTPTransportError) -> None:
+        """Fail the next stop request after recording it."""
+        self._next_stop_error = error
+
     def fail_next_tool_results(self, error: Exception) -> None:
         """Fail the next mock tool-results request after recording it."""
         self._next_tool_results_error = error
 
     def create_content_delta_event(self, delta: str) -> BridgeSSEEvent:
-        """Create content delta event.
+        """Create a generation-1 content delta whose sequence is the new event counter.
 
         Args:
-            delta: Content chunk to append.
+            delta: Content chunk.
 
         Returns:
             BridgeSSEEvent with content delta payload.
@@ -540,8 +527,9 @@ class MockHTTPTransport(HTTPTransportProtocol):
             id=f"{self._event_counter}:1",
             data=BridgeContentDeltaResponse(
                 type="content.delta",
-                timestamp=datetime.now(timezone.utc),
                 delta=delta,
+                generation=1,
+                sequence=self._event_counter,
             ),
             timestamp=datetime.now(timezone.utc),
         )
@@ -628,23 +616,12 @@ class MockHTTPTransport(HTTPTransportProtocol):
         )
 
     def get_requests(self) -> list[RequestRecord]:
-        """Get all HTTP requests made through transport.
+        """Get all typed calls made through the transport interface.
 
         Returns:
-            List of request dicts with method, path, task_id, body.
+            Recorded operation names, typed requests, and call-specific arguments.
         """
         return list(self._requests)
-
-    def get_requests_by_method(self, method: str) -> list[RequestRecord]:
-        """Get requests filtered by HTTP method.
-
-        Args:
-            method: HTTP method (GET, POST).
-
-        Returns:
-            Filtered list of request dicts.
-        """
-        return [r for r in self._requests if r["method"] == method]
 
     def get_requests_for_task(self, task_id: str) -> list[RequestRecord]:
         """Get requests filtered by task ID.
@@ -656,10 +633,6 @@ class MockHTTPTransport(HTTPTransportProtocol):
             Filtered list of request dicts.
         """
         return [r for r in self._requests if r.get("task_id") == task_id]
-
-    def clear_requests(self) -> None:
-        """Clear recorded requests (for multi-phase tests)."""
-        self._requests.clear()
 
     @property
     def stop_event(self) -> asyncio.Event:

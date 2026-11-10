@@ -1,8 +1,8 @@
-"""The SDK returns a marked answer with every code point intact (RFC-139).
+"""The SDK returns terminal answer text with every code point intact.
 
-A customer verifies the mark on the text this parser hands back. One altered
-code point invalidates the signature, so the wire form — ASCII-escaped by the
-Bridge and framed across `data:` lines — must decode exactly.
+The fixture contains visible text plus an opaque suffix. The JSON-escaped SSE
+wire form must decode exactly; the SDK neither assigns meaning to the suffix nor
+modifies it.
 
 The fixture is real codec output, so this suite does not need the codec.
 """
@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from dualeai.events.sse_parser import _MAX_SSE_EVENT_BYTES, _compute_checksum, parse_sse_stream
+from dualeai.events.sse_parser import _MAX_SSE_EVENT_BYTES, parse_sse_stream
 from dualeai.models.bridge import BridgeTaskCompletedResponse
-from tests.test_sse_parser import MockStreamReader
+from tests.test_sse_parser import CheckedBlockReader
 
 _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "marked_answer.json").read_text())
 _ANSWER: str = _FIXTURE["answer"]
@@ -29,9 +29,8 @@ def _completed_stream() -> str:
         "result": {"completion": _MARKED, "tool_calls": []},
     }
     data_str = json.dumps(payload, separators=(",", ":"))
-    checksum = _compute_checksum("task.completed", data_str)
     data_lines = "\n".join(f"data: {line}" for line in data_str.split("\n"))
-    return f": crc={checksum}\nid: 1:1\nevent: task.completed\n{data_lines}\n\n"
+    return f"id: 1:1\nevent: task.completed\n{data_lines}\n\n"
 
 
 def _completion_of(event_data: object) -> str:
@@ -43,12 +42,12 @@ def _completion_of(event_data: object) -> str:
 
 
 class TestMarkedAnswerReachesTheCaller:
-    """What Router marked is what the SDK returns."""
+    """The terminal text emitted by the server is what the SDK returns."""
 
     @pytest.mark.unit
     async def test_completion_survives_parsing(self) -> None:
         """Byte-for-byte equality, not just visual equality."""
-        events = [event async for event in parse_sse_stream(MockStreamReader(_completed_stream()))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(_completed_stream()))]
 
         assert len(events) == 1
         completion = _completion_of(events[0].data)
@@ -58,7 +57,7 @@ class TestMarkedAnswerReachesTheCaller:
     @pytest.mark.unit
     async def test_the_visible_answer_is_unchanged(self) -> None:
         """The carrier appends; it never edits the answer a human reads."""
-        events = [event async for event in parse_sse_stream(MockStreamReader(_completed_stream()))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(_completed_stream()))]
 
         assert _completion_of(events[0].data).startswith(_ANSWER)
 
@@ -74,5 +73,5 @@ class TestMarkedAnswerReachesTheCaller:
         stream = _completed_stream()
 
         assert len(stream.encode()) < _MAX_SSE_EVENT_BYTES
-        events = [event async for event in parse_sse_stream(MockStreamReader(stream))]
+        events = [event async for event in parse_sse_stream(CheckedBlockReader(stream))]
         assert len(events) == 1

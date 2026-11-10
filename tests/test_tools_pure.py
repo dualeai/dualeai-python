@@ -12,6 +12,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from dualeai.models.bridge import BridgeToolUseResponse
+from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.tools._contract import (
     _compile_tool_callable,
@@ -31,6 +32,12 @@ from dualeai.tools.serialization import tool_success_output
 class AliasedToolResult(BaseModel):
     field_defs: dict[str, int] = Field(alias="$defs")
     optional: str | None = None
+
+
+class UnboundedToolResult(BaseModel):
+    """A tool author's own model: a plain ``int`` field, with no generated bound."""
+
+    rows: int
 
 
 _UnboundParameter = TypeVar("_UnboundParameter")
@@ -171,6 +178,33 @@ def test_compiled_contract_keeps_strict_json_native_types() -> None:
 
 
 @pytest.mark.unit
+def test_compiled_contract_preserves_documented_nullable_choices() -> None:
+    """Generated choice annotations survive export without widening accepted inputs."""
+
+    async def choose(capability: Capability | None) -> str:
+        return "selected"
+
+    contract = _compile_tool_callable(choose)
+    schema = contract.parameters.model_dump(mode="json", by_alias=True)
+    assert schema["properties"] == {"capability": {"anyOf": [{"$ref": "#/$defs/Capability"}, {"type": "null"}]}}
+    assert schema["required"] == ["capability"]
+    # The generated enum is the exporter's input, so its text stays independent of the exporter under test.
+    assert {
+        "const": "math",
+        "title": Capability.math.display_title,
+        "description": Capability.math.description,
+    } in schema["$defs"]["Capability"]["oneOf"]
+
+    assert contract.tool_kwargs(_tool_use(capability="math"))["capability"] is Capability.math
+    assert contract.tool_kwargs(_tool_use(capability=None)) == {"capability": None}
+    for invalid in ("not-a-capability", 1):
+        with pytest.raises(ValueError, match="'capability'"):
+            contract.tool_kwargs(_tool_use(capability=invalid))
+    with pytest.raises(ValueError, match="Missing required tool input parameter: capability"):
+        contract.tool_kwargs(_tool_use())
+
+
+@pytest.mark.unit
 def test_format_registered_tool_error_prefixes_and_bounds() -> None:
     assert format_registered_tool_error(ValueError("boom")) == "builtins.ValueError: boom"
     assert format_registered_tool_error(ValueError()) == "builtins.ValueError"
@@ -198,6 +232,26 @@ def test_tool_success_output_passes_wraps_and_rejects() -> None:
 @pytest.mark.unit
 def test_tool_success_output_preserves_model_aliases_and_absent_fields() -> None:
     assert tool_success_output(AliasedToolResult.model_validate({"$defs": {"answer": 42}})) == {"$defs": {"answer": 42}}
+
+
+@pytest.mark.unit
+def test_tool_success_output_holds_a_returned_model_to_the_same_bound_as_a_mapping() -> None:
+    """A model is a tool's return value like any other, not a trusted one.
+
+    The bridge carries JSON, so the number it can carry stops at the safe-integer
+    bound `JsonValue` names. Nothing about a value's arriving inside a Pydantic
+    model widens that: a tool author's field is a plain `int`, and only a
+    generated model gets the bound from its generator.
+    """
+    beyond_safe_integers = 2**53 + 1
+
+    with pytest.raises(TypeError, match="Tool returned dict"):
+        tool_success_output({"rows": beyond_safe_integers})
+
+    with pytest.raises(TypeError, match="Tool returned UnboundedToolResult"):
+        tool_success_output(UnboundedToolResult(rows=beyond_safe_integers))
+
+    assert tool_success_output(UnboundedToolResult(rows=2**53 - 1)) == {"rows": 2**53 - 1}
 
 
 @pytest.mark.unit
@@ -289,18 +343,28 @@ def test_compiled_contract_rejects_unsupported_signatures(func, message: str) ->
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "default",
+    ("annotation", "default", "message"),
     [
-        pytest.param("not-an-int", id="wrong-type"),
-        pytest.param(float("nan"), id="nan"),
-        pytest.param(float("inf"), id="infinity"),
+        pytest.param(int, "not-an-int", "does not satisfy its annotation", id="wrong-type"),
+        pytest.param(float, float("nan"), "non-finite default", id="nan"),
+        pytest.param(float, float("inf"), "non-finite default", id="infinity"),
     ],
 )
-def test_compiled_contract_rejects_invalid_defaults(default: object) -> None:
-    async def gate(retries: int = default) -> dict[str, object]:  # ty: ignore[invalid-parameter-default]
+def test_compiled_contract_rejects_invalid_defaults(annotation: type, default: object, message: str) -> None:
+    """Each case names the guard that has to reject it.
+
+    The non-finite defaults are annotated ``float`` on purpose. Under ``int`` the
+    ordinary annotation check rejects them first and its message also contains
+    "default", so a shared expectation would prove nothing about the non-finite
+    guard.
+    """
+
+    async def gate(retries: object = default) -> dict[str, object]:
         return {"retries": retries}
 
-    with pytest.raises(TypeError, match="default"):
+    gate.__annotations__["retries"] = annotation
+
+    with pytest.raises(TypeError, match=message):
         _contract(gate)
 
 
@@ -385,7 +449,7 @@ def _non_finite_adversarial_cases() -> list[tuple[str, object, bool]]:
     ids=[label for label, _value, _expected in _non_finite_adversarial_cases()],
 )
 def test_contains_non_finite_number_equivalence(value: object, expected: bool) -> None:
-    """Pin the shared non-finite predicate; twin test guards the platform copy."""
+    """Pin the non-finite predicate on every adversarial case."""
     assert _contains_non_finite_number(value) is expected
 
 

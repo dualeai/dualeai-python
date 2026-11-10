@@ -1,15 +1,20 @@
-"""Customer-hosted inventory agent exercising the full ``@tool`` surface.
+"""Customer-hosted inventory agent showing representative ``@tool`` behavior.
 
-Run it against a real bridge with credentials in the environment::
+Requires ``DUALEAI_TOKEN``, ``DUALEAI_AGENT_ID``, and access to a configured
+model. Run it with::
 
-    DUALEAI_TOKEN=dualeai_your-token-here DUALEAI_AGENT_ID=agent_example \
-        DUALEAI_ENDPOINT=https://api.duale.ai \
-        uv run python examples/inventory_agent.py
+    python examples/inventory_agent.py
 
-``sdk.serve()`` publishes the tool manifest, heartbeats until shutdown, and
-dispatches each ``tool.use`` the platform language model emits to the matching
-callable below. Nothing here talks to a real warehouse — the bodies stand in for
-your side effects so the lifecycle is what the example demonstrates.
+Set ``DUALEAI_ENDPOINT`` only when your access instructions name a non-default
+environment.
+
+Nothing runs this example automatically.
+
+``sdk.serve()`` publishes the Tool manifest and heartbeats until shutdown; it
+does not receive Tool calls. The demo Tasks opened by the same SDK instance own
+the streams on which matching ``tool.use`` events are dispatched to the
+callables below. Nothing here talks to a real warehouse — the bodies stand in
+for your side effects so the lifecycle is what the example demonstrates.
 
 Four tools, one concept each:
 
@@ -26,7 +31,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from dualeai import DualeAIConfig, DualeAISDK, ask, current_tool_context, tool
+from dualeai import DualeAISDK, PriorityClass, ask, current_tool_context, tool
 
 # A stand-in "warehouse" so the example runs with no external system. Both the
 # stock and replay ledger are process-local; production code must persist the
@@ -71,7 +76,7 @@ class PriceOutOfBandError(Exception):
 
 async def main() -> None:
     """Register the inventory tools, serve them, then drive a task through the flow."""
-    sdk = DualeAISDK(config=DualeAIConfig())
+    sdk = DualeAISDK(auto_start=False)
 
     @tool(
         sdk=sdk,
@@ -155,7 +160,7 @@ async def main() -> None:
     assert lookup_stock and estimate_restock and reserve_units and adjust_price
 
     # Register the manifest + start heartbeats BEFORE we submit any task, so the
-    # agent is online when the router looks for a tool host. serve() re-uses the
+    # agent is online before the platform can select a Tool host. serve() reuses the
     # same started lifecycle (its internal start() is a no-op) and keeps the
     # heartbeat running while the demo task streams; tool.use events dispatch on
     # the task's own SSE stream, not on serve().
@@ -172,7 +177,7 @@ async def main() -> None:
 
 
 async def _run_demo(sdk: DualeAISDK) -> None:
-    """Submit a few tasks so the platform language model exercises each tool.
+    """Submit a few Tasks that exercise several registered Tools.
 
     Each ``ask`` opens a task SSE stream; when the model calls a registered tool,
     the ``tool.use`` is dispatched to the matching callable above, its result is
@@ -184,7 +189,7 @@ async def _run_demo(sdk: DualeAISDK) -> None:
         "Reprice sku-gadget to 90000 cents.",  # Trips the guardrail; error_transform redacts the secret.
     ]
     for prompt in prompts:
-        response = await ask(prompt, sdk=sdk)
+        response = await ask(prompt, sdk=sdk, priority=PriorityClass.fast)
         answer = await response.model()
         print(f"\n> {prompt}\n{answer}")  # noqa: T201
 

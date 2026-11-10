@@ -1,4 +1,4 @@
-"""SDK agent lifecycle tests for RFC-121."""
+"""SDK hosted-Tool lifecycle and dispatch tests."""
 
 from __future__ import annotations
 
@@ -15,24 +15,23 @@ from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from dualeai import create_sdk
 from dualeai.config import DualeAIConfig
 from dualeai.constants import TimingDefaults
-from dualeai.decorators import agent, tool
+from dualeai.decorators import tool
 from dualeai.exceptions import DualeAIAuthError, DualeAIConnectionError
 from dualeai.models.bridge import (
+    AgentDeregistrationMessage,
     AgentHeartbeatMessage,
     AgentHeartbeatResponse,
     AgentRegistrationMessage,
-    Attachment,
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
     BridgeTaskContinueRequest,
-    BridgeTaskCreateRequest,
     BridgeToolResultError,
     BridgeToolResultsRequest,
     BridgeToolResultSuccess,
     BridgeToolUseResponse,
     RegisteredTool,
 )
-from dualeai.models.skill_enum import SkillEnum
+from dualeai.models.capability import Capability
 from dualeai.orchestrator import ask
 from dualeai.sdk import DualeAISDK
 from dualeai.tools.errors import TOOL_ERROR_MESSAGE_MAX_CHARS, format_registered_tool_error
@@ -40,6 +39,18 @@ from tests.mocks.mock_http import MockHTTPTransport
 
 # Module-level so get_type_hints can resolve it under `from __future__ import annotations`.
 _UnboundToolParam = TypeVar("_UnboundToolParam")
+
+
+def _lifecycle_types(transport: MockHTTPTransport) -> list[type[object]]:
+    """Record typed lifecycle calls without deriving routes from the mock."""
+    return [
+        type(record["request"])
+        for record in transport.get_requests()
+        if isinstance(
+            record.get("request"),
+            (AgentRegistrationMessage, AgentHeartbeatMessage, AgentDeregistrationMessage),
+        )
+    ]
 
 
 async def _model_config_parameter(model_config: str) -> str:
@@ -86,10 +97,11 @@ class GateCommandResult(BaseModel):
     command_id: str
 
 
+@pytest.mark.unit
 def test_create_sdk_coerces_constructor_arguments_with_pydantic() -> None:
     """create_sdk uses a Pydantic boundary for constructor-only settings."""
     sdk = create_sdk(
-        token="dualeai_test_token",
+        token="dualeai_test_token_padded_to_32bytes",
         tenant_id="tenant-test",
         agent_id="agent_security_operations",
         max_jobs="7",
@@ -101,6 +113,15 @@ def test_create_sdk_coerces_constructor_arguments_with_pydantic() -> None:
     assert sdk.job_timeout == 11
     assert sdk.auto_start is False
     assert sdk.config.tenant_id == "tenant-test"
+
+
+@pytest.mark.unit
+def test_constructor_rejects_empty_agent_id_override(config_factory) -> None:
+    """An explicit invalid Agent ID must not select the configured identity."""
+    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
+
+    with pytest.raises(ValidationError):
+        DualeAISDK(config=config, agent_id="", auto_start=False)
 
 
 @pytest.mark.unit
@@ -188,21 +209,25 @@ async def test_start_registers_manifest_and_first_heartbeat(
         await sdk.start()
 
         requests = mock_http_transport.get_requests()
-        registration = next(request for request in requests if request["path"] == "/v1/agent/registration")
-        heartbeat = next(request for request in requests if request["path"] == "/v1/agent/heartbeat")
+        registration = next(
+            request for request in requests if isinstance(request.get("request"), AgentRegistrationMessage)
+        )
+        heartbeat = next(request for request in requests if isinstance(request.get("request"), AgentHeartbeatMessage))
 
-        registration_body = AgentRegistrationMessage.model_validate(registration["body"])
-        heartbeat_body = AgentHeartbeatMessage.model_validate(heartbeat["body"])
-        assert registration_body.agent_id == "agent_security_operations"
-        assert registration_body.tools[0].tool.name == "close_security_gate"
-        assert registration_body.tools[0].tool.description == (
+        registration_request = registration["request"]
+        heartbeat_request = heartbeat["request"]
+        assert isinstance(registration_request, AgentRegistrationMessage)
+        assert isinstance(heartbeat_request, AgentHeartbeatMessage)
+        assert registration_request.agent_id == "agent_security_operations"
+        assert registration_request.tools[0].tool.name == "close_security_gate"
+        assert registration_request.tools[0].tool.description == (
             "Close a named security gate and return the final gate state."
         )
-        assert registration_body.tools[0].timeout_seconds == 10.0
-        assert len(registration_body.config_hash) == 64
-        assert heartbeat_body.agent_id == registration_body.agent_id
-        assert heartbeat_body.process_id == registration_body.process_id
-        assert heartbeat_body.config_hash == registration_body.config_hash
+        assert registration_request.tools[0].timeout_seconds == 10.0
+        assert len(registration_request.config_hash) == 64
+        assert heartbeat_request.agent_id == registration_request.agent_id
+        assert heartbeat_request.process_id == registration_request.process_id
+        assert heartbeat_request.config_hash == registration_request.config_hash
         assert sdk.heartbeat_task is not None
     finally:
         await sdk.cleanup()
@@ -225,7 +250,7 @@ def test_registered_tools_returns_detached_models(
     async def close_security_gate(gate_id: str) -> dict[str, str]:
         return {"gate_id": gate_id}
 
-    initial_hash = sdk._config_hash()
+    initial_hash = sdk._lifecycle.config_hash()
     published = sdk.registered_tools
     published[0].tool.description = "Mutated outside the SDK"
     published[0].tool.parameters.properties["gate_id"]["type"] = "integer"
@@ -233,57 +258,7 @@ def test_registered_tools_returns_detached_models(
     current = sdk.registered_tools[0]
     assert current.tool.description == "Close a named security gate."
     assert current.tool.parameters.properties["gate_id"]["type"] == "string"
-    assert sdk._config_hash() == initial_hash
-
-
-@pytest.mark.unit
-async def test_lifecycle_manifest_excludes_legacy_agent_capabilities(
-    config_factory,
-    mock_http_transport: MockHTTPTransport,
-) -> None:
-    """Legacy @agent metadata must not leak into the hosted-tool lifecycle manifest."""
-    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
-    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
-
-    @tool(
-        sdk=sdk,
-        description="Close a named gate and return the final state.",
-        timeout=timedelta(seconds=10),
-    )
-    async def close_security_gate(gate_id: str) -> dict[str, str]:
-        return {"gate_id": gate_id, "state": "closed"}
-
-    tools_only_hash = sdk._config_hash()
-
-    @agent(
-        name="LegacySecurityAgent",
-        org={"Security"},
-        capabilities=[SkillEnum.analysis, SkillEnum.reasoning],
-        sdk=sdk,
-    )
-    async def legacy_security_agent() -> None:
-        return None
-
-    registration = sdk._lifecycle._registration_message()
-    heartbeat = sdk._lifecycle._heartbeat_message(local_sent_at=datetime.now(timezone.utc))
-    body = registration.model_dump(mode="json", by_alias=True)
-
-    assert sdk.agents
-    assert registration.config_hash == tools_only_hash
-    assert heartbeat.config_hash == tools_only_hash
-    assert set(body) == {
-        "agent_id",
-        "process_id",
-        "tools",
-        "config_hash",
-        "manifest_publication_id",
-        "time",
-        "sdk_version",
-    }
-    assert body["tools"][0]["tool"]["name"] == "close_security_gate"
-    forbidden_payload = json.dumps(body, sort_keys=True)
-    for forbidden in ("LegacySecurityAgent", "Security", "skills", "capabilities", "agent_type"):
-        assert forbidden not in forbidden_payload
+    assert sdk._lifecycle.config_hash() == initial_hash
 
 
 @pytest.mark.unit
@@ -307,15 +282,16 @@ async def test_heartbeat_registers_changed_manifest_before_new_hash(
 
     await sdk._lifecycle._send_heartbeat_once()
     requests = mock_http_transport.get_requests()
-    lifecycle_paths = [request["path"] for request in requests if str(request["path"]).startswith("/v1/agent/")]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
     ]
-    refreshed_registration = AgentRegistrationMessage.model_validate(requests[-2]["body"])
-    refreshed_heartbeat = AgentHeartbeatMessage.model_validate(requests[-1]["body"])
+    refreshed_registration = requests[-2]["request"]
+    refreshed_heartbeat = requests[-1]["request"]
+    assert isinstance(refreshed_registration, AgentRegistrationMessage)
+    assert isinstance(refreshed_heartbeat, AgentHeartbeatMessage)
     assert refreshed_registration.tools[0].tool.name == "open_security_gate"
     assert refreshed_heartbeat.config_hash == refreshed_registration.config_hash
 
@@ -365,21 +341,25 @@ async def test_heartbeat_uses_the_manifest_snapshot_sent_by_its_registration(
     await first_heartbeat
 
     first_requests = mock_http_transport.get_requests()
-    first_registration = AgentRegistrationMessage.model_validate(
-        next(item for item in first_requests if item["path"] == "/v1/agent/registration")["body"]
+    first_registration = next(
+        item["request"] for item in first_requests if isinstance(item.get("request"), AgentRegistrationMessage)
     )
-    first_beat = AgentHeartbeatMessage.model_validate(
-        next(item for item in first_requests if item["path"] == "/v1/agent/heartbeat")["body"]
+    first_beat = next(
+        item["request"] for item in first_requests if isinstance(item.get("request"), AgentHeartbeatMessage)
     )
+    assert isinstance(first_registration, AgentRegistrationMessage)
+    assert isinstance(first_beat, AgentHeartbeatMessage)
     assert [item.tool.name for item in first_registration.tools] == ["close_security_gate"]
     assert first_beat.config_hash == first_registration.config_hash
 
     await sdk._lifecycle._send_heartbeat_once()
     all_requests = mock_http_transport.get_requests()
-    registrations = [item for item in all_requests if item["path"] == "/v1/agent/registration"]
-    heartbeats = [item for item in all_requests if item["path"] == "/v1/agent/heartbeat"]
-    latest_registration = AgentRegistrationMessage.model_validate(registrations[-1]["body"])
-    latest_beat = AgentHeartbeatMessage.model_validate(heartbeats[-1]["body"])
+    registrations = [item for item in all_requests if isinstance(item.get("request"), AgentRegistrationMessage)]
+    heartbeats = [item for item in all_requests if isinstance(item.get("request"), AgentHeartbeatMessage)]
+    latest_registration = registrations[-1]["request"]
+    latest_beat = heartbeats[-1]["request"]
+    assert isinstance(latest_registration, AgentRegistrationMessage)
+    assert isinstance(latest_beat, AgentHeartbeatMessage)
     assert [item.tool.name for item in latest_registration.tools] == [
         "close_security_gate",
         "open_security_gate",
@@ -401,13 +381,11 @@ async def test_heartbeat_refreshes_manifest_after_anti_entropy_interval(
 
     await sdk._lifecycle._send_heartbeat_once()
 
-    requests = mock_http_transport.get_requests()
-    lifecycle_paths = [request["path"] for request in requests if str(request["path"]).startswith("/v1/agent/")]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
     ]
 
     await sdk.cleanup()
@@ -616,8 +594,8 @@ async def test_registered_tool_rejects_model_attribute_parameter_name(
 def test_registered_tool_error_is_module_class_prefixed_and_bounded() -> None:
     """Tool errors render as ``<module>.<class>: <message>``, length-bounded.
 
-    RFC-121 tool error model: a stable module.class prefix plus a truncated free-form
-    message; no error enum, no retryable flag.
+    The wire contract uses a stable module.class prefix plus a truncated
+    free-form message, without an error enum or retryable flag.
     """
     # Known builtin: literal expected value, not derived from the implementation.
     assert format_registered_tool_error(ValueError("boom")) == "builtins.ValueError: boom"
@@ -844,7 +822,6 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submissions(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
@@ -852,7 +829,7 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
         nonlocal submit_attempts
         submit_attempts += 1
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             if submit_attempts == 1:
@@ -870,7 +847,7 @@ async def test_tool_use_not_re_executed_when_result_submission_fails(
     )
     mock_http_transport.inject_event("task_dedup", tool_event)
 
-    response = await ask(action="Close the gate", request_id="task_dedup", sdk=sdk)
+    response = await ask(instruction="Close the gate", task_id="task_dedup", sdk=sdk)
 
     # First delivery: callable runs, result cached, submission fails.
     await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
@@ -933,7 +910,7 @@ async def test_concurrent_tool_executions_are_bounded(
     events.append(mock_http_transport.create_task_completed_event())
     mock_http_transport.inject_events("task_burst", events)
 
-    response = await ask(action="Run the tool burst", request_id="task_burst", sdk=sdk)
+    response = await ask(instruction="Run the tool burst", task_id="task_burst", sdk=sdk)
     await asyncio.wait_for(limit_reached.wait(), timeout=1)
 
     assert peak == 2  # bounded at max_jobs (RED: peak == 5 without the semaphore)
@@ -979,16 +956,16 @@ async def test_registered_tool_returns_pydantic_result_as_mapping(
 
 
 @pytest.mark.unit
-async def test_registered_tool_router_deadline_caps_long_tool_timeout(
+async def test_registered_tool_request_deadline_caps_long_tool_timeout(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A near router deadline fires before a far decorator timeout.
+    """A near request deadline fires before a far decorator timeout.
 
     Observable-outcome twin of
     test_tool_exceeding_timeout_yields_error_and_cancels_callable (which covers
     the decorator-timeout-first arm): a never-returning tool with a 60s
-    decorator timeout but a ~0.05s router deadline must be cancelled and report
+    decorator timeout but a ~0.05s request deadline must be cancelled and report
     an error result — proving the earliest limit governs, not the mechanism.
     """
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
@@ -1044,8 +1021,8 @@ async def test_registered_tool_config_hash_uses_canonical_escaped_json(
     # Frozen golden for a non-ASCII manifest. It pins ensure_ascii encoding so the
     # same manifest keeps one digest across SDK processes and versions.
     non_ascii_golden = "24aaaefd01809222bd43b0c78f1d802af6ad0c100326269ddac9383c643b7232"
-    assert sdk._config_hash() == non_ascii_golden
-    assert sdk._config_hash() == sdk._config_hash()  # stable across repeated calls
+    assert sdk._lifecycle.config_hash() == non_ascii_golden
+    assert sdk._lifecycle.config_hash() == sdk._lifecycle.config_hash()  # stable across repeated calls
 
 
 @pytest.mark.unit
@@ -1070,7 +1047,7 @@ async def test_config_hash_includes_and_canonicalizes_parameters(
         async def set_gate(width: int, height: int) -> dict[str, int]:
             return {"width": width, "height": height}
 
-        return sdk._config_hash()
+        return sdk._lifecycle.config_hash()
 
     def one_param_hash() -> str:
         sdk = DualeAISDK(
@@ -1083,7 +1060,7 @@ async def test_config_hash_includes_and_canonicalizes_parameters(
         async def set_gate(width: int) -> dict[str, int]:
             return {"width": width}
 
-        return sdk._config_hash()
+        return sdk._lifecycle.config_hash()
 
     # Stable canonicalization: identical manifest → identical hash.
     assert two_param_hash() == two_param_hash()
@@ -1119,7 +1096,7 @@ async def test_registered_tool_config_hash_golden_detects_schema_gen_drift(
     # Re-pinned when generated tool schemas began preserving $ref/$defs and field
     # titles.
     golden = "3692635cfc9984ac26236f3b4e74d2110d6630ca38e64db6bea2239d2887afd6"
-    assert sdk._config_hash() == golden
+    assert sdk._lifecycle.config_hash() == golden
 
 
 @pytest.mark.unit
@@ -1139,7 +1116,7 @@ async def test_registered_tool_config_hash_is_a_one_sided_canonicalization_golde
     async def close_gate() -> dict[str, str]:
         return {}
 
-    assert sdk._config_hash() == "065c719fed99b179e89d484df76bc68922d5c6206f1a2799fb96bf5023989ee0"
+    assert sdk._lifecycle.config_hash() == "065c719fed99b179e89d484df76bc68922d5c6206f1a2799fb96bf5023989ee0"
 
 
 @pytest.mark.unit
@@ -1164,7 +1141,7 @@ def test_registered_tool_config_hash_normalizes_negative_zero(
         async def configure_gate(value: float = default) -> dict[str, float]:
             return {"value": value}
 
-        return sdk._config_hash()
+        return sdk._lifecycle.config_hash()
 
     assert config_hash(-0.0) == config_hash(0.0)
 
@@ -1196,14 +1173,9 @@ async def test_start_is_idempotent_when_called_concurrently(
         release_registration.set()
         await asyncio.gather(first_start, second_start)
 
-        lifecycle_paths = [
-            request["path"]
-            for request in mock_http_transport.get_requests()
-            if str(request["path"]).startswith("/v1/agent/")
-        ]
-        assert lifecycle_paths == [
-            "/v1/agent/registration",
-            "/v1/agent/heartbeat",
+        assert _lifecycle_types(mock_http_transport) == [
+            AgentRegistrationMessage,
+            AgentHeartbeatMessage,
         ]
     finally:
         await sdk.cleanup()
@@ -1257,15 +1229,10 @@ async def test_serve_runs_until_stop_event_and_deregisters(
             with suppress(asyncio.CancelledError):
                 await serve_task
 
-    lifecycle_paths = [
-        request["path"]
-        for request in mock_http_transport.get_requests()
-        if str(request["path"]).startswith("/v1/agent/")
-    ]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
     ]
 
 
@@ -1280,7 +1247,7 @@ async def test_serve_stops_after_two_consecutive_heartbeat_auth_failures(
     mock_http_transport: MockHTTPTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """serve() tolerates one auth-rejected beat (rotation/authz blip), then stops on a second (RFC-121 DX #5)."""
+    """serve() tolerates one rejected heartbeat, then stops on a second."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     calls = 0
@@ -1307,7 +1274,7 @@ async def test_serve_survives_single_heartbeat_auth_blip(
     mock_http_transport: MockHTTPTransport,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A single auth-rejected beat is tolerated; serve() continues when the next beat recovers (RFC-121 DX #5)."""
+    """serve() continues when one rejected heartbeat is followed by recovery."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     stop = asyncio.Event()
@@ -1327,6 +1294,11 @@ async def test_serve_survives_single_heartbeat_auth_blip(
 
     # Must return normally — a single auth blip is tolerated, not fatal.
     await sdk.serve(stop_event=stop)
+    # AT LEAST three, not exactly three. `stop` is set inside the third beat, but
+    # `serve` returns only when its `asyncio.wait` next runs, and with the interval
+    # patched to 0 the heartbeat loop keeps spinning until then. The observed count
+    # is 5 here and is an event-loop scheduling artifact, not a lifecycle contract.
+    # The lower bound is the whole claim: a beat after the failing one succeeded.
     assert calls >= 3
 
 
@@ -1356,6 +1328,11 @@ async def test_serve_survives_transient_heartbeat_failure(
 
     # Must return normally — the transient blip is tolerated, not fatal.
     await sdk.serve(stop_event=stop)
+    # AT LEAST three, not exactly three. `stop` is set inside the third beat, but
+    # `serve` returns only when its `asyncio.wait` next runs, and with the interval
+    # patched to 0 the heartbeat loop keeps spinning until then. The observed count
+    # is 5 here and is an event-loop scheduling artifact, not a lifecycle contract.
+    # The lower bound is the whole claim: a beat after the failing one succeeded.
     assert calls >= 3
 
 
@@ -1382,8 +1359,8 @@ async def test_serve_stops_after_consecutive_heartbeat_failures(
 
     with pytest.raises(DualeAIConnectionError, match="bridge down"):
         await sdk.serve()
-    # Startup beat (1) + MAX_CONSECUTIVE_HEARTBEAT_FAILURES failing loop beats.
-    assert calls == 1 + TimingDefaults.MAX_CONSECUTIVE_HEARTBEAT_FAILURES
+    # Startup beat (1) plus the three consecutive failures the loop tolerates.
+    assert calls == 4
 
 
 @pytest.mark.unit
@@ -1488,9 +1465,13 @@ async def test_cleanup_deregisters_started_lifecycle(
     await sdk.cleanup()
 
     requests = mock_http_transport.get_requests()
-    deregistration = next(request for request in requests if request["path"] == "/v1/agent/deregistration")
-    assert deregistration["body"]["agent_id"] == "agent_security_operations"
-    assert deregistration["body"]["reason"] == "shutdown"
+    deregistration = next(
+        request for request in requests if isinstance(request.get("request"), AgentDeregistrationMessage)
+    )
+    deregistration_request = deregistration["request"]
+    assert isinstance(deregistration_request, AgentDeregistrationMessage)
+    assert deregistration_request.agent_id == "agent_security_operations"
+    assert deregistration_request.reason == "shutdown"
 
 
 @pytest.mark.unit
@@ -1507,18 +1488,13 @@ async def test_cleanup_allows_lifecycle_restart(
     await sdk.start()
     await sdk.cleanup()
 
-    lifecycle_paths = [
-        request["path"]
-        for request in mock_http_transport.get_requests()
-        if str(request["path"]).startswith("/v1/agent/")
-    ]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
     ]
 
 
@@ -1535,18 +1511,15 @@ async def test_startup_heartbeat_failure_deregisters_published_registration(
     with pytest.raises(RuntimeError, match="heartbeat forbidden"):
         await sdk.serve()
 
-    lifecycle_paths = [
-        request["path"]
-        for request in mock_http_transport.get_requests()
-        if str(request["path"]).startswith("/v1/agent/")
-    ]
-    assert lifecycle_paths == [
-        "/v1/agent/registration",
-        "/v1/agent/heartbeat",
-        "/v1/agent/deregistration",
+    assert _lifecycle_types(mock_http_transport) == [
+        AgentRegistrationMessage,
+        AgentHeartbeatMessage,
+        AgentDeregistrationMessage,
     ]
     deregistration = mock_http_transport.get_requests()[-1]
-    assert deregistration["body"]["reason"] == "startup_failed"
+    deregistration_request = deregistration["request"]
+    assert isinstance(deregistration_request, AgentDeregistrationMessage)
+    assert deregistration_request.reason == "startup_failed"
 
 
 @pytest.mark.unit
@@ -1558,10 +1531,10 @@ async def test_submit_tool_results_passes_generated_request_to_transport(
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
-    mock_http_transport.inject_event("task_123", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_123456", mock_http_transport.create_task_completed_event())
 
     terminal = await sdk.submit_tool_results(
-        "task_123",
+        "task_123456",
         [
             BridgeToolResultSuccess(
                 type="success",
@@ -1572,10 +1545,9 @@ async def test_submit_tool_results_passes_generated_request_to_transport(
     )
 
     assert isinstance(terminal, BridgeTaskCompletedResponse)
-    record = mock_http_transport.get_requests_for_task("task_123")[0]
-    request = record["request"]
+    request = mock_http_transport.get_requests_for_task("task_123456")[0]["request"]
     assert isinstance(request, BridgeToolResultsRequest)
-    assert record["task_id"] == "task_123"
+    assert request.task_id == "task_123456"
     assert request.type == "tool_results"
     assert request.tool_results[0].tool_call_id == "call_123"
 
@@ -1624,11 +1596,11 @@ async def test_tool_use_executes_registered_tool_and_posts_success_result(
         tool_input={"gate_id": "north", "reason": "drill"},
     ).data
     assert isinstance(tool_use, BridgeToolUseResponse)
-    mock_http_transport.inject_event("task_456", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_456789", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_456", tool_use)
+    await sdk._execute_tool_use("task_456789", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_456")
+    result = _submitted_tool_result(mock_http_transport, "task_456789")
     assert result.type == "success"
     assert isinstance(result, BridgeToolResultSuccess)
     assert result.tool_call_id == "call_456"
@@ -1726,8 +1698,9 @@ async def test_tool_use_posts_error_for_invalid_output(
     assert isinstance(result, BridgeToolResultError)
     assert result.tool_call_id == tool_call_id
     assert result.message == (
-        f"builtins.TypeError: Tool returned {expected_type_name}; a tool result must be JSON-serializable "
-        '(a str, a mapping, a Pydantic model, or a value wrappable as {"result": ...}).'
+        f"builtins.TypeError: Tool returned {expected_type_name}; a tool result must be a str, a mapping, "
+        'a Pydantic model, or a value wrappable as {"result": ...}, holding only JSON values whose numbers '
+        "are within +/-(2**53 - 1)."
     )
 
 
@@ -1736,7 +1709,7 @@ async def test_tool_input_rejects_int_bool_confusion(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """int<->bool args are rejected, not silently coerced to a wrong value (RFC-121 DX #20)."""
+    """int<->bool arguments are rejected rather than silently coerced."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1817,7 +1790,7 @@ async def test_tool_input_rejects_int_bool_confusion_through_optional(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """The int<->bool guard applies through Optional/union, not just bare scalars (RFC-121 DX #20)."""
+    """The int<->bool guard applies through Optional/union types."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1834,11 +1807,11 @@ async def test_tool_input_rejects_int_bool_confusion_through_optional(
         input={"active": 1},  # int for Optional[bool] must be rejected, not coerced to True
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
-    mock_http_transport.inject_event("task_opt", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_opt_0001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_opt", tool_use)
+    await sdk._execute_tool_use("task_opt_0001", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_opt")
+    result = _submitted_tool_result(mock_http_transport, "task_opt_0001")
     assert result.type == "error"
     assert isinstance(result, BridgeToolResultError)
     assert "'active'" in result.message
@@ -1849,7 +1822,7 @@ async def test_tool_error_transform_redacts_model_facing_message(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A per-@tool error_transform controls the model-facing error text — CWE-209 seam (RFC-121 DX #2)."""
+    """A per-@tool error_transform controls the model-facing error text."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1888,7 +1861,7 @@ async def test_tool_use_error_names_invalid_input_parameter(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A bad scalar input names the offending parameter so the model can self-correct (RFC-121 DX #25)."""
+    """A bad scalar input names the offending parameter."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -1923,7 +1896,7 @@ async def test_tool_can_read_its_call_context(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """current_tool_context() exposes call id (idempotency key), attempt, task, deadline (RFC-121 DX #1/#15)."""
+    """current_tool_context() exposes call id, attempt, Task, and deadline."""
     from dualeai import current_tool_context
 
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
@@ -1950,13 +1923,13 @@ async def test_tool_can_read_its_call_context(
         input={},
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
-    mock_http_transport.inject_event("task_ctx", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_ctx_0001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_ctx", tool_use)
+    await sdk._execute_tool_use("task_ctx_0001", tool_use)
 
     assert seen["tool_call_id"] == "call-ctx"
     assert seen["attempt"] == 1
-    assert seen["task_id"] == "task_ctx"
+    assert seen["task_id"] == "task_ctx_0001"
     assert seen["remaining_positive"] is True
     # Context does not leak outside the call.
     assert current_tool_context() is None
@@ -2003,105 +1976,6 @@ async def test_sync_tool_can_read_its_call_context(
 
     assert seen["tool_call_id"] == "call-ctx-sync"
     assert seen["attempt"] == 1
-
-
-@pytest.mark.unit
-async def test_run_task_create_body_serializes_tool_schema_with_wire_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The task-create body must be dumped by_alias so the alias-only tool schema
-    field goes out as ``additionalProperties`` (JSON Schema), not the snake-case
-    field name a bridge Parameters(extra=forbid) would reject."""
-    from dualeai.events.http_transport import HTTPTransport
-    from dualeai.models.tool import Parameters as WireParameters
-    from dualeai.models.tool import Tool as WireTool
-
-    transport = HTTPTransport(endpoint="https://api.test.duale.ai", token="dualeai_test_token_padded_1234")
-    captured: dict[str, object] = {}
-
-    async def _spy(*, method: str, path: str, json_data: object, task_id: str, last_event_id: str | None = None):
-        captured["json"] = json_data
-        for _ in ():  # empty — makes _spy an async generator (like the real method) yielding nothing
-            yield
-
-    monkeypatch.setattr(transport, "_stream_request", _spy)
-
-    tool = WireTool(
-        name="reserve",
-        description="Reserve units.",
-        parameters=WireParameters.model_validate(
-            {
-                "type": "object",
-                "properties": {"sku": {"type": "string"}},
-                "required": ["sku"],
-                "additionalProperties": False,
-            }
-        ),
-    )
-    request = BridgeTaskCreateRequest(
-        type="create",
-        action_prompt="do it",
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
-        tools=[tool],
-    )
-    async for _ in transport.run_task("task-alias", request):
-        pass
-
-    import json
-
-    serialized = json.dumps(captured["json"])
-    assert '"additionalProperties"' in serialized  # by_alias form (correct)
-    assert '"additional_properties"' not in serialized  # snake form the bridge would reject
-
-
-@pytest.mark.unit
-async def test_run_task_create_body_carries_policy_format_stream_attachments(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The real transport serializes every field of a typed create request."""
-    from dualeai.events.http_transport import HTTPTransport
-    from dualeai.models.response_format import JsonSchemaResponseFormat
-    from dualeai.models.routing_policy import RoutingPolicy
-    from dualeai.models.skill_enum import SkillEnum
-
-    transport = HTTPTransport(endpoint="https://api.test.duale.ai", token="dualeai_test_token_padded_1234")
-    captured: dict[str, object] = {}
-
-    async def _spy(*, method: str, path: str, json_data: object, task_id: str, last_event_id: str | None = None):
-        captured["json"] = json_data
-        for _ in ():  # empty async generator, like the real method
-            yield
-
-    monkeypatch.setattr(transport, "_stream_request", _spy)
-
-    request = BridgeTaskCreateRequest(
-        type="create",
-        action_prompt="do it",
-        deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
-        routing_policy=RoutingPolicy(target_accuracy=0.9, required_skills=[SkillEnum.analysis]),
-        response_format=JsonSchemaResponseFormat(json_schema={"type": "object"}),
-        response_stream=True,
-        attachments=[
-            Attachment(
-                key="attachment-key",
-                filename="report.pdf",
-                description="Quarterly report",
-            )
-        ],
-    )
-    async for _ in transport.run_task("task-wire-fields", request):
-        pass
-
-    body_raw = captured["json"]
-    assert isinstance(body_raw, dict)
-    body: dict[str, object] = {str(key): value for key, value in body_raw.items()}
-    assert body["type"] == "create"
-    assert body["response_stream"] is True
-    assert body["routing_policy"] == {"target_accuracy": 0.9, "required_skills": ["analysis"]}
-    assert body["response_format"] == {"json_schema": {"type": "object"}}
-    assert body["attachments"] == [
-        {"key": "attachment-key", "filename": "report.pdf", "description": "Quarterly report"}
-    ]
 
 
 @pytest.mark.unit
@@ -2154,6 +2028,48 @@ def test_config_hash_frozen_golden() -> None:
 
 
 @pytest.mark.unit
+def test_config_hash_changes_when_only_a_generated_choice_title_changes(
+    config_factory,
+    mock_http_transport: MockHTTPTransport,
+) -> None:
+    """Member annotations participate in the local validated manifest hash."""
+    from dualeai.events.client import CloudEventsClient
+    from dualeai.lifecycle import LifecycleManager
+
+    async def no_client() -> CloudEventsClient:
+        raise AssertionError("config_hash must not need the events client")
+
+    sdk = DualeAISDK(
+        config=config_factory(agent_id="agent_capability_choice"), transport=mock_http_transport, auto_start=False
+    )
+
+    @tool(sdk=sdk, description="Choose a capability.", timeout=timedelta(seconds=30))
+    async def choose(capability: Capability | None) -> str:
+        return "selected"
+
+    registered = sdk.registered_tools[0]
+    manifest = [registered]
+    lifecycle = LifecycleManager(
+        ensure_events_client=no_client,
+        manifest=lambda: manifest,
+        agent_id=None,
+        auto_start=False,
+    )
+    original_hash = lifecycle.config_hash()
+    assert lifecycle.config_hash() == original_hash
+
+    changed = registered.model_dump(mode="json", by_alias=True)
+    choices = changed["tool"]["parameters"]["$defs"]["Capability"]["oneOf"]
+    general = next(choice for choice in choices if choice["const"] == "math")
+    general["title"] = "Math alternative title"
+    manifest[0] = RegisteredTool.model_validate(changed)
+
+    changed_hash = lifecycle.config_hash()
+    assert changed_hash != original_hash
+    assert lifecycle.config_hash() == changed_hash
+
+
+@pytest.mark.unit
 async def test_tool_exceeding_timeout_yields_error_and_cancels_callable(
     config_factory,
     mock_http_transport: MockHTTPTransport,
@@ -2184,11 +2100,11 @@ async def test_tool_exceeding_timeout_yields_error_and_cancels_callable(
         # Far-future deadline so the 0.05s tool timeout (not the deadline) fires.
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
-    mock_http_transport.inject_event("task_slow", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_slow_001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_slow", tool_use)
+    await sdk._execute_tool_use("task_slow_001", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_slow")
+    result = _submitted_tool_result(mock_http_transport, "task_slow_001")
     assert isinstance(result, BridgeToolResultError)
     assert cancelled["seen"] is True  # wait_for cancelled the callable at its await
 
@@ -2198,7 +2114,7 @@ async def test_tool_scalar_return_is_wrapped_as_result(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A non-mapping JSON return wraps as {"result": value} instead of erroring (RFC-121 DX #7)."""
+    """A non-mapping JSON return wraps as {"result": value}."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -2230,7 +2146,7 @@ async def test_sync_tool_executes_via_thread_offload(
     config_factory,
     mock_http_transport: MockHTTPTransport,
 ) -> None:
-    """A plain (sync) @tool executes end-to-end, offloaded to a worker thread (RFC-121 DX #3)."""
+    """A plain synchronous @tool runs in a worker thread."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -2247,11 +2163,11 @@ async def test_sync_tool_executes_via_thread_offload(
         input={"gate_id": "north"},
         deadline_at=datetime.now(timezone.utc) + timedelta(seconds=10),
     )
-    mock_http_transport.inject_event("task_sync", mock_http_transport.create_task_completed_event())
+    mock_http_transport.inject_event("task_sync_001", mock_http_transport.create_task_completed_event())
 
-    await sdk._execute_tool_use("task_sync", tool_use)
+    await sdk._execute_tool_use("task_sync_001", tool_use)
 
-    result = _submitted_tool_result(mock_http_transport, "task_sync")
+    result = _submitted_tool_result(mock_http_transport, "task_sync_001")
     assert result.type == "success"
     assert isinstance(result, BridgeToolResultSuccess)
     assert result.output == {"gate_id": "north", "state": "closed"}
@@ -2270,7 +2186,7 @@ async def test_expired_deadline_fast_fails_without_calling_tool(
     mock_http_transport: MockHTTPTransport,
     retries: int,
 ) -> None:
-    """An expired router deadline prevents invocation regardless of retry budget."""
+    """An expired request deadline prevents invocation regardless of retry budget."""
     config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
     sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
     await sdk._ensure_events_client()
@@ -2406,7 +2322,6 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submission(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
@@ -2414,7 +2329,7 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
         nonlocal submit_attempts
         submit_attempts += 1
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             if submit_attempts == 2:
@@ -2442,12 +2357,158 @@ async def test_duplicate_tool_use_delivery_does_not_reexecute_customer_tool(
         [tool_event, tool_event, mock_http_transport.create_task_completed_event()],
     )
 
-    response = await ask(action="Close the security gate", request_id="task_replay", sdk=sdk)
+    response = await ask(instruction="Close the security gate", task_id="task_replay", sdk=sdk)
     await response.model()
     await asyncio.wait_for(both_submissions_finished.wait(), timeout=1)
 
     assert calls == 1
     assert submit_attempts == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("resubmission_fails", "expected_submissions"),
+    [(False, 2), (True, 3)],
+    ids=["resubmission-succeeds", "resubmission-fails"],
+)
+async def test_redeliveries_during_a_resubmission_start_no_submission_of_their_own(
+    config_factory,
+    mock_http_transport: MockHTTPTransport,
+    monkeypatch: pytest.MonkeyPatch,
+    resubmission_fails: bool,
+    expected_submissions: int,
+) -> None:
+    """Redeliveries that arrive while a cached result is resubmitted are answered by that resubmission.
+
+    Every submission reads the Task's stream to its terminal and can replay later tool.use events, so one
+    resubmission per redelivery would multiply with each replay. One more resubmission answers the absorbed
+    redeliveries only when the resubmission in flight fails.
+    """
+    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
+    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
+    executions = 0
+    cursors: list[str | None] = []
+    first_submission_finished = asyncio.Event()
+    resubmission_started = asyncio.Event()
+    release_resubmission = asyncio.Event()
+
+    async def answer_submission(
+        request: BridgeToolResultsRequest,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[BridgeSSEEvent]:
+        cursors.append(last_event_id)
+        number = len(cursors)
+        try:
+            if number == 2:
+                resubmission_started.set()
+                await release_resubmission.wait()
+                if resubmission_fails:
+                    raise DualeAIConnectionError("resubmission failed")
+            yield mock_http_transport.create_task_completed_event()
+        finally:
+            if number == 1:
+                first_submission_finished.set()
+
+    monkeypatch.setattr(mock_http_transport, "submit_tool_results", answer_submission)
+
+    @tool(sdk=sdk, description="Close a named security gate.", timeout=timedelta(seconds=10))
+    async def close_security_gate(gate_id: str) -> dict[str, str]:
+        nonlocal executions
+        executions += 1
+        return {"gate_id": gate_id, "state": "closed"}
+
+    tool_event = mock_http_transport.create_tool_use_event(
+        tool_call_id="call_coalesced",
+        name="close_security_gate",
+        tool_input={"gate_id": "north"},
+    )
+    mock_http_transport.inject_event("task_coalesced", tool_event)
+    response = await ask(instruction="Close the security gate", task_id="task_coalesced", sdk=sdk)
+    await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
+
+    mock_http_transport.inject_event("task_coalesced", tool_event)
+    await asyncio.wait_for(resubmission_started.wait(), timeout=1)
+    mock_http_transport.inject_events(
+        "task_coalesced",
+        [tool_event, tool_event, tool_event, mock_http_transport.create_task_completed_event()],
+    )
+    await response.model()
+    release_resubmission.set()
+    while sdk._tool_result_tasks:
+        await asyncio.wait_for(asyncio.gather(*sdk._tool_result_tasks, return_exceptions=True), timeout=1)
+
+    assert cursors == [tool_event.id] * expected_submissions
+    assert executions == 1
+
+
+@pytest.mark.unit
+async def test_a_redelivery_after_the_resubmission_in_flight_gave_up_starts_the_next_one(
+    config_factory,
+    mock_http_transport: MockHTTPTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redelivery that runs once a failed resubmission has given up is not absorbed by it.
+
+    Several streams deliver the same tool.use, and the event loop can run another stream's delivery after the
+    resubmission's last attempt failed but before that resubmission's callbacks run. Nothing would answer that
+    delivery if the finished resubmission still counted as in flight.
+    """
+    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
+    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
+    executions = 0
+    cursors: list[str | None] = []
+    first_submission_finished = asyncio.Event()
+    resubmission_started = asyncio.Event()
+    release_resubmission = asyncio.Event()
+    tool_event = mock_http_transport.create_tool_use_event(
+        tool_call_id="call_given_up",
+        name="close_security_gate",
+        tool_input={"gate_id": "north"},
+    )
+    tool_use = tool_event.data
+    assert isinstance(tool_use, BridgeToolUseResponse)
+
+    async def answer_submission(
+        request: BridgeToolResultsRequest,
+        *,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[BridgeSSEEvent]:
+        cursors.append(last_event_id)
+        number = len(cursors)
+        try:
+            if number == 2:
+                resubmission_started.set()
+                await release_resubmission.wait()
+                # Another stream's delivery of the same tool.use is the next callback the loop runs.
+                asyncio.get_running_loop().call_soon(sdk._schedule_tool_use, request.task_id, tool_use, tool_event.id)
+                raise DualeAIConnectionError("resubmission failed")
+            yield mock_http_transport.create_task_completed_event()
+        finally:
+            if number == 1:
+                first_submission_finished.set()
+
+    monkeypatch.setattr(mock_http_transport, "submit_tool_results", answer_submission)
+
+    @tool(sdk=sdk, description="Close a named security gate.", timeout=timedelta(seconds=10))
+    async def close_security_gate(gate_id: str) -> dict[str, str]:
+        nonlocal executions
+        executions += 1
+        return {"gate_id": gate_id, "state": "closed"}
+
+    mock_http_transport.inject_event("task_given_up", tool_event)
+    response = await ask(instruction="Close the security gate", task_id="task_given_up", sdk=sdk)
+    await asyncio.wait_for(first_submission_finished.wait(), timeout=1)
+    mock_http_transport.inject_event("task_given_up", tool_event)
+    await asyncio.wait_for(resubmission_started.wait(), timeout=1)
+    release_resubmission.set()
+    while len(cursors) < 3 and sdk._tool_result_tasks:
+        await asyncio.wait_for(asyncio.gather(*sdk._tool_result_tasks, return_exceptions=True), timeout=1)
+    mock_http_transport.inject_event("task_given_up", mock_http_transport.create_task_completed_event())
+    await response.model()
+
+    assert cursors == [tool_event.id] * 3
+    assert executions == 1
 
 
 @pytest.mark.unit
@@ -2469,9 +2530,9 @@ async def test_per_task_tool_use_is_not_auto_executed_as_registered_tool(
     mock_http_transport.inject_event("task_per_task", mock_http_transport.create_task_completed_event())
 
     response = await ask(
-        action="Use the per-task lookup",
+        instruction="Use the per-task lookup",
         streaming=True,
-        request_id="task_per_task",
+        task_id="task_per_task",
         sdk=sdk,
     )
     await response.model()
@@ -2493,13 +2554,12 @@ async def test_tool_results_submission_resumes_after_triggering_tool_use_event(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submission(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             submission_finished.set()
@@ -2533,8 +2593,8 @@ async def test_tool_results_submission_resumes_after_triggering_tool_use_event(
     )
 
     response = await ask(
-        action="Close the security gate",
-        request_id="task_replay_after_result",
+        instruction="Close the security gate",
+        task_id="task_replay_after_result",
         sdk=sdk,
     )
     await response.model()
@@ -2563,13 +2623,12 @@ async def test_continuation_tool_use_and_results_stay_keyed_to_public_child(
     original_submit = mock_http_transport.submit_tool_results
 
     async def observe_submission(
-        task_id: str,
         request: BridgeToolResultsRequest,
         *,
         last_event_id: str | None = None,
     ) -> AsyncIterator[BridgeSSEEvent]:
         try:
-            async for event in original_submit(task_id, request, last_event_id=last_event_id):
+            async for event in original_submit(request, last_event_id=last_event_id):
                 yield event
         finally:
             submission_finished.set()
@@ -2585,10 +2644,12 @@ async def test_continuation_tool_use_and_results_stay_keyed_to_public_child(
         return {"gate_id": gate_id, "state": "closed"}
 
     parent_task_id = "parent-public-task"
-    parent = await ask(action="Start", request_id=parent_task_id, sdk=sdk)
+    parent = await ask(instruction="Start", task_id=parent_task_id, sdk=sdk)
     mock_http_transport.inject_event(parent_task_id, mock_http_transport.create_task_completed_event())
     await parent.model()
-    response = await parent.next(message="Close the gate", deadline=datetime.now(timezone.utc) + timedelta(minutes=1))
+    response = await parent.next(
+        instruction="Close the gate", deadline=datetime.now(timezone.utc) + timedelta(minutes=1)
+    )
     child_task_id = response.task_id
     tool_event = mock_http_transport.create_tool_use_event(
         tool_call_id="call_continuation_child",

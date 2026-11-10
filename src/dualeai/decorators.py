@@ -1,8 +1,7 @@
-"""Decorators for defining agents, tools, and activities with dependency injection.
+"""Decorators for defining tools and activities with dependency injection.
 
-All registration state lives on the SDK instance (``sdk.agents``,
-``sdk.registered_tools``); hosted-tool lifecycle registration is the
-tools-only Bridge manifest published by sdk.serve().
+Tool registration state lives on the SDK instance; hosted-tool lifecycle
+registration publishes its Tool manifest through ``sdk.serve()``.
 """
 
 from __future__ import annotations
@@ -13,8 +12,6 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, overload
 
-from dualeai.messages import AgentConfig
-from dualeai.models.skill_enum import SkillEnum
 from dualeai.tools._util import callable_name
 
 if TYPE_CHECKING:
@@ -28,69 +25,6 @@ def _ensure_async_function(func: Callable[..., object], kind: str) -> None:
     """Reject non-async decorators without changing static callable typing."""
     if not inspect.iscoroutinefunction(func):
         raise TypeError(f"{kind} function {callable_name(func)} must be async")
-
-
-def _callable_module(func: Callable[..., object]) -> str:
-    """Return the defining module segment when Python exposes one."""
-    if inspect.isfunction(func) and func.__module__:
-        return func.__module__.split(".")[-1]
-    module_name = type(func).__module__
-    return module_name.split(".")[-1] if module_name else "unknown"
-
-
-def agent(
-    name: str,
-    org: set[str] | None = None,
-    capabilities: list[SkillEnum] | None = None,
-    *,
-    sdk: DualeAISDK | None = None,
-) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
-    """Legacy decorator that records local agent-function metadata.
-
-    This metadata is not published by the hosted-tool lifecycle. New hosted
-    integrations should declare ``@tool`` functions and call ``sdk.serve()``.
-
-    Args:
-        name: Agent name
-        org: Organization hierarchy (e.g., {"Finance", "Accounting"})
-        capabilities: Legacy local skill metadata; not part of the hosted-tool lifecycle manifest
-        sdk: SDK instance that stores the local metadata. Required.
-
-    Returns:
-        The original async behavior, with local metadata registered on the SDK.
-
-    Note:
-        Hosted-tool lifecycle registration uses tools declared with @tool and
-        published by sdk.serve(); this metadata is not sent as the manifest.
-    """
-
-    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
-        _ensure_async_function(func, "Agent")
-        if sdk is None:
-            raise ValueError(
-                "SDK instance required. Pass sdk parameter to @agent decorator. Example: @agent('MyAgent', sdk=my_sdk)"
-            )
-        agent_sdk = sdk
-        function_name = callable_name(func)
-
-        agent_config = AgentConfig(
-            name=name,
-            org=list(org or set()),
-            function_name=function_name,
-            capabilities=capabilities or [],
-        )
-
-        module_name = _callable_module(func)
-        agent_id = f"{module_name}_{function_name}"
-        agent_sdk.register_agent(agent_id, func, agent_config)
-
-        @functools.wraps(func)
-        async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            return await func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
 
 
 @overload
@@ -118,18 +52,33 @@ def activity(
     Callable[[Callable[P, Awaitable[CacheableValue]]], Callable[P, Awaitable[CacheableValue]]]
     | Callable[P, Awaitable[CacheableValue]]
 ):
-    """Cache an async activity result through a specific SDK instance.
+    """Cache and retry an async activity through a specific SDK instance.
 
     Caching can avoid a repeated execution for the same cache key. It does not
-    make the underlying operation idempotent.
+    make the underlying operation idempotent. Every ordinary ``Exception`` is
+    eligible for retry, so a side-effecting activity must be safe for up to
+    ``max_retries + 1`` executions.
+
+    The decorator requires ``async def`` even though
+    :meth:`DualeAISDK.execute_activity <dualeai.sdk.DualeAISDK.execute_activity>`
+    also accepts synchronous callables. Omitting ``cache_ttl`` here selects one
+    hour; passing ``None`` directly to ``execute_activity`` instead stores
+    without backend expiry.
 
     Args:
-        cache_ttl: How long to cache results (default: 1 hour)
-        max_retries: Retries after the initial activity attempt.
+        cache_ttl: How long to cache results. Omission or ``None`` selects one
+            hour for the decorator.
+        max_retries: Retries after the initial activity attempt. Use a
+            non-negative integer; activity retry counts are not proactively
+            validated.
         sdk: SDK instance to use. Required.
 
     Returns:
-        Decorated function with caching and retry behavior
+        Decorated async function with caching and retry behavior.
+
+    Raises:
+        TypeError: When the decorated callable is not asynchronous.
+        ValueError: When ``sdk`` is omitted.
     """
     if not isinstance(cache_ttl, timedelta) and callable(cache_ttl):
         return _decorate_activity(cache_ttl, timedelta(hours=1), max_retries, sdk)
@@ -173,7 +122,7 @@ def tool(
     """Declare a customer-hosted tool on an SDK instance.
 
     The decorated callable runs in your process when the platform language model
-    calls the tool inside a conversation rooted at this agent.
+    calls the tool inside a Task that runs under this agent.
 
     - ``async def`` or a plain ``def`` — a sync tool runs in a worker thread so a
       blocking call never stalls the SDK event loop. Parameters are validated

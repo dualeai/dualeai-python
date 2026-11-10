@@ -1,4 +1,8 @@
-"""Custom exceptions for Duale AI SDK with rich context and debugging support."""
+"""Package-defined exceptions and their structured context values.
+
+Public SDK calls can also raise built-in exceptions, Pydantic validation
+errors, and ``asyncio.CancelledError`` as documented by each operation.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +11,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import TypeAdapter
 
-from dualeai.constants import ErrorMessages
 from dualeai.messages import ErrorContext
 from dualeai.models.problem_details import ProblemDetails
-from dualeai.utils import get_exception_type_name
 
 if TYPE_CHECKING:
     from dualeai.models.library import LibraryDocumentCreateResponse
@@ -42,7 +44,7 @@ def _build_error_context(context: ErrorContextInput, **additional_fields: object
 
 
 class DualeAIError(Exception):
-    """Base exception for all Duale AI SDK errors with context support."""
+    """Base class for package-defined SDK exceptions with structured context."""
 
     @staticmethod
     def _create_default_context() -> ErrorContext:
@@ -67,21 +69,20 @@ class DualeAIError(Exception):
         """
         super().__init__(message)
         self.message = message
-        # RFC 9457 ProblemDetails attached when the SDK lifts an error event
-        # from the bridge `task.error` SSE channel (see `response._exception_from_terminal`).
+        # RFC 9457 ProblemDetails attached when the SDK lifts an error response
+        # or a `task.error` SSE event (see `response._exception_from_terminal`).
         # `None` when the exception originates client-side (validation, transport,
         # config).
         #
-        # Cloudflare RFC 9457 §3.2 extension fields live on the envelope:
+        # Platform extension fields live on the ProblemDetails envelope:
         #     exc.problem_details.retryable
         #     exc.problem_details.retry_after_seconds
         #     exc.problem_details.owner_action_required
         #     exc.problem_details.error_category
         #
         # Per-error context (field path, ai_hints) lives on
-        # `exc.problem_details.errors[i]`. Do NOT read the ext fields from
-        # `errors[i]` — they are envelope-only (older SDK docs incorrectly
-        # placed them under `errors[0]`).
+        # `exc.problem_details.errors[i]`. Envelope extension fields are not
+        # fields of `errors[i]`.
         self.problem_details: ProblemDetails | None = None
 
         # Build context with additional fields if provided
@@ -107,7 +108,11 @@ class DualeAIError(Exception):
 
 
 class BusinessError(DualeAIError):
-    """Raised when a business rule is violated."""
+    """A non-authentication client request was rejected by the platform.
+
+    This includes business-rule and request-validation responses; inspect
+    ``problem_details`` and its ``error_code`` when the server supplied them.
+    """
 
 
 class LibraryUploadError(DualeAIError):
@@ -147,218 +152,28 @@ class LibraryUploadError(DualeAIError):
         return enriched
 
 
-class RoutingError(DualeAIError):
-    """Raised when agent routing fails."""
-
-    def __init__(
-        self,
-        message: str,
-        skills: list[str] | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize RoutingError.
-
-        Args:
-            message: Error message
-            skills: Skills that were required for routing
-            context: Additional context
-        """
-        super().__init__(message, context, required_skills=skills)
-        self.skills = skills
-
-
-class TaskTimeoutError(DualeAIError):
-    """Raised when a task execution times out."""
-
-    def __init__(
-        self,
-        message: str,
-        task_id: str | None = None,
-        timeout_seconds: float | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize TaskTimeoutError.
-
-        Args:
-            message: Error message
-            task_id: ID of the task that timed out
-            timeout_seconds: Timeout value in seconds
-            context: Additional context
-        """
-        super().__init__(message, context, task_id=task_id, timeout_seconds=timeout_seconds)
-        self.task_id = task_id
-        self.timeout_seconds = timeout_seconds
-
-
-class ActivityTimeoutError(TaskTimeoutError):
-    """Raised when an activity execution times out."""
-
-    def __init__(
-        self,
-        message: str,
-        activity_name: str | None = None,
-        timeout_seconds: float | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize ActivityTimeoutError.
-
-        Args:
-            message: Error message
-            activity_name: Name of the activity that timed out
-            timeout_seconds: Timeout value in seconds
-            context: Additional context
-        """
-        super().__init__(message, task_id=None, timeout_seconds=timeout_seconds, context=context)
-        self.activity_name = activity_name
-
-
-class CacheError(DualeAIError):
-    """Raised when cache operations fail."""
-
-
-class CacheConnectionError(CacheError):
-    """Raised when cache connection fails."""
-
-    def __init__(
-        self,
-        message: str,
-        backend_type: str | None = None,
-        connection_url: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize CacheConnectionError.
-
-        Args:
-            message: Error message
-            backend_type: Type of cache backend (redis, sqlite)
-            connection_url: Connection URL (sanitized)
-            context: Additional context
-        """
-        # Sanitize URL to remove credentials
-        sanitized_url = None
-        if connection_url:
-            sanitized_url = connection_url.split("@")[-1] if "@" in connection_url else connection_url
-
-        super().__init__(message, context, backend_type=backend_type, connection_url=sanitized_url)
-        self.backend_type = backend_type
-
-
-class CacheSerializationError(CacheError):
-    """Raised when cache serialization/deserialization fails."""
-
-    def __init__(
-        self,
-        message: str,
-        cache_key: str | None = None,
-        data_type: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize CacheSerializationError.
-
-        Args:
-            message: Error message
-            cache_key: Cache key that failed
-            data_type: Type of data being serialized
-            context: Additional context
-        """
-        super().__init__(message, context, cache_key=cache_key, data_type=data_type)
-        self.cache_key = cache_key
-
-
 class MessagingError(DualeAIError):
-    """Raised when messaging operations fail."""
-
-
-class StreamingError(MessagingError):
-    """Streaming quality degraded beyond acceptable threshold.
-
-    Raised when message drop percentage exceeds configured limit,
-    indicating network issues or consumer performance problems.
-    """
-
-
-class MessagingConnectionError(MessagingError):
-    """Raised when transport connection fails."""
-
-    def __init__(
-        self,
-        message: str,
-        endpoint: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize MessagingConnectionError.
-
-        Args:
-            message: Error message
-            endpoint: Transport endpoint URL
-            context: Additional context
-        """
-        super().__init__(message, context, endpoint=endpoint)
-        self.endpoint = endpoint
+    """Base class for package-defined transport and streaming errors."""
 
 
 class DualeAIConnectionError(MessagingError):
-    """Raised when connection to HTTP bridge or other services fails."""
+    """Raised when transport fails or a service response cannot be used."""
 
 
 class DualeAIAuthError(DualeAIError):
-    """Raised when authentication fails (invalid/expired API key, missing credentials)."""
+    """An HTTP request was rejected as unauthorized.
 
-
-class TransportUnavailableError(MessagingConnectionError):
-    """Raised when transport backend is unavailable or connection is lost.
-
-    Provides user-friendly error messages for common connection issues.
+    Missing or malformed local configuration fails earlier with Pydantic
+    validation (or ``RuntimeError`` when the SDK loads defaults).
     """
-
-    def __init__(
-        self,
-        original_error: Exception | None = None,
-        endpoint: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize TransportUnavailableError with helpful context.
-
-        Args:
-            original_error: The original transport error
-            endpoint: Transport endpoint that failed
-            context: Additional error context
-        """
-        # Parse the original error to provide helpful guidance
-        error_str = str(original_error) if original_error else "Unknown error"
-
-        # Build user-friendly error message based on common errors
-        if "Connect call failed" in error_str or "Connection refused" in error_str:
-            message = ErrorMessages.CONNECTION_FAILED + " Please try again later."
-        elif error_str and "connection closed" in error_str.lower():
-            message = ErrorMessages.CONNECTION_LOST
-        elif error_str and "empty response from server" in error_str.lower():
-            message = "Service is not responding. The service may be starting up. Please wait and retry."
-        elif "unexpected EOF" in error_str:
-            message = ErrorMessages.CONNECTION_INTERRUPTED
-        else:
-            message = "Unable to communicate with service. Please try again later."
-
-        context_fields = _build_error_context(context)
-        context_fields["metadata"] = {
-            "original_error": error_str,
-            "error_type": get_exception_type_name(original_error) if original_error else "Unknown",
-            "endpoint": endpoint or "unknown",
-        }
-
-        super().__init__(message, endpoint=endpoint, context=context_fields)
-        self.original_error = original_error
-
-
-class DualeAITimeoutError(TaskTimeoutError):
-    """Raised when an operation times out."""
 
 
 class TaskStoppedError(DualeAIError):
-    """Raised when an agent stopped the task before it produced a result.
+    """Raised when ``AgentResponse.model()`` observes ``task.stopped``.
 
     A stop is not a failure of the task, so it carries no problem details — only
-    the reason the caller supplied.
+    the reason supplied by the terminal event. The SDK does not infer whether
+    the initiating stop request came from this process or another source.
     """
 
     def __init__(
@@ -380,52 +195,6 @@ class TaskStoppedError(DualeAIError):
         super().__init__(f"Task stopped: {reason}", context_fields)
         self.reason = reason
         self.task_id = task_id
-
-
-class AgentRegistrationError(DualeAIError):
-    """Raised when agent registration fails."""
-
-    def __init__(
-        self,
-        message: str,
-        agent_id: str | None = None,
-        agent_name: str | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize AgentRegistrationError.
-
-        Args:
-            message: Error message
-            agent_id: ID of the agent
-            agent_name: Name of the agent
-            context: Additional context
-        """
-        super().__init__(message, context, agent_id=agent_id, agent_name=agent_name)
-        self.agent_id = agent_id
-        self.agent_name = agent_name
-
-
-class TaskSubmissionError(DualeAIError):
-    """Raised when task submission fails."""
-
-    def __init__(
-        self,
-        message: str,
-        action: str | None = None,
-        skills: list[str] | None = None,
-        context: ErrorContextInput = None,
-    ):
-        """Initialize TaskSubmissionError.
-
-        Args:
-            message: Error message
-            action: Action that was being submitted
-            skills: Skills required for the task
-            context: Additional context
-        """
-        super().__init__(message, context, action=action, required_skills=skills)
-        self.action = action
-        self.skills = skills
 
 
 class ConfigurationError(DualeAIError):

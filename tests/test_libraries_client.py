@@ -21,15 +21,11 @@ from dualeai.events.http_transport import (
 from dualeai.exceptions import BusinessError, DualeAIAuthError, DualeAIConnectionError
 from dualeai.models.library import (
     LibraryCreateRequest,
-    LibraryDeleteRequest,
-    LibraryDocumentDeleteRequest,
+    LibraryDocumentCreateOperationRequest,
     LibraryDocumentGetRequest,
-    LibraryDocumentListRequest,
-    LibraryGetRequest,
+    LibraryDocumentUploadRequest,
     LibraryListResponse,
-    LibraryPatchRequest,
     LibraryResponseDocumentStatus,
-    LibraryUpdateRequest,
     PublicIndexedDocument,
 )
 from dualeai.models.problem_details import ProblemDetails
@@ -42,40 +38,8 @@ _BASE_URL = "https://api.test.duale.ai"
 _TENANT_ID = "tenant-test"
 _LIBRARY_ID = "018f35a8-2e90-7f2c-a6bb-9426f9c1f401"
 _DOCUMENT_ID = "018f35a8-2e90-7f2c-a6bb-9426f9c1f403"
-_DATE = "2026-06-12T10:00:00Z"
 _LIBRARY_UUID = UUID(_LIBRARY_ID)
 _DOCUMENT_UUID = UUID(_DOCUMENT_ID)
-_LIBRARIES_URL = f"{_BASE_URL}/libraries/v1/tenants/{_TENANT_ID}"
-
-
-def _library_response(*, path: str = "projects/contracts") -> dict[str, object]:
-    return {
-        "id": _LIBRARY_ID,
-        "path": path,
-        "tags": {},
-        "updated_by": "user:test",
-        "updated_at": _DATE,
-        "created_at": _DATE,
-        "deleted_at": None,
-    }
-
-
-def _document_response() -> dict[str, object]:
-    return {
-        "document_id": _DOCUMENT_ID,
-        "library_id": _LIBRARY_ID,
-        "filename": "contract.pdf",
-        "description": "Contract",
-        "content_type": None,
-        "size_bytes": 10,
-        "page_count": None,
-        "created_at": _DATE,
-        "deleted_at": None,
-        "status": "ready",
-        "progress_pct": 100,
-        "failure": None,
-        "tags": {},
-    }
 
 
 async def _connected_clients() -> tuple[LibrariesClient, MockHTTPTransport]:
@@ -188,81 +152,6 @@ async def test_first_concurrent_library_calls_share_one_connection(
     assert connect_calls == 1
 
 
-async def test_core_library_crud_crosses_the_real_transport_boundary() -> None:
-    sdk = DualeAISDK(
-        config=DualeAIConfig(endpoint=_BASE_URL, token=_TOKEN, tenant_id=_TENANT_ID),
-        auto_start=False,
-    )
-    item_url = f"{_LIBRARIES_URL}/{_LIBRARY_ID}"
-    with aioresponses() as mocked:
-        mocked.post(_LIBRARIES_URL, status=201, payload=_library_response())
-        mocked.get(_LIBRARIES_URL, status=200, payload={"libraries": [_library_response()]})
-        mocked.get(item_url, status=200, payload=_library_response())
-        mocked.patch(item_url, status=200, payload=_library_response(path="projects/renamed"))
-        mocked.delete(item_url, status=204)
-        try:
-            created = await sdk.libraries.create(LibraryCreateRequest(path="projects/contracts"))
-            listed = await sdk.libraries.list()
-            fetched = await sdk.libraries.get(LibraryGetRequest(library_id=_LIBRARY_UUID))
-            updated = await sdk.libraries.update(
-                LibraryUpdateRequest(
-                    library_id=_LIBRARY_UUID,
-                    patch=LibraryPatchRequest(path="projects/renamed"),
-                )
-            )
-            await sdk.libraries.delete(LibraryDeleteRequest(library_id=_LIBRARY_UUID))
-        finally:
-            await sdk.cleanup()
-
-    assert created.path == "projects/contracts"
-    assert [str(library.id) for library in listed.libraries] == [_LIBRARY_ID]
-    assert str(fetched.id) == _LIBRARY_ID
-    assert updated.path == "projects/renamed"
-
-
-async def test_core_document_reads_and_delete_cross_the_real_transport_boundary() -> None:
-    sdk = DualeAISDK(
-        config=DualeAIConfig(endpoint=_BASE_URL, token=_TOKEN, tenant_id=_TENANT_ID),
-        auto_start=False,
-    )
-    documents_url = f"{_LIBRARIES_URL}/{_LIBRARY_ID}/documents"
-    document_url = f"{documents_url}/{_DOCUMENT_ID}"
-    with aioresponses() as mocked:
-        mocked.get(
-            f"{documents_url}?limit=100",
-            status=200,
-            payload={"documents": [_document_response()], "next_cursor": None},
-        )
-        mocked.get(document_url, status=200, payload=_document_response())
-        mocked.delete(document_url, status=204)
-        try:
-            documents = await sdk.libraries.list_documents(
-                LibraryDocumentListRequest(
-                    library_id=_LIBRARY_UUID,
-                    limit=100,
-                    cursor=None,
-                )
-            )
-            document = await sdk.libraries.get_document(
-                LibraryDocumentGetRequest(
-                    library_id=_LIBRARY_UUID,
-                    document_id=_DOCUMENT_UUID,
-                )
-            )
-            await sdk.libraries.delete_document(
-                LibraryDocumentDeleteRequest(
-                    library_id=_LIBRARY_UUID,
-                    document_id=_DOCUMENT_UUID,
-                )
-            )
-        finally:
-            await sdk.cleanup()
-
-    assert [str(item.document_id) for item in documents.documents] == [_DOCUMENT_ID]
-    assert documents.next_cursor is None
-    assert str(document.document_id) == _DOCUMENT_ID
-
-
 @pytest.mark.parametrize(
     ("transport_error_type", "sdk_error_type"),
     [
@@ -310,10 +199,16 @@ async def test_upload_targets_explicit_library_and_returns_keyed_receipt(
 
     assert list(receipts) == [attachment.key]
     assert str(receipts[attachment.key].library_id) == _LIBRARY_ID
-    assert [(request["method"], request["path"]) for request in transport.get_requests()] == [
-        ("POST", f"/libraries/v1/tenants/{_TENANT_ID}/document-uploads"),
-        ("POST", f"/libraries/v1/tenants/{_TENANT_ID}/{_LIBRARY_ID}/documents"),
-    ]
+    requests = transport.get_requests()
+    assert len(requests) == 2
+    upload_request = requests[0]["request"]
+    document_request = requests[1]["request"]
+    assert isinstance(upload_request, LibraryDocumentUploadRequest)
+    assert upload_request.size_bytes == attachment.size
+    assert isinstance(document_request, LibraryDocumentCreateOperationRequest)
+    assert document_request.library_id == _LIBRARY_UUID
+    assert document_request.document.filename == attachment.filename
+    assert document_request.document.description == attachment.description
 
 
 async def test_empty_upload_does_not_connect() -> None:

@@ -51,7 +51,7 @@ class TestUnitModelExtraction:
         task_id = "test-completion-only"
         inject_llm_completion(mock_transport, task_id, completion="User profile retrieved")
 
-        response = await ask(action="Get user profile", request_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="Get user profile", task_id=task_id, sdk=minimal_mock_sdk)
         assert response.task_id == task_id
 
         result = await response.model()
@@ -65,7 +65,7 @@ class TestUnitModelExtraction:
         task_id = "test-validated-data"
         inject_llm_completion(mock_transport, task_id, validated_data=validated_data)
 
-        response = await ask(action="Extract structured data", request_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="Extract structured data", task_id=task_id, sdk=minimal_mock_sdk)
 
         result = await response.model()
         assert result == validated_data
@@ -79,9 +79,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, validated_data=validated_data)
 
         response = await ask(
-            action="Get user profile",
+            instruction="Get user profile",
             res=UserProfile,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -100,9 +100,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, validated_data=invalid_data)
 
         response = await ask(
-            action="Get user profile",
+            instruction="Get user profile",
             res=UserProfile,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -118,9 +118,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, completion=json_string)
 
         response = await ask(
-            action="Get product data",
+            instruction="Get product data",
             res=Product,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -137,7 +137,7 @@ class TestUnitModelExtraction:
         task_id = "test-empty-llm-result"
         inject_llm_completion(mock_transport, task_id)  # completion=None, validated_data=None
 
-        response = await ask(action="Empty result", request_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="Empty result", task_id=task_id, sdk=minimal_mock_sdk)
 
         result = await response.model()
         assert isinstance(result, LLMResult)
@@ -154,9 +154,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, completion="42")
 
         response = await ask(
-            action="Count items",
+            instruction="Count items",
             res=int,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -172,9 +172,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, completion="3.14159")
 
         response = await ask(
-            action="Calculate average",
+            instruction="Calculate average",
             res=float,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -190,9 +190,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, validated_data={"value": True})
 
         response = await ask(
-            action="Is available?",
+            instruction="Is available?",
             res=bool,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -208,9 +208,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, validated_data={"summary": "Test summary"})
 
         response = await ask(
-            action="Generate summary",
+            instruction="Generate summary",
             res=str,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -227,7 +227,7 @@ class TestUnitModelExtraction:
         task_id = "test-no-expected-type"
         inject_llm_completion(mock_transport, task_id, validated_data=validated_data)
 
-        response = await ask(action="Free-form task", request_id=task_id, sdk=minimal_mock_sdk)
+        response = await ask(instruction="Free-form task", task_id=task_id, sdk=minimal_mock_sdk)
 
         result = await response.model()
         assert result == validated_data
@@ -253,9 +253,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, validated_data=validated_data)
 
         response = await ask(
-            action="Get user with address",
+            instruction="Get user with address",
             res=UserWithAddress,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -275,9 +275,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, completion=invalid_json)
 
         response = await ask(
-            action="Get product data",
+            instruction="Get product data",
             res=Product,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 
@@ -293,9 +293,9 @@ class TestUnitModelExtraction:
         inject_llm_completion(mock_transport, task_id, validated_data=validated_data)
 
         response = await ask(
-            action="Get user",
+            instruction="Get user",
             res=UserProfile,
-            request_id=task_id,
+            task_id=task_id,
             sdk=minimal_mock_sdk,
         )
 

@@ -1,23 +1,13 @@
-"""HTTP/SSE client for SDK communication (RFC-051).
+"""Typed HTTP/SSE client used by the public SDK facade.
 
-This module provides the primary SDK interface to the platform via HTTP/SSE bridge.
-All communication is tenant-isolated through API authentication.
-
-Key Features:
-- HTTP/SSE streaming for real-time updates
-- Tenant isolation via API token
-- Auto-reconnect with Last-Event-ID
-- Clean dependency injection for testing
-
-Design Decisions:
-- SSE for streaming (simpler than WebSockets, native browser support)
-- Auto-reconnect handled at transport layer
-- Bridge models only (RFC-051 compliant)
+This client submits typed requests and consumes Server-Sent Events. The
+transport owns protected HTTP calls, reconnects, and ``Last-Event-ID`` handling.
+An injected transport replaces that network boundary.
 """
 
 import types
 from collections.abc import AsyncIterator, Callable
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 import structlog
 from typing_extensions import Self
@@ -31,6 +21,7 @@ from dualeai.events.http_transport import (
 )
 from dualeai.events.transport import BridgeTaskRequest, HTTPTransportProtocol
 from dualeai.exceptions import BusinessError, DualeAIAuthError, DualeAIConnectionError, DualeAIError
+from dualeai.messages import ErrorContext
 from dualeai.models.bridge import (
     AgentDeregistrationMessage,
     AgentHeartbeatMessage,
@@ -46,22 +37,25 @@ from dualeai.models.bridge import (
     BridgeToolUseResponse,
 )
 from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
+from dualeai.response import StreamingContentEvent
 
-DeltaCallback = Callable[[BridgeContentDeltaResponse], None]
-ResetCallback = Callable[[BridgeContentResetResponse], None]
+ContentCallback = Callable[[StreamingContentEvent], None]
 ToolUseCallback = Callable[[BridgeToolUseResponse, str | None], None]
 
 logger = structlog.get_logger(__name__)
 
 
 def _lift_problem_details(sdk_error: DualeAIError, cause: HTTPTransportError) -> DualeAIError:
-    """Carry the RFC 9457 ProblemDetails from a transport error onto the SDK error.
+    """Preserve transport ProblemDetails and optional stream context on the SDK error.
 
-    The bridge returns a typed ProblemDetails body on lifecycle and tool-result
-    failures; without this the wrapped SDK error would expose only an HTTP status
-    line and drop the ``error_code`` and retry hints.
+    ProblemDetails describes the authenticated service response. Stream context
+    also identifies local failures without a service body; it does not establish
+    a remote terminal outcome. ``_consume_terminal_stream`` labels the operation
+    as ``task_run``, ``task_continue``, or ``tool_results`` before translation.
     """
     sdk_error.problem_details = cause.problem_details
+    if cause.context is not None:
+        sdk_error.context = cause.context
     return sdk_error
 
 
@@ -71,7 +65,7 @@ def _raise_translated(prefix: str, error: HTTPTransportError) -> NoReturn:
     Authentication failures become ``DualeAIAuthError``; other client request
     rejections become ``BusinessError``; transport and server failures become
     ``DualeAIConnectionError``. Each carries the platform ProblemDetails when
-    one was returned.
+    one was returned, plus stream context when the transport supplied it.
     """
     if isinstance(error, HTTPTransportAuthError):
         raise _lift_problem_details(DualeAIAuthError(f"{prefix}: {error}"), error) from error
@@ -81,43 +75,35 @@ def _raise_translated(prefix: str, error: HTTPTransportError) -> NoReturn:
 
 
 def _dispatch_stream_event(
-    data: object,
-    event_id: str | None,
-    delta_callback: DeltaCallback | None,
-    reset_callback: ResetCallback | None,
+    event: BridgeSSEEvent,
+    content_callback: ContentCallback | None,
     tool_use_callback: ToolUseCallback | None,
 ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse | None:
-    """Route one SSE event payload to its callback; return the terminal event or None.
+    """Route one SSE event payload to its callback; return the terminal payload or None.
 
-    Content-delta, content-reset, and tool-use events invoke their callback
-    (when provided) and return None so the caller keeps iterating. A terminal
-    event is returned so the caller stops and yields it.
+    Content-delta and content-reset events invoke the content callback, and
+    tool-use events invoke the tool-use callback with the event id, when
+    provided; each returns None so the caller keeps iterating. Every other
+    ``BridgeSSEEvent.data`` variant is terminal and is returned so the caller
+    stops and yields it.
     """
-    if isinstance(data, BridgeContentDeltaResponse):
-        if delta_callback is not None:
-            delta_callback(data)
-        return None
-    if isinstance(data, BridgeContentResetResponse):
-        if reset_callback is not None:
-            reset_callback(data)
+    data = event.data
+    if isinstance(data, (BridgeContentDeltaResponse, BridgeContentResetResponse)):
+        if content_callback is not None:
+            content_callback(data)
         return None
     if isinstance(data, BridgeToolUseResponse):
         if tool_use_callback is not None:
-            tool_use_callback(data, event_id)
+            tool_use_callback(data, event.id)
         return None
-    if isinstance(data, (BridgeTaskCompletedResponse, BridgeTaskErrorResponse, BridgeTaskStoppedResponse)):
-        return data
-    return None
+    return data
 
 
 class CloudEventsClient:
-    """SDK client for HTTP/SSE bridge communication (RFC-051).
+    """Lower-level client for Task streams, lifecycle calls, and Libraries.
 
-    This client provides:
-    - HTTP/SSE streaming for task execution
-    - Tenant isolation via API token
-    - Auto-reconnect with exponential backoff
-    - Clean dependency injection for testing
+    Applications normally use ``DualeAISDK``. The transport uses the configured
+    API token; this client does not establish authorization or tenant isolation.
     """
 
     def __init__(
@@ -137,25 +123,29 @@ class CloudEventsClient:
         self._connected = False
 
     async def connect(self) -> None:
-        """Connect to HTTP bridge.
+        """Initialize the transport for protected Bridge and Library requests.
+
+        The production transport obtains its initial platform token during
+        connect. It discovers each service's public key and authenticates the
+        protected request when that request starts.
 
         Raises:
-            DualeAIAuthError: If authentication fails (invalid/expired API key)
-            DualeAIConnectionError: If connection fails
+            DualeAIAuthError: If platform-token issuance or an injected transport
+                rejects authentication.
+            DualeAIConnectionError: If transport initialization fails.
         """
         try:
-            # If transport was injected (e.g., MockHTTPTransport for testing), use it
+            # An injected transport is used as given.
             if self._transport is not None:
                 if not self._transport.is_connected:
                     await self._transport.connect()
                 self._connected = True
 
-                logger.debug("HTTP transport connected (injected)")
+                logger.debug("Injected HTTP transport initialized")
                 return
 
-            # Create HTTPTransport for production
             logger.debug(
-                "Starting HTTP connection",
+                "Initializing protected HTTP transport",
                 endpoint=self.config.endpoint,
             )
 
@@ -173,7 +163,7 @@ class CloudEventsClient:
             self._connected = True
 
             logger.info(
-                "Connected to HTTP bridge",
+                "Protected HTTP transport initialized",
                 endpoint=self.config.endpoint,
             )
 
@@ -183,17 +173,19 @@ class CloudEventsClient:
                 endpoint=self.config.endpoint,
                 error=str(e),
             )
-            raise DualeAIAuthError(f"Authentication failed: {e}") from e
+            raise _lift_problem_details(DualeAIAuthError(f"Authentication failed: {e}"), e) from e
         except HTTPTransportError as e:
             logger.error(
                 "HTTP connection failed",
                 endpoint=self.config.endpoint,
                 error=str(e),
             )
-            raise DualeAIConnectionError(f"Failed to connect to HTTP bridge: {e}") from e
+            raise _lift_problem_details(
+                DualeAIConnectionError(f"Failed to connect to protected services: {e}"), e
+            ) from e
         except Exception as e:
             logger.error(
-                "Unexpected error connecting to HTTP bridge",
+                "Unexpected error connecting to protected services",
                 error=str(e),
                 exc_info=True,
             )
@@ -210,11 +202,11 @@ class CloudEventsClient:
         return self._transport
 
     async def disconnect(self) -> None:
-        """Disconnect from HTTP bridge and cleanup resources."""
+        """Disconnect from the protected services and release resources."""
         if self._transport and self._transport.is_connected:
             try:
                 await self._transport.disconnect()
-                logger.info("Disconnected from HTTP bridge")
+                logger.info("Disconnected from protected services")
             except Exception as e:  # noqa: BLE001  # Suppress cleanup errors
                 logger.warning(
                     "Error during HTTP disconnect",
@@ -227,54 +219,57 @@ class CloudEventsClient:
     async def run_task(
         self,
         *,
-        task_id: str,
         request: BridgeTaskRequest,
-        delta_callback: DeltaCallback | None = None,
-        reset_callback: ResetCallback | None = None,
+        content_callback: ContentCallback | None = None,
         tool_use_callback: ToolUseCallback | None = None,
+        accepted_callback: Callable[[], None] | None = None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Submit one typed task request and consume its task-keyed stream.
 
-        The SDK owns ``task_id`` and constructs ``request`` before this
+        The SDK owns the Task ID and constructs ``request`` before this
         boundary. Create and continuation requests therefore share the same
         transport and terminal-event path.
 
         Args:
-            task_id: Client-owned ID in the HTTP task path. The request decides
-                whether it represents a root or continuation child.
-            request: Validated create or continuation request body.
-            delta_callback: Sync callback invoked on each
-                ``BridgeContentDeltaResponse``. Must be fast — runs on
-                the SSE iteration coroutine.
-            reset_callback: Sync callback invoked when previously emitted
-                content must be discarded before rendering replacement output.
+            request: Validated create or continuation request body. Its
+                ``task_id`` is the client-owned Task ID, as
+                ``HTTPTransportProtocol.run_task`` describes it; its type
+                decides whether it represents a root or continuation child.
+            content_callback: Sync callback invoked in arrival order on each
+                ``BridgeContentDeltaResponse`` and on each
+                ``BridgeContentResetResponse``, which starts a new generation.
+                Must be fast — runs on the SSE iteration coroutine.
             tool_use_callback: Sync callback invoked on each
                 ``BridgeToolUseResponse`` with its SSE event id. Same
                 fast-callback rule.
+            accepted_callback: Called once when the Platform accepts the
+                request with its 202, before the stream is read; never called
+                for a refused request.
 
         Returns:
-            The terminal event — ``BridgeTaskCompletedResponse`` on
-            success, ``BridgeTaskErrorResponse`` on
-            failure/timeout/cancellation.
+            The terminal event: ``BridgeTaskCompletedResponse`` on success,
+            ``BridgeTaskErrorResponse`` on failure, or
+            ``BridgeTaskStoppedResponse`` on a Platform Stop.
 
         Raises:
             DualeAIAuthError: If authentication fails (401/403).
+            BusinessError: If an authenticated client request is rejected.
             DualeAIConnectionError: If not connected, the stream ends
-                without a terminal event, or other transport errors.
+                without a terminal event, or transport/server errors.
+            asyncio.CancelledError: If the local Task runner is cancelled.
         """
         transport = self._ensure_connected()
         logger.debug(
             "Running task",
-            task_id=task_id,
+            task_id=request.task_id,
             request_type=request.type,
         )
-        operation = "Task continuation" if request.type == "continue" else "Task run"
+        operation = "task_continue" if request.type == "continue" else "task_run"
         return await self._consume_terminal_stream(
-            task_id=task_id,
-            stream=transport.run_task(task_id, request),
+            task_id=request.task_id,
+            stream=transport.run_task(request, accepted_callback=accepted_callback),
             operation=operation,
-            delta_callback=delta_callback,
-            reset_callback=reset_callback,
+            content_callback=content_callback,
             tool_use_callback=tool_use_callback,
         )
 
@@ -283,27 +278,39 @@ class CloudEventsClient:
         *,
         task_id: str,
         stream: AsyncIterator[BridgeSSEEvent],
-        operation: str,
-        delta_callback: DeltaCallback | None,
-        reset_callback: ResetCallback | None,
+        operation: Literal["task_run", "task_continue", "tool_results"],
+        content_callback: ContentCallback | None,
         tool_use_callback: ToolUseCallback | None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Consume one bridge SSE stream through the shared terminal contract."""
+        operation_label = {
+            "task_run": "Task run",
+            "task_continue": "Task continuation",
+            "tool_results": "Tool results submission",
+        }[operation]
         try:
-            async for event in stream:
-                terminal = _dispatch_stream_event(
-                    event.data,
-                    event.id,
-                    delta_callback,
-                    reset_callback,
-                    tool_use_callback,
-                )
-                if terminal is not None:
-                    logger.info("Task terminated", task_id=task_id, outcome=type(terminal).__name__)
-                    return terminal
+            try:
+                async for event in stream:
+                    terminal = _dispatch_stream_event(event, content_callback, tool_use_callback)
+                    if terminal is not None:
+                        logger.info("Task terminated", task_id=task_id, outcome=type(terminal).__name__)
+                        return terminal
+            finally:
+                close_stream = getattr(stream, "aclose", None)
+                if close_stream is not None:
+                    await close_stream()
         except HTTPTransportError as error:
-            _raise_translated(f"{operation} failed", error)
-        raise DualeAIConnectionError(f"{operation} stream for task {task_id} ended without a terminal event")
+            context = error.context or ErrorContext(
+                error_code=(error.problem_details.error_code if error.problem_details else None)
+                or error.code
+                or type(error).__name__,
+            )
+            error.context = context.model_copy(update={"operation": operation, "task_id": task_id})
+            _raise_translated(f"{operation_label} failed", error)
+        raise DualeAIConnectionError(
+            f"{operation_label} stream for task {task_id} ended without a terminal event",
+            context=ErrorContext(error_code="stream_incomplete", operation=operation, task_id=task_id),
+        )
 
     async def stop_task(self, task_id: str, request: TaskStopRequest) -> TaskStopAccepted:
         """Ask the platform to stop a running task."""
@@ -317,30 +324,23 @@ class CloudEventsClient:
     async def submit_tool_results(
         self,
         *,
-        task_id: str,
         request: BridgeToolResultsRequest,
         last_event_id: str | None = None,
-        delta_callback: DeltaCallback | None = None,
-        reset_callback: ResetCallback | None = None,
         tool_use_callback: ToolUseCallback | None = None,
     ) -> BridgeTaskCompletedResponse | BridgeTaskErrorResponse | BridgeTaskStoppedResponse:
         """Submit tool results and consume the same public task stream to terminal.
 
-        ``task_id`` is the task that emitted ``tool.use``. ``last_event_id`` is
-        that event's exact composite SSE cursor, so replay resumes after the
-        triggering event instead of executing it again in this stream.
+        ``request.task_id`` is the task that emitted ``tool.use``.
+        ``last_event_id`` is that event's exact composite SSE cursor, so replay
+        resumes after the triggering event instead of executing it again in
+        this stream.
         """
         transport = self._ensure_connected()
         return await self._consume_terminal_stream(
-            task_id=task_id,
-            stream=transport.submit_tool_results(
-                task_id=task_id,
-                request=request,
-                last_event_id=last_event_id,
-            ),
-            operation="Tool results submission",
-            delta_callback=delta_callback,
-            reset_callback=reset_callback,
+            task_id=request.task_id,
+            stream=transport.submit_tool_results(request, last_event_id=last_event_id),
+            operation="tool_results",
+            content_callback=None,
             tool_use_callback=tool_use_callback,
         )
 
@@ -381,7 +381,7 @@ class CloudEventsClient:
 
     @property
     def is_connected(self) -> bool:
-        """Check if client is connected to HTTP bridge."""
+        """Check whether the protected transport is connected."""
         return self._connected and self._transport is not None and self._transport.is_connected
 
     async def __aenter__(self) -> Self:
