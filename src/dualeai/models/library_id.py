@@ -34,7 +34,7 @@ LibraryId = TypeAliasType(
         ],
         Field(
             title="LibraryId",
-            description="Library identifier (uuid7, RFC 9562 §5.7). Immutable across renames and revisions.",
+            description="Library identifier. It stays the same across renames and revisions.",
             examples=["01935b8a-7fb0-7b6b-93f7-0123456789ab"],
         ),
     ],

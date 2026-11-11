@@ -47,16 +47,12 @@ def _validate_string_constraints_2(value: object) -> object:
 
 
 TaskStop = TypeAliasType(
-    "TaskStop",
-    Annotated[
-        _PortableJsonValue,
-        Field(title="TaskStop", description="Contracts for requesting asynchronous Task Stop processing."),
-    ],
+    "TaskStop", Annotated[_PortableJsonValue, Field(title="TaskStop", description="Request that a Task stops.")]
 )
 
 
 class TaskStopAccepted(BaseModel):
-    """The caller may stop this Task. Acceptance does not confirm that the Task exists or is still running. The Stop is processed asynchronously; if it takes effect, the terminal task.stopped outcome arrives on the Task event stream."""
+    """The caller may stop this Task. Acceptance does not confirm that the Task exists or still runs; if the Stop takes effect, the Task event stream ends with `task.stopped`."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -68,12 +64,12 @@ class TaskStopAccepted(BaseModel):
     task_id: Annotated[task_id_module.TaskId, Field(description="Task named by the accepted Stop request.")]
     accepted_at: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_2)],
-        Field(description="UTC timestamp when the Platform accepted the request for asynchronous processing."),
+        Field(description="Time when Duale AI accepted the Stop request."),
     ]
 
 
 class TaskStopRequest(BaseModel):
-    """Request asynchronous Stop processing for the public Task named by the request path."""
+    """Request a Stop of the Task named by the request path."""
 
     model_config = ConfigDict(
         extra="forbid", title="TaskStopRequest", json_schema_extra={"examples": [{"reason": "Wrong document supplied"}]}

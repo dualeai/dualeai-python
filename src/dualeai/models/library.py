@@ -34,6 +34,7 @@ from dualeai.models import library_id as library_id_module
 from dualeai.models import problem_details as problem_details_module
 
 __all__: list[str] = [
+    "Libraries",
     "Library",
     "LibraryCreateRequest",
     "LibraryDeleteRequest",
@@ -58,7 +59,6 @@ __all__: list[str] = [
     "LibraryPolicy",
     "LibraryResponseDocumentStatus",
     "LibraryRevision",
-    "LibraryService",
     "LibrarySupportedImportFormatsResponse",
     "LibraryUpdateRequest",
     "LibraryWithRevision",
@@ -122,11 +122,11 @@ class _EnumSchemaMetadata:
         return json_schema
 
 
-LibraryService = TypeAliasType(
-    "LibraryService",
+Libraries = TypeAliasType(
+    "Libraries",
     Annotated[
         _PortableJsonValue,
-        Field(title="LibraryService", description="Models for working with Libraries and their documents."),
+        Field(title="Libraries", description="Models for working with Libraries and their documents."),
     ],
 )
 
@@ -159,7 +159,7 @@ class Library(BaseModel):
             Field(strict=True),
         ],
         Field(
-            description="Current tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KB."
+            description="Current tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KiB."
         ),
     ]
     created_at: Annotated[
@@ -173,13 +173,13 @@ class Library(BaseModel):
 
 
 class LibraryCreateRequest(BaseModel):
-    """Creates a Library at the requested path, or returns an active Library already using it, after IAM allows write on that path. Paths are not unique: Libraries at the same path share the permissions IAM gives that path."""
+    """Creates a Library at the requested path, or returns an active Library already using it, when the caller holds `library:write` on that path. Paths are not unique: Libraries at the same path share that path's permissions."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     path: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}*]*$")],
         Field(
-            description="Initial free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *: IAM binds {self} and {tenant_id} in a path it checks, its resource contract refuses any other brace, and a policy pattern reads a trailing * as a wildcard."
+            description="Initial free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *."
         ),
     ]
 
@@ -239,7 +239,7 @@ class LibraryDocumentCreateRequest(BaseModel):
         ],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Optional tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KB.",
+            description="Optional tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KiB.",
             json_schema_extra={"default": {}},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
@@ -300,7 +300,7 @@ class LibraryDocumentDeleteRequest(BaseModel):
 
 
 class LibraryErrorCode(str, Enum):
-    """Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."""
+    """Stable code for a document that could not be added. The problem details give the cause and the next action."""
 
     expired_upload = "EXPIRED_UPLOAD"
     hash_mismatch = "HASH_MISMATCH"
@@ -319,7 +319,7 @@ class LibraryErrorCode(str, Enum):
     @property
     def display_title(self) -> Union[str, None]:
         return {
-            LibraryErrorCode.expired_upload: "Upload Expired Before Ingestion",
+            LibraryErrorCode.expired_upload: "Upload Expired",
             LibraryErrorCode.hash_mismatch: None,
             LibraryErrorCode.size_mismatch: None,
             LibraryErrorCode.format_unsupported: None,
@@ -337,7 +337,7 @@ class LibraryErrorCode(str, Enum):
     @property
     def description(self) -> Union[str, None]:
         return {
-            LibraryErrorCode.expired_upload: "Upload session expired before ingest could promote it",
+            LibraryErrorCode.expired_upload: "The upload expired before the document was added. Upload it again.",
             LibraryErrorCode.hash_mismatch: "A new or corrected upload is required.",
             LibraryErrorCode.size_mismatch: "A new or corrected upload is required.",
             LibraryErrorCode.format_unsupported: None,
@@ -349,7 +349,7 @@ class LibraryErrorCode(str, Enum):
             LibraryErrorCode.document_processing_failed: "The document could not be processed. Upload it again.",
             LibraryErrorCode.malware_detected: None,
             LibraryErrorCode.library_deleted: "Choose an active Library.",
-            LibraryErrorCode.library_access_revoked: "The identity that uploaded the document lost write access to the library.",
+            LibraryErrorCode.library_access_revoked: "The identity that uploaded the document lost write access to the Library. Restore that access, then upload again.",
         }[self]
 
     @staticmethod
@@ -358,8 +358,8 @@ class LibraryErrorCode(str, Enum):
             (
                 (
                     "EXPIRED_UPLOAD",
-                    "Upload Expired Before Ingestion",
-                    "Upload session expired before ingest could promote it",
+                    "Upload Expired",
+                    "The upload expired before the document was added. Upload it again.",
                 ),
                 ("HASH_MISMATCH", None, "A new or corrected upload is required."),
                 ("SIZE_MISMATCH", None, "A new or corrected upload is required."),
@@ -379,20 +379,20 @@ class LibraryErrorCode(str, Enum):
                 (
                     "LIBRARY_ACCESS_REVOKED",
                     "Library Access Revoked",
-                    "The identity that uploaded the document lost write access to the library.",
+                    "The identity that uploaded the document lost write access to the Library. Restore that access, then upload again.",
                 ),
             )
         ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "Stable code for a terminal document ingestion failure. Use the enclosing problem details for the specific cause and next action. EXPIRED_UPLOAD, HASH_MISMATCH, and SIZE_MISMATCH require a new or corrected upload; LIBRARY_DELETED and LIBRARY_ACCESS_REVOKED require choosing an active Library or restoring write access."
+                "description": "Stable code for a document that could not be added. The problem details give the cause and the next action."
             }
         )
         return json_schema
 
 
 class LibraryDocumentFailure(BaseModel):
-    """Typed problem details for a terminal document ingestion failure."""
+    """Problem details for a document that could not be added to its Library."""
 
     model_config = ConfigDict(extra="allow", title=None, json_schema_extra=None)
     __pydantic_extra__: dict[str, _PortableJsonValue] = Field(init=False)
@@ -436,7 +436,7 @@ class LibraryDocumentGetRequest(BaseModel):
 
 
 class LibraryDocumentListRequest(BaseModel):
-    """Request one bounded page of documents from a Library."""
+    """Request one page of documents from a Library."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     library_id: Annotated[
@@ -497,8 +497,7 @@ class PublicIndexedDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     document_id: Annotated[
-        document_id_module.DocumentId,
-        Field(description="Deterministic document identifier (UUIDv5). Unique within the parent Library."),
+        document_id_module.DocumentId, Field(description="Stable document identifier, unique within its Library.")
     ]
     library_id: Annotated[library_id_module.LibraryId, Field(description="Library identifier that owns this document.")]
     filename: Annotated[
@@ -539,9 +538,7 @@ class PublicIndexedDocument(BaseModel):
     ]
     failure: Annotated[
         Union[problem_details_module.ProblemDetails, None],
-        Field(
-            description="Problem details for a failed document. Usually null unless status is failed; it can remain null when no detailed cause is available."
-        ),
+        Field(description="Problem details for a failed document; null when no cause is available."),
     ]
     tags: Annotated[
         Annotated[
@@ -557,36 +554,31 @@ class PublicIndexedDocument(BaseModel):
             Field(strict=True),
         ],
         Field(
-            description="Document tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KB."
+            description="Document tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KiB."
         ),
     ]
 
 
 class LibraryDocumentPage(BaseModel):
-    """One bounded page of Library documents. Pass next_cursor unchanged to continue the same stable scan."""
+    """One page of Library documents. Pass next_cursor unchanged to continue."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     documents: Annotated[
         Annotated[list[PublicIndexedDocument], Field(strict=True, max_length=500)],
-        Field(description="Documents in stable cursor order. The array contains at most the requested limit."),
+        Field(description="Documents on this page, at most the requested limit."),
     ]
     next_cursor: Annotated[
         Union[Annotated[StrictStr, Field(min_length=1, max_length=512)], None],
-        Field(description="Opaque cursor for the next page, or null when the scan is complete."),
+        Field(description="Opaque cursor for the next page, or null on the last page."),
     ]
 
 
 class LibraryDocumentPreviewResponse(BaseModel):
-    """Preview of a ready document's extracted text, limited to 250 characters."""
+    """Preview of the start of a ready document's extracted text."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
-    snippet: Annotated[
-        StrictStr, Field(description="First 250 characters of extracted text, or all available text when shorter.")
-    ]
-    truncated: Annotated[
-        StrictBool,
-        Field(description="True when more than 250 characters are available; false at 250 characters or fewer."),
-    ]
+    snippet: Annotated[StrictStr, Field(description="Start of the extracted text, or all of it when shorter.")]
+    truncated: Annotated[StrictBool, Field(description="True when the text continues past the snippet.")]
 
 
 class LibraryDocumentTagsPatchRequest(BaseModel):
@@ -607,7 +599,7 @@ class LibraryDocumentTagsPatchRequest(BaseModel):
             Field(strict=True),
         ],
         Field(
-            description="Replacement tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KB."
+            description="Replacement tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KiB."
         ),
     ]
 
@@ -653,7 +645,7 @@ class LibraryDocumentUploadResponse(BaseModel):
     ]
     parts: Annotated[
         Annotated[list[LibraryDocumentUploadPart], Field(strict=True, min_length=1)],
-        Field(description="Presigned URLs and byte ranges for each required upload part."),
+        Field(description="Upload URLs and byte ranges for each required upload part."),
     ]
     expires_at: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_2)],
@@ -720,7 +712,7 @@ class LibraryWithRevision(BaseModel):
 
 
 class LibraryListResponse(BaseModel):
-    """Public response body for listing the Libraries that the caller can access."""
+    """Libraries that the caller can access."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     libraries: Annotated[
@@ -737,7 +729,7 @@ class LibraryPatchRequest(BaseModel):
         Union[Annotated[StrictStr, Field(min_length=1, max_length=300, pattern="^[^{}*]*$")], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="New free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *: IAM binds {self} and {tenant_id} in a path it checks, its resource contract refuses any other brace, and a policy pattern reads a trailing * as a wildcard."
+            description="New free-form folder path. It can contain slash-separated segments and does not require a prefix. It cannot contain {, } or *."
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     tags: Annotated[
@@ -758,7 +750,7 @@ class LibraryPatchRequest(BaseModel):
         ],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Replacement tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KB."
+            description="Replacement tags. Values must be strings, integers, numbers, or booleans. The serialized object must not exceed 4 KiB."
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
 
@@ -828,7 +820,7 @@ class Formats(BaseModel):
 
 
 class LibrarySupportedImportFormatsResponse(BaseModel):
-    """Supported document upload formats grouped by category for use in file pickers."""
+    """Supported document upload formats, grouped by category."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     formats: Annotated[

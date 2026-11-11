@@ -10,7 +10,7 @@ __all__: list[str] = ["ProblemError"]
 
 
 class ProblemError(BaseModel):
-    """Individual error item with AI guidance. Used inside ProblemDetails.errors[] for per-error context. Cloudflare RFC 9457 extension fields (retryable, retry_after_seconds, owner_action_required, error_category) live on the ProblemDetails envelope per RFC 9457 §3.2, not here."""
+    """One error item with guidance for AI agents, inside ProblemDetails.errors[]."""
 
     model_config = ConfigDict(extra="forbid", title="ProblemError", json_schema_extra=None)
     message: Annotated[Annotated[StrictStr, Field(max_length=1000)], Field(description="Human-readable error message")]

@@ -24,8 +24,8 @@ from dualeai.models.bridge import (
     BridgeContentDeltaResponse,
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
+    BridgeTaskResult,
 )
-from dualeai.models.llm_result import LLMResult
 from dualeai.sdk import JsonValue
 from dualeai.utils import truncate_error_preview
 
@@ -64,7 +64,7 @@ def task_completed_json() -> str:
             "timestamp": "2025-01-01T00:00:00Z",
             "result": {
                 "completion": "The answer is 42.",
-                "cache_hit": False,
+                "validated_data": None,
             },
         }
     )
@@ -93,7 +93,7 @@ def sse_event_task_completed() -> dict[str, object]:
         "data": {
             "type": "task.completed",
             "timestamp": "2025-01-01T00:00:00Z",
-            "result": {"completion": "Done.", "cache_hit": False},
+            "result": {"completion": "Done.", "validated_data": None},
         },
         "timestamp": "2025-01-01T00:00:00Z",
     }
@@ -163,34 +163,12 @@ class TestModelValidation:
         def _() -> None:
             BridgeSSEEvent.model_validate(sse_event_task_completed)
 
-    def test_llm_result_simple(self, benchmark: BenchmarkFixture) -> None:
-        data = {"completion": "The answer is 42.", "cache_hit": False}
+    def test_task_result_simple(self, benchmark: BenchmarkFixture) -> None:
+        data = {"completion": "The answer is 42.", "validated_data": None}
 
         @benchmark
         def _() -> None:
-            LLMResult.model_validate(data)
-
-    def test_llm_result_with_tool_calls(self, benchmark: BenchmarkFixture) -> None:
-        data = {
-            "completion": None,
-            "cache_hit": False,
-            "tool_calls": [
-                {
-                    "id": "call_001",
-                    "name": "search",
-                    "arguments": {"query": "benchmark test"},
-                },
-                {
-                    "id": "call_002",
-                    "name": "calculate",
-                    "arguments": {"expression": "2+2"},
-                },
-            ],
-        }
-
-        @benchmark
-        def _() -> None:
-            LLMResult.model_validate(data)
+            BridgeTaskResult.model_validate(data)
 
 
 # ===========================================================================

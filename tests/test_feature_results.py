@@ -3,7 +3,7 @@
 Right-layer testing: every test exercises the production bridge
 round-trip via ``MockHTTPTransport``. The injected SSE event is the
 canonical bridge response shape (``BridgeTaskCompletedResponse``
-wrapping an ``LLMResult``); the SDK's real
+wrapping a ``BridgeTaskResult``); the SDK's real
 ``events_client.run_task`` callback dispatch and
 ``AgentResponse._extract_result`` paths run end-to-end.
 
@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field
 
 from dualeai import DualeAISDK
 from dualeai.exceptions import ValidationError
+from dualeai.models.bridge import BridgeTaskResult
 from dualeai.models.json_value import JsonValue
-from dualeai.models.llm_result import LLMResult
 from dualeai.orchestrator import ask
 from tests.helpers.lifecycle import inject_llm_completion
 from tests.mocks.mock_http import MockHTTPTransport
@@ -133,15 +133,15 @@ class TestUnitModelExtraction:
     async def test_model_handles_missing_validated_data_and_completion(
         self, minimal_mock_sdk: DualeAISDK, mock_transport: MockHTTPTransport
     ) -> None:
-        """Both fields None → returns the LLMResult itself (warns)."""
+        """Both fields None → returns the Task Result itself (warns)."""
         task_id = "test-empty-llm-result"
         inject_llm_completion(mock_transport, task_id)  # completion=None, validated_data=None
 
         response = await ask(instruction="Empty result", task_id=task_id, sdk=minimal_mock_sdk)
 
         result = await response.model()
-        assert isinstance(result, LLMResult)
-        # Fallback contract: with nothing extracted, model() returns the raw LLMResult
+        assert isinstance(result, BridgeTaskResult)
+        # Fallback contract: with nothing extracted, model() returns the raw Task Result
         # whose completion and validated_data are both None (not a coerced/empty stand-in).
         assert result.completion is None
         assert result.validated_data is None

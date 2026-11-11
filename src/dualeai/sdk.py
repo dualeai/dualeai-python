@@ -90,7 +90,6 @@ from dualeai.models.capability import Capability
 from dualeai.models.json_value import JsonValue
 from dualeai.models.library import LibraryCreateRequest, LibraryDocumentCreateResponse
 from dualeai.models.priority_class import PriorityClass
-from dualeai.models.reserved_tool_names import ReservedToolName
 from dualeai.models.response_format import JsonSchemaResponseFormat, ResponseFormat
 from dualeai.models.routing_policy import RoutingPolicy
 from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
@@ -123,7 +122,6 @@ ComponentHealth: TypeAlias = dict[str, bool]
 logger = structlog.get_logger(__name__)
 _cacheable_value_adapter: TypeAdapter[CacheableValue] = TypeAdapter(CacheableValue)
 _agent_id_adapter: TypeAdapter[str] = TypeAdapter(AgentId)
-_reserved_tool_names = frozenset(name.value for name in ReservedToolName)
 
 
 @dataclass(frozen=True)
@@ -454,8 +452,6 @@ class DualeAISDK:
             raise ValueError("Tool retries must be non-negative")
 
         tool_name = callable_name(func)
-        if tool_name in _reserved_tool_names:
-            raise ValueError(f"Tool name {tool_name!r} is reserved by the platform")
         if tool_name in self._tools:
             raise ValueError(f"Tool {tool_name!r} is already registered")
 

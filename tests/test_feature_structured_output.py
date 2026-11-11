@@ -1,6 +1,6 @@
 """Tests for structured output (res=MyModel) feature.
 
-Bridge cases inject a ``BridgeTaskCompletedResponse`` carrying an ``LLMResult``
+Bridge cases inject a ``BridgeTaskCompletedResponse`` carrying a ``BridgeTaskResult``
 through ``MockHTTPTransport``, exercising ``events_client.run_task`` callback
 dispatch and ``_extract_result`` validation. Schema export and cache tests call
 ``_generate_json_schema_cached`` directly.

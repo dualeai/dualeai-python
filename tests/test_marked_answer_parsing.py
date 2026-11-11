@@ -26,7 +26,7 @@ def _completed_stream() -> str:
     payload = {
         "type": "task.completed",
         "timestamp": "2026-08-14T00:00:00Z",
-        "result": {"completion": _MARKED, "tool_calls": []},
+        "result": {"completion": _MARKED, "validated_data": None},
     }
     data_str = json.dumps(payload, separators=(",", ":"))
     data_lines = "\n".join(f"data: {line}" for line in data_str.split("\n"))

@@ -13,7 +13,7 @@ CanonicalActor = TypeAliasType(
     Annotated[
         Annotated[StrictStr, Field(pattern="^(user|agent):[A-Za-z0-9][A-Za-z0-9_-]*$")],
         Field(
-            description="Canonical identity of the user or Agent Identity that acted. Use `user:{id}` or `agent:{id}` after resolving the credential to a current identity. Identity-provider aliases are not accepted."
+            description="Identity that acted: `user:{id}` or `agent:{id}`. An identity-provider alias is not accepted."
         ),
     ],
 )

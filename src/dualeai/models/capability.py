@@ -43,7 +43,7 @@ class _EnumSchemaMetadata:
 
 
 class Capability(str, Enum):
-    """Work capacity a task requires of whoever executes it, used to rank eligible routes"""
+    """Work capacity a task requires of whoever executes it."""
 
     problem_solving = "problem_solving"
     math = "math"
@@ -117,7 +117,7 @@ class Capability(str, Enum):
         json_schema.update(
             {
                 "title": "Capability",
-                "description": "Work capacity a task requires of whoever executes it, used to rank eligible routes",
+                "description": "Work capacity a task requires of whoever executes it.",
                 "examples": ["code", "problem_solving", "long_context"],
             }
         )
@@ -153,7 +153,7 @@ CapabilityComparison = TypeAliasType(
 
 
 class CapabilityQualification(str, Enum):
-    """Whether a route has a task capability, judged from its benchmark evidence against the other enabled routes."""
+    """Whether a Model Route has a task capability, compared with the other enabled routes."""
 
     yes = "yes"
     undetermined = "undetermined"
@@ -170,9 +170,9 @@ class CapabilityQualification(str, Enum):
     @property
     def description(self) -> str:
         return {
-            CapabilityQualification.yes: "The route's benchmark evidence places it among the stronger of the enabled routes for this capability. When the capability is required, routing prefers this route.",
-            CapabilityQualification.undetermined: "The route is measured, but its measurements cannot place it against enough of the other routes to decide. When the capability is required, routing prefers this route to one without the capability, but not to one that has it.",
-            CapabilityQualification.no: "The route's benchmark evidence places it outside the stronger of the enabled routes for this capability, or the route has no measurement for it.",
+            CapabilityQualification.yes: "The route has this capability compared with the other enabled routes. When a Task requires the capability, routing prefers this route.",
+            CapabilityQualification.undetermined: "Duale AI cannot yet tell whether the route has this capability from the Benchmarks results in your pool. Enter the published Benchmarks results you have for your routes.",
+            CapabilityQualification.no: "The route does not have this capability compared with the other enabled routes, or its strength for this capability is unknown.",
         }[self]
 
     @staticmethod
@@ -182,24 +182,24 @@ class CapabilityQualification(str, Enum):
                 (
                     "yes",
                     "Yes",
-                    "The route's benchmark evidence places it among the stronger of the enabled routes for this capability. When the capability is required, routing prefers this route.",
+                    "The route has this capability compared with the other enabled routes. When a Task requires the capability, routing prefers this route.",
                 ),
                 (
                     "undetermined",
                     "Undetermined",
-                    "The route is measured, but its measurements cannot place it against enough of the other routes to decide. When the capability is required, routing prefers this route to one without the capability, but not to one that has it.",
+                    "Duale AI cannot yet tell whether the route has this capability from the Benchmarks results in your pool. Enter the published Benchmarks results you have for your routes.",
                 ),
                 (
                     "no",
                     "No",
-                    "The route's benchmark evidence places it outside the stronger of the enabled routes for this capability, or the route has no measurement for it.",
+                    "The route does not have this capability compared with the other enabled routes, or its strength for this capability is unknown.",
                 ),
             )
         ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
                 "title": "CapabilityQualification",
-                "description": "Whether a route has a task capability, judged from its benchmark evidence against the other enabled routes.",
+                "description": "Whether a Model Route has a task capability, compared with the other enabled routes.",
             }
         )
         return json_schema
@@ -218,7 +218,7 @@ class GeneralCapabilityScore(BaseModel):
             None,
         ],
         Field(
-            description="Strength for this capability compared with the other enabled routes measured for it: 100 for the strongest, 0 for the weakest, and 50 for every route when all of them tie. Null when the route has no measurement for the capability or when fewer than two enabled routes are measured. A strength depends on the configured pool and is neither a task-success probability nor a routing-selection probability."
+            description="Strength for this capability compared with the other enabled routes, from 0 for the weakest to 100 for the strongest. Null when the route cannot be compared for this capability. The value changes when the enabled routes change."
         ),
     ]
     qualification: Annotated[
@@ -239,14 +239,12 @@ class TaskCapabilityScore(BaseModel):
             None,
         ],
         Field(
-            description="Strength for this capability compared with the other enabled routes measured for it: 100 for the strongest, 0 for the weakest, and 50 for every route when all of them tie. Null when the route has no measurement for the capability or when fewer than two enabled routes are measured. A strength depends on the configured pool and is neither a task-success probability nor a routing-selection probability."
+            description="Strength for this capability compared with the other enabled routes, from 0 for the weakest to 100 for the strongest. Null when the route cannot be compared for this capability. The value changes when the enabled routes change."
         ),
     ]
     qualification: Annotated[
         CapabilityQualification,
-        Field(
-            description="Whether the route has this capability compared with the other enabled routes. A request that only some routes can take, such as one with images, is judged against those routes."
-        ),
+        Field(description="Whether the route has this capability compared with the other enabled routes."),
     ]
 
 
@@ -256,7 +254,7 @@ CapabilityScore = TypeAliasType(
         Union["GeneralCapabilityScore", "TaskCapabilityScore"],
         Field(
             title="CapabilityScore",
-            description="A route's strength and qualification for one capability, from the saved benchmark measurements of the complete enabled model pool.",
+            description="A Model Route's strength and qualification for one capability, compared with the other enabled routes.",
         ),
     ],
 )

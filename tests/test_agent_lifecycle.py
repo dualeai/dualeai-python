@@ -142,23 +142,6 @@ def test_registered_tool_requires_agent_id(config_factory, mock_http_transport: 
 
 
 @pytest.mark.unit
-def test_registered_tool_rejects_reserved_platform_name(config_factory, mock_http_transport: MockHTTPTransport) -> None:
-    """The SDK rejects platform-reserved tool names before manifest publication."""
-    config: DualeAIConfig = config_factory(agent_id="agent_security_operations")
-    sdk = DualeAISDK(config=config, transport=mock_http_transport, auto_start=False)
-
-    with pytest.raises(ValueError, match="reserved by the platform"):
-
-        @tool(
-            sdk=sdk,
-            description="Finish is reserved by the platform.",
-            timeout=timedelta(seconds=10),
-        )
-        async def finish() -> dict[str, str]:
-            return {"state": "done"}
-
-
-@pytest.mark.unit
 def test_registered_tool_requires_description_and_positive_timeout(
     config_factory,
     mock_http_transport: MockHTTPTransport,

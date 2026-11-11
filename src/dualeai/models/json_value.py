@@ -22,6 +22,6 @@ JsonValue = TypeAliasType(
             ],
             None,
         ],
-        Field(title="JsonValue", description="A recursive JSON value used for intentionally open payload fields"),
+        Field(title="JsonValue", description="Any JSON value."),
     ],
 )

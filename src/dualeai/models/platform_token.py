@@ -83,14 +83,14 @@ PlatformToken = TypeAliasType(
         _PortableJsonValue,
         Field(
             title="PlatformToken",
-            description="Issuance of the platform token, and the vocabulary that travels with it. One token opens every Duale AI service, and the caller derives its secret rather than receiving one.",
+            description="Issuance of the platform token and the values that travel with it. The caller derives the token secret instead of receiving it.",
         ),
     ],
 )
 
 
 class AssuranceLevel(str, Enum):
-    """The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks."""
+    """Duale AI assurance level of the sign-in that obtained this token. An Agent Identity reaches at most 'aal2'."""
 
     aal1 = "aal1"
     aal2 = "aal2"
@@ -105,7 +105,7 @@ class AssuranceLevel(str, Enum):
         return {
             AssuranceLevel.aal1: None,
             AssuranceLevel.aal2: None,
-            AssuranceLevel.aal3: "Product aal3 requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity.",
+            AssuranceLevel.aal3: "Highest Duale AI assurance level: public-key multi-factor authentication.",
         }[self]
 
     @staticmethod
@@ -114,23 +114,19 @@ class AssuranceLevel(str, Enum):
             (
                 ("aal1", None, None),
                 ("aal2", None, None),
-                (
-                    "aal3",
-                    None,
-                    "Product aal3 requires public-key multi-factor authentication within its original twelve-hour window; it permits synced/exportable passkeys and waives authenticator FIPS certification, so it does not claim NIST AAL3 conformity.",
-                ),
+                ("aal3", None, "Highest Duale AI assurance level: public-key multi-factor authentication."),
             )
         ).__get_pydantic_json_schema__(core_schema, handler)
         json_schema.update(
             {
-                "description": "The assurance certified at issuance. An Agent Identity is capped at 'aal2'. A Human Identity can obtain 'aal1', 'aal2' or 'aal3' from qualified original authentication evidence. Each route retains its minimum level and IAM permission checks."
+                "description": "Duale AI assurance level of the sign-in that obtained this token. An Agent Identity reaches at most 'aal2'."
             }
         )
         return json_schema
 
 
 class PlatformTokenIssueRequest(BaseModel):
-    """Ask for a platform token. A Human Identity identifies with a Keycloak access token; an Agent Identity identifies with its API token. The caller supplies the public half of a new ephemeral key pair. Both parties derive the pre-shared key, which is absent from the public request and response."""
+    """Ask for a platform token. A Human Identity identifies with an identity-provider access token; an Agent Identity identifies with its API token. The caller supplies the public half of a new ephemeral key pair."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     tenant_id: Annotated[
@@ -152,14 +148,14 @@ PlatformTokenKeyIdentifier = TypeAliasType(
     Annotated[
         Annotated[StrictStr, Field(pattern="^[0-9a-f]{128}$")],
         Field(
-            description="Public handle for one platform token, carried in the transport's pre-shared-key identifier field with every protected request. It is random and unrelated to the key, and it correlates requests made with that token. Knowing it permits withdrawal of the token, but does not permit protected requests: those require ciphertext that the resolved key opens."
+            description="Public identifier of one platform token, sent with every request made with it. It is not a secret."
         ),
     ],
 )
 
 
 class PlatformTokenIssueResponse(BaseModel):
-    """An issued platform token. It carries NO secret: the caller derives the pre-shared key itself from 'issuer_public_key' and the private half it kept. Present 'psk_id' as the hpke-http key identifier and the derived key as the pre-shared key."""
+    """An issued platform token. The caller derives the token's pre-shared key from `issuer_public_key` and its own ephemeral private key, then sends `psk_id` with that key on each request."""
 
     model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
     psk_id: PlatformTokenKeyIdentifier
@@ -172,7 +168,7 @@ class PlatformTokenIssueResponse(BaseModel):
     identity: Annotated[
         StrictStr,
         Field(
-            description="The canonical subject this token acts as, resolved at issuance: 'user:{user_id}' or 'agent:{agent_id}'. Resolved here rather than at each use, so a downstream service never sees an identity-provider alias."
+            description="The canonical subject this token acts as, resolved at issuance: 'user:{user_id}' or 'agent:{agent_id}'. It never holds an identity-provider alias."
         ),
     ]
     tenant_id: Annotated[
@@ -182,6 +178,6 @@ class PlatformTokenIssueResponse(BaseModel):
     valid_until: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_2)],
         Field(
-            description="When the token stops resolving. Revocation deletes the record and takes effect before this instant, so a caller must handle a refusal at any time."
+            description="When the token expires. A revoked token stops working earlier, so a caller must handle a refusal at any time."
         ),
     ]

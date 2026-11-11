@@ -5,8 +5,7 @@ import asyncio
 import pytest
 from uuid_utils import uuid7
 
-from dualeai.models.bridge import BridgeContentDeltaResponse
-from dualeai.models.llm_result import LLMResult
+from dualeai.models.bridge import BridgeContentDeltaResponse, BridgeTaskResult
 from dualeai.orchestrator import ask
 from dualeai.sdk import DualeAISDK
 from tests.mocks.mock_http import MockHTTPTransport
@@ -16,12 +15,11 @@ from tests.mocks.mock_http import MockHTTPTransport
 class TestTokenlessTaskFlow:
     """Exercise tokenless task flows through the in-memory transport."""
 
-    def create_tokenless_llm_result(self) -> LLMResult:
-        """Create an LLM result without token properties."""
-        return LLMResult(
+    def create_tokenless_task_result(self) -> BridgeTaskResult:
+        """Create a Task Result without token properties."""
+        return BridgeTaskResult(
             completion="Tokenless test completion",
             validated_data={"test": "data", "confidence": 0.95},
-            cache_hit=False,
         )
 
     async def test_tokenless_task_submission_and_completion(
@@ -29,10 +27,10 @@ class TestTokenlessTaskFlow:
         minimal_mock_sdk: DualeAISDK,
         mock_transport: MockHTTPTransport,
     ) -> None:
-        """A tokenless result reports cache status through the public response."""
-        llm_result = self.create_tokenless_llm_result()
+        """A tokenless Task Result reaches the public response whole."""
+        task_result = self.create_tokenless_task_result()
         task_id = str(uuid7())
-        mock_transport.inject_event(task_id, mock_transport.create_task_completed_event(llm_result))
+        mock_transport.inject_event(task_id, mock_transport.create_task_completed_event(task_result))
 
         response = await ask(
             instruction="Test tokenless task",
@@ -41,7 +39,7 @@ class TestTokenlessTaskFlow:
             sdk=minimal_mock_sdk,
         )
 
-        assert await response.cache_hit() is False
+        assert await response.llm_metrics() == task_result
         assert len(mock_transport.get_requests_for_task(task_id)) == 1
 
     async def test_tokenless_streaming_flow(
@@ -51,7 +49,7 @@ class TestTokenlessTaskFlow:
     ) -> None:
         """A tokenless stream emits each content update and the final model."""
         task_id = str(uuid7())
-        final_result = self.create_tokenless_llm_result()
+        final_result = self.create_tokenless_task_result()
         mock_transport.inject_events(
             task_id,
             [
@@ -87,9 +85,9 @@ class TestTokenlessTaskFlow:
     ) -> None:
         """Concurrent tokenless tasks keep their results separate."""
         results = [
-            LLMResult(
+            BridgeTaskResult(
                 completion=f"Concurrent result {i}",
-                cache_hit=False,
+                validated_data=None,
             )
             for i in range(3)
         ]

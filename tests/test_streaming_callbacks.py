@@ -24,10 +24,10 @@ from dualeai.models.bridge import (
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
     BridgeTaskErrorResponse,
+    BridgeTaskResult,
     BridgeToolUseResponse,
 )
 from dualeai.models.json_value import JsonValue
-from dualeai.models.llm_result import LLMResult
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.orchestrator import ask
 from dualeai.response import StreamingContentEvent
@@ -69,7 +69,7 @@ def _completed_event(event_id: int, completion: str = "done") -> BridgeSSEEvent:
         data=BridgeTaskCompletedResponse(
             type="task.completed",
             timestamp=datetime.now(timezone.utc),
-            result=LLMResult(completion=completion, cache_hit=False),
+            result=BridgeTaskResult(completion=completion, validated_data=None),
         ),
         timestamp=datetime.now(timezone.utc),
     )

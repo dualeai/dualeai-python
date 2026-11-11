@@ -515,7 +515,8 @@ def _task_request(task_id: str = "task-synthetic-0001") -> BridgeTaskCreateReque
 
 def _completed_block(event_id: str = "1:1") -> bytes:
     data = (
-        '{"type":"task.completed","timestamp":"2026-09-24T00:00:00Z","result":{"completion":"done","cache_hit":false}}'
+        '{"type":"task.completed","timestamp":"2026-09-24T00:00:00Z",'
+        '"result":{"completion":"done","validated_data":null}}'
     )
     return f"id: {event_id}\nevent: task.completed\ndata: {data}\n\n".encode()
 
@@ -1344,7 +1345,7 @@ async def test_task_terminal_does_not_read_or_retry_past_the_result(terminal: st
         "type": terminal,
         "timestamp": "2026-09-24T00:00:00Z",
         **(
-            {"result": {"completion": "done", "cache_hit": False}}
+            {"result": {"completion": "done", "validated_data": None}}
             if terminal == "task.completed"
             else {"reason": "requested"}
             if terminal == "task.stopped"

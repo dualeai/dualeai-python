@@ -26,6 +26,7 @@ from dualeai.models.bridge import (
     BridgeSSEEvent,
     BridgeTaskCompletedResponse,
     BridgeTaskErrorResponse,
+    BridgeTaskResult,
     BridgeToolResultsRequest,
     BridgeToolUseResponse,
 )
@@ -49,7 +50,6 @@ from dualeai.models.library import (
     LibraryWithRevision,
     PublicIndexedDocument,
 )
-from dualeai.models.llm_result import LLMResult
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.task_stop import TaskStopAccepted, TaskStopRequest
 
@@ -534,20 +534,20 @@ class MockHTTPTransport(HTTPTransportProtocol):
             timestamp=datetime.now(timezone.utc),
         )
 
-    def create_task_completed_event(self, result: LLMResult | None = None) -> BridgeSSEEvent:
+    def create_task_completed_event(self, result: BridgeTaskResult | None = None) -> BridgeSSEEvent:
         """Create task completed event.
 
         Args:
-            result: LLMResult with completion data. If None, creates default.
+            result: Task Result with completion data. If None, creates default.
 
         Returns:
             BridgeSSEEvent with task completed payload.
         """
         self._event_counter += 1
         if result is None:
-            result = LLMResult(
+            result = BridgeTaskResult(
                 completion="Task completed",
-                cache_hit=False,
+                validated_data=None,
             )
         return BridgeSSEEvent(
             id=f"{self._event_counter}:1",

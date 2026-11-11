@@ -6,12 +6,11 @@ from typing import Annotated, Literal, Union
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, StrictStr
 from pydantic.json_schema import SkipJsonSchema
-from typing_extensions import TypeAliasType
 
 from dualeai.models import json_value as json_value_module
 from dualeai.models import tool_name as tool_name_module
 
-__all__: list[str] = ["Parameters", "RequireToolUse", "Tool"]
+__all__: list[str] = ["Parameters", "Tool"]
 
 
 def _validate_boolean_literal_1(value: object) -> object:
@@ -56,7 +55,7 @@ class Parameters(BaseModel):
 
 
 class Tool(BaseModel):
-    """Definition of a Tool that a model can call: its name, its purpose and the JSON Schema of its arguments. Offering a definition does not make the Tool available or authorize its call."""
+    """Definition of a Tool that a model can call: its name, its purpose and the JSON Schema of its arguments."""
 
     model_config = ConfigDict(extra="forbid", title="Tool", json_schema_extra=None)
     name: Annotated[
@@ -67,15 +66,3 @@ class Tool(BaseModel):
         Annotated[StrictStr, Field(min_length=1, max_length=1024)], Field(description="Tool description for the model")
     ]
     parameters: Parameters
-
-
-RequireToolUse = TypeAliasType(
-    "RequireToolUse",
-    Annotated[
-        StrictBool,
-        Field(
-            description="Require the response to contain at least one call to a Tool Definition carried on this request. Duale AI retries a response that has no Tool Call, on another model when needed, and fails the request when no model produces one.",
-            json_schema_extra={"default": False},
-        ),
-    ],
-)

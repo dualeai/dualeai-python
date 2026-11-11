@@ -19,7 +19,7 @@ def _reject_explicit_null(value: object) -> object:
 
 
 class RoutingPolicy(BaseModel):
-    """Task-scoped soft preferences used to rank eligible Model Routes. They do not make a route eligible or exclude an otherwise eligible route."""
+    """Task-scoped preferences that guide the choice among eligible Model Routes. They never make a route eligible or ineligible."""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -67,7 +67,7 @@ class RoutingPolicy(BaseModel):
             None,
         ],
         Field(
-            description="Desired willingness to answer sensitive but allowed requests. 0.0 favors models that more often withhold or qualify answers, 0.5 balances withholding and directness, and 1.0 favors direct engagement. This preference does not measure protection against harmful requests and is not a safety guardrail. null applies no specific permissiveness preference.",
+            description="Desired willingness to answer sensitive but allowed requests. 0.0 favors models that more often withhold or qualify answers, 0.5 balances withholding and directness, and 1.0 favors direct engagement. null applies no specific permissiveness preference.",
             examples=[0.2, 0.5, 0.8, None],
             json_schema_extra={"default": None},
         ),
@@ -82,7 +82,7 @@ class RoutingPolicy(BaseModel):
             None,
         ],
         Field(
-            description="Importance of lower estimated request cost. 0.0 and null add no general preference between base model tariffs, while values toward 1.0 increasingly favor cheaper routes and may trade model capability for a large price reduction. The router still accounts for known provider prompt-cache savings and exact response-cache hits at every value. This is a soft routing preference, not a spending limit.",
+            description="Importance of lower estimated request cost. 0.0 and null add no preference between model prices, while values toward 1.0 increasingly favor cheaper routes and can trade model capability for a large price reduction.",
             examples=[0.0, 0.2, 0.5, 0.8, 1.0, None],
             json_schema_extra={"default": None},
         ),
@@ -97,7 +97,7 @@ class RoutingPolicy(BaseModel):
             None,
         ],
         Field(
-            description="Desired emphasis on faster responses. 0.0 gives measured latency no preference, 0.5 applies the normal balance, and 1.0 gives it the strongest preference. null applies the normal balance.",
+            description="Desired emphasis on faster responses. 0.0 adds no preference for speed, 0.5 and null apply the normal balance, and 1.0 gives speed the strongest preference.",
             examples=[0.2, 0.5, 0.7, 0.9, None],
             json_schema_extra={"default": None},
         ),
@@ -106,7 +106,7 @@ class RoutingPolicy(BaseModel):
         Union[Annotated[list[capability_module.Capability], Field(strict=True)], SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Work capacities the task requires of whoever executes it. A route has a capability when its benchmark evidence places it among the stronger of the enabled routes that can take the request. Routing prefers routes that have every listed capability and falls back to the closest available route when no route whose context window fits the request has all of them.",
+            description="Work capacities the Task requires of whoever executes it. Routing prefers routes that have every listed capability. When no route that can take the request has all of them, the Task runs on the closest match.",
             json_schema_extra={"default": []},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)

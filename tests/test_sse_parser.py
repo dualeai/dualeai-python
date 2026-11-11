@@ -40,7 +40,9 @@ class CheckedBlockReader:
 _CONTENT_DELTA = '{"type":"content.delta","delta":"hello","generation":1,"sequence":0}'
 _CONTENT_DELTA_2 = '{"type":"content.delta","delta":"world","generation":1,"sequence":1}'
 _CONTENT_RESET = '{"type":"content.reset","generation":2}'
-_TASK_COMPLETED = '{"type":"task.completed","timestamp":"2025-01-01T00:00:00Z","result":{"completion":"done"}}'
+_TASK_COMPLETED = (
+    '{"type":"task.completed","timestamp":"2025-01-01T00:00:00Z","result":{"completion":"done","validated_data":null}}'
+)
 
 # The frozen `content.delta` event is written out in full rather than assembled
 # from the parts above. It pins the exact public wire bytes accepted by the SDK.
@@ -187,7 +189,7 @@ class TestSSEParserEdges:
     async def test_parse_sse_rejects_added_fields_in_a_known_nested_result(self):
         payload = (
             '{"type":"task.completed","timestamp":"2026-07-07T00:00:00Z",'
-            '"result":{"completion":"done","future_nested_field":"ignored"}}'
+            '"result":{"completion":"done","validated_data":null,"future_nested_field":"ignored"}}'
         )
         stream = f"id: 2:1\nevent: task.completed\ndata: {payload}\n\n"
 

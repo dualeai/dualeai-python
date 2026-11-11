@@ -32,9 +32,9 @@ from dualeai.models.bridge import (
     BridgeContentResetResponse,
     BridgeTaskCompletedResponse,
     BridgeTaskErrorResponse,
+    BridgeTaskResult,
     BridgeTaskStoppedResponse,
 )
-from dualeai.models.llm_result import LLMResult
 from dualeai.models.priority_class import PriorityClass
 from dualeai.models.problem_details import ProblemDetails
 from dualeai.models.response_format import ResponseFormat
@@ -128,10 +128,10 @@ class AgentResponse(Generic[T]):
         self.sdk: DualeAISDK = sdk
         self._accepted: asyncio.Event = accepted
         self.streaming: bool = delta_queue is not None and deltas is not None
-        # LLMResult cached after first model() call.
-        self._llm_result: LLMResult | None = None
-        self._llm_result_loaded: bool = False
-        self._llm_result_lock: asyncio.Lock = asyncio.Lock()
+        # Task Result cached after first model() call.
+        self._task_result: BridgeTaskResult | None = None
+        self._task_result_loaded: bool = False
+        self._task_result_lock: asyncio.Lock = asyncio.Lock()
         # Streaming delivery: live queue (event-driven) + replay list. Keep
         # both absent for non-streaming responses; tool-use delivery is
         # scheduled directly by DualeAISDK and needs no response-owned queue.
@@ -159,38 +159,35 @@ class AgentResponse(Generic[T]):
             logger.error("Task stream failed", task_id=self.task_id, error=str(task_err))
             raise
 
-    def _unwrap_llm_result(self, result: LLMResult, *, warn_on_empty: bool = False) -> object:
-        """Cache the LLMResult and return its inner payload.
+    def _unwrap_task_result(self, result: BridgeTaskResult, *, warn_on_empty: bool = False) -> object:
+        """Cache the Task Result and return its inner payload.
 
         Order: ``validated_data`` (when supplied in the terminal envelope) →
-        ``completion`` (raw LLM text) → the wrapper itself. Both model and
+        ``completion`` (text answer) → the wrapper itself. Both model and
         stream extraction funnel through here so
-        the LLMResult cache and the field-precedence rule live in one
+        the Task Result cache and the field-precedence rule live in one
         place.
         """
-        self._llm_result = result
-        self._llm_result_loaded = True
+        self._task_result = result
+        self._task_result_loaded = True
         if result.validated_data is not None:
             return result.validated_data
         if result.completion is not None:
             return result.completion
         if warn_on_empty:
-            logger.warning("LLMResult has neither validated_data nor completion", result=result)
+            logger.warning("Task Result has neither validated_data nor completion", result=result)
         return result
 
     def _extract_result(self, terminal: BridgeTaskCompletedResponse) -> object:
-        """Extract data from LLMResult wrapper or pass through."""
+        """Extract the answer from the Task Result."""
         result = terminal.result
-        if not isinstance(result, LLMResult):
-            return result
-
         logger.debug(
-            "SDK processing LLMResult object",
+            "SDK processing Task Result",
             task_id=self.task_id,
             has_validated_data=result.validated_data is not None,
             has_completion=result.completion is not None,
         )
-        return self._unwrap_llm_result(result, warn_on_empty=True)
+        return self._unwrap_task_result(result, warn_on_empty=True)
 
     def _validation_error(self, result: object, error: Exception) -> ValidationError:
         """Build the standard schema-mismatch ValidationError.
@@ -342,32 +339,32 @@ class AgentResponse(Generic[T]):
         except (ValidationError, AttributeError):
             return self._validate_basic_type(result)
 
-    async def _ensure_llm_result_loaded(self) -> None:
-        """Singleton loader — ensures LLMResult is loaded exactly once."""
-        if self._llm_result_loaded:
+    async def _ensure_task_result_loaded(self) -> None:
+        """Singleton loader — ensures the Task Result is loaded exactly once."""
+        if self._task_result_loaded:
             return
 
-        async with self._llm_result_lock:
-            if self._llm_result_loaded:
+        async with self._task_result_lock:
+            if self._task_result_loaded:
                 return
 
             try:
                 terminal = await self.task
-                if isinstance(terminal, BridgeTaskCompletedResponse) and isinstance(terminal.result, LLMResult):
-                    self._unwrap_llm_result(terminal.result)
+                if isinstance(terminal, BridgeTaskCompletedResponse):
+                    self._unwrap_task_result(terminal.result)
                 logger.debug(
-                    "LLMResult loaded via singleton loader",
+                    "Task Result loaded via singleton loader",
                     task_id=self.task_id,
-                    has_llm_result=self._llm_result is not None,
+                    has_task_result=self._task_result is not None,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    "Failed to load LLMResult in singleton loader",
+                    "Failed to load the Task Result in singleton loader",
                     task_id=self.task_id,
                     error=str(e),
                 )
             finally:
-                self._llm_result_loaded = True
+                self._task_result_loaded = True
 
     async def stream(self) -> AsyncGenerator[StreamingContentEvent, None]:
         """Stream real-time content changes from agent execution.
@@ -431,27 +428,16 @@ class AgentResponse(Generic[T]):
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await get_task
 
-    async def cache_hit(self) -> bool | None:
-        """Return the terminal LLM result's cache flag when available.
+    async def llm_metrics(self) -> BridgeTaskResult | None:
+        """Return the completed Task Result when available.
 
-        ``None`` means the completed result was not an ``LLMResult`` or no
-        completed result was available. Terminal error/stop events and ordinary
-        stream-runner exceptions also produce ``None`` here; call :meth:`model`
-        when that distinction matters. Local Task cancellation still propagates.
+        The Task Result holds the text answer (``completion``) and the
+        structured answer (``validated_data``). Terminal error/stop events and
+        ordinary stream-runner exceptions return ``None``; local Task
+        cancellation propagates.
         """
-        await self._ensure_llm_result_loaded()
-        return self._llm_result.cache_hit if self._llm_result else None
-
-    async def llm_metrics(self) -> LLMResult | None:
-        """Return the terminal ``LLMResult`` envelope when available.
-
-        ``LLMResult`` exposes completion, validated data, cache status, and
-        Tool calls, but no token, cost, or latency measurements. Terminal
-        error/stop events and ordinary stream-runner exceptions return ``None``;
-        local Task cancellation propagates.
-        """
-        await self._ensure_llm_result_loaded()
-        return self._llm_result
+        await self._ensure_task_result_loaded()
+        return self._task_result
 
     async def next(
         self,

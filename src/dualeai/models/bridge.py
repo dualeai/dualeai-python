@@ -28,7 +28,6 @@ from typing_extensions import TypeAliasType
 from dualeai.models import agent_id as agent_id_module
 from dualeai.models import attachment as attachment_module
 from dualeai.models import json_value as json_value_module
-from dualeai.models import llm_result as llm_result_module
 from dualeai.models import priority_class as priority_class_module
 from dualeai.models import problem_details as problem_details_module
 from dualeai.models import response_format as response_format_module
@@ -50,6 +49,7 @@ __all__: list[str] = [
     "BridgeTaskContinueRequest",
     "BridgeTaskCreateRequest",
     "BridgeTaskErrorResponse",
+    "BridgeTaskResult",
     "BridgeTaskStoppedResponse",
     "BridgeToolResultError",
     "BridgeToolResultSuccess",
@@ -130,26 +130,22 @@ Bridge = TypeAliasType(
 
 
 class AgentDeregistrationMessage(BaseModel):
-    """Best-effort request to report that one SDK process is shutting down. Acceptance does not immediately withdraw the process's registered Tools; their availability expires when serving heartbeats stop."""
+    """Reports that one SDK process is shutting down. Its Tools stay available for a short time after it stops."""
 
     model_config = ConfigDict(extra="forbid", title="AgentDeregistrationMessage", json_schema_extra=None)
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity this lifecycle request acts on. IAM decides whether the caller may perform this action on that identity."
+            description="Agent Identity this lifecycle request acts on. The caller needs permission for this action on it."
         ),
     ]
     process_id: Annotated[
         Annotated[UUID, BeforeValidator(_validate_string_constraints_2)],
-        Field(
-            description="UUID version 7 generated once for this SDK process and reused across its lifecycle requests."
-        ),
+        Field(description="Identifier of this SDK process, the same on each of its requests."),
     ]
     deregistration_publication_id: Annotated[
         Annotated[UUID, BeforeValidator(_validate_string_constraints_2)],
-        Field(
-            description="UUID version 7 that identifies this shutdown notification. Reuse it when retrying the same notification."
-        ),
+        Field(description="Identifier of this shutdown notice. Reuse it when you retry the same notice."),
     ]
     reason: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=100)],
@@ -157,7 +153,7 @@ class AgentDeregistrationMessage(BaseModel):
     ]
     time: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="SDK estimate of server time when this shutdown notification was created."),
+        Field(description="Time when this shutdown notice was created."),
     ]
 
 
@@ -205,14 +201,12 @@ class AgentHeartbeatMessage(BaseModel):
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity this lifecycle request acts on. IAM decides whether the caller may perform this action on that identity."
+            description="Agent Identity this lifecycle request acts on. The caller needs permission for this action on it."
         ),
     ]
     process_id: Annotated[
         Annotated[UUID, BeforeValidator(_validate_string_constraints_2)],
-        Field(
-            description="UUID version 7 generated once for this SDK process and reused across its lifecycle requests."
-        ),
+        Field(description="Identifier of this SDK process, the same on each of its requests."),
     ]
     status: Annotated[
         HeartbeatStatus,
@@ -222,20 +216,20 @@ class AgentHeartbeatMessage(BaseModel):
     ]
     time: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="SDK estimate of server time when this heartbeat was created."),
+        Field(description="Time when this heartbeat was created."),
     ]
     config_hash: Annotated[
         Annotated[StrictStr, Field(pattern="^[a-f0-9]{64}$")],
-        Field(description="SDK-computed SHA-256 digest of the Tool manifest this process most recently registered."),
+        Field(description="Fingerprint of the Tool set that this process last registered."),
     ]
     heartbeat_publication_id: Annotated[
         Annotated[UUID, BeforeValidator(_validate_string_constraints_2)],
-        Field(description="UUID version 7 that identifies this heartbeat. Reuse it when retrying the same heartbeat."),
+        Field(description="Identifier of this heartbeat. Reuse it when you retry the same heartbeat."),
     ]
 
 
 class AgentHeartbeatResponse(BaseModel):
-    """Timestamps from an accepted heartbeat let the SDK estimate server-clock offset."""
+    """Times at which Duale AI received and answered the heartbeat."""
 
     model_config = ConfigDict(extra="forbid", title="AgentHeartbeatResponse", json_schema_extra=None)
     server_received_at: Annotated[
@@ -248,7 +242,7 @@ class AgentHeartbeatResponse(BaseModel):
     ]
     client_sent_at: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="SDK timestamp echoed from the accepted heartbeat."),
+        Field(description="The heartbeat's `time`, returned unchanged."),
     ]
 
 
@@ -259,7 +253,7 @@ class RegisteredTool(BaseModel):
     tool: Annotated[
         tool_module.Tool,
         Field(
-            description="Model-facing Tool Definition, including its name, purpose, and parameter contract. Duale AI reserves every top-level argument name that starts with `__`: it registers a Tool that uses one with the rest of the manifest but never offers it to a model, and the Tool catalog states the reason."
+            description="Model-facing Tool Definition, including its name, purpose, and parameter contract. Duale AI reserves every top-level argument name that starts with `__`: a Tool that uses one stays registered but is never offered to a model."
         ),
     ]
     timeout_seconds: Annotated[
@@ -267,26 +261,24 @@ class RegisteredTool(BaseModel):
             StrictFloat, Field(ge=-9007199254740991, le=9007199254740991, allow_inf_nan=False), Field(le=3600, gt=0)
         ],
         Field(
-            description="Maximum time available for one registered customer Tool Call. The Platform derives one absolute result deadline shared by every attempt and retry. The SDK stops waiting at that deadline, but it cannot interrupt a synchronous callable that has already started."
+            description="Maximum time for one registered customer Tool Call to return its result. The SDK stops waiting at that time, but it cannot interrupt a synchronous callable that has already started."
         ),
     ]
 
 
 class AgentRegistrationMessage(BaseModel):
-    """Publishes the complete customer Tool manifest served by one SDK process for its Agent Identity."""
+    """Registers the complete set of Tools that one SDK process serves for its Agent Identity."""
 
     model_config = ConfigDict(extra="forbid", title="AgentRegistrationMessage", json_schema_extra=None)
     agent_id: Annotated[
         agent_id_module.AgentId,
         Field(
-            description="Agent Identity this lifecycle request acts on. IAM decides whether the caller may perform this action on that identity."
+            description="Agent Identity this lifecycle request acts on. The caller needs permission for this action on it."
         ),
     ]
     process_id: Annotated[
         Annotated[UUID, BeforeValidator(_validate_string_constraints_2)],
-        Field(
-            description="UUID version 7 generated once for this SDK process and reused across its lifecycle requests."
-        ),
+        Field(description="Identifier of this SDK process, the same on each of its requests."),
     ]
     tools: Annotated[
         Annotated[list[RegisteredTool], Field(strict=True, max_length=4096)],
@@ -294,17 +286,15 @@ class AgentRegistrationMessage(BaseModel):
     ]
     config_hash: Annotated[
         Annotated[StrictStr, Field(pattern="^[a-f0-9]{64}$")],
-        Field(description="SDK-computed SHA-256 digest of the complete Tool manifest in this registration."),
+        Field(description="Fingerprint of the complete Tool set in this registration."),
     ]
     manifest_publication_id: Annotated[
         Annotated[UUID, BeforeValidator(_validate_string_constraints_2)],
-        Field(
-            description="UUID version 7 that identifies this full-manifest publication. Reuse it when retrying the same publication."
-        ),
+        Field(description="Identifier of this registration. Reuse it when you retry the same registration."),
     ]
     time: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
-        Field(description="SDK estimate of server time when this registration was created."),
+        Field(description="Time when this registration was created."),
     ]
     sdk_version: Annotated[
         Annotated[StrictStr, Field(min_length=1, max_length=100)],
@@ -345,6 +335,22 @@ class BridgeContentResetResponse(BaseModel):
     ]
 
 
+class BridgeTaskResult(BaseModel):
+    """Answer of a completed Task."""
+
+    model_config = ConfigDict(extra="forbid", title=None, json_schema_extra=None)
+    completion: Annotated[
+        Union[StrictStr, None],
+        Field(description="Text answer of the Task. Null when the Task returns a structured answer."),
+    ]
+    validated_data: Annotated[
+        Union[Annotated[dict[StrictStr, json_value_module.JsonValue], Field(strict=True)], None],
+        Field(
+            description="Structured answer that matches the Task's JSON Schema response format. Null when the Task returns a text answer."
+        ),
+    ]
+
+
 class BridgeTaskCompletedResponse(BaseModel):
     """SSE `task.completed` event carrying the completed Task Result."""
 
@@ -354,7 +360,7 @@ class BridgeTaskCompletedResponse(BaseModel):
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(description="Time when this event was emitted."),
     ]
-    result: Annotated[llm_result_module.LLMResult, Field(description="Completed Task Result.")]
+    result: Annotated[BridgeTaskResult, Field(description="Completed Task Result.")]
 
 
 class BridgeTaskErrorResponse(BaseModel):
@@ -422,7 +428,7 @@ class BridgeSSEEvent(BaseModel):
     id: Annotated[
         Annotated[StrictStr, Field(pattern="^[1-9][0-9]*:[1-9][0-9]*$")],
         Field(
-            description="Opaque replay cursor for this event. To resume after it, send this exact value in the `Last-Event-ID` header; do not parse or construct it."
+            description="Opaque replay cursor for this event. To resume after it, send this exact value in the `Last-Event-ID` header."
         ),
     ]
     data: Annotated[
@@ -451,7 +457,7 @@ TaskInstruction = TypeAliasType(
         Annotated[StrictStr, Field(min_length=1, max_length=100000, pattern="^[^\\u0000]*$")],
         Field(
             title="TaskInstruction",
-            description="Instruction a Task carries out, with the context it needs: non-empty text of at most 100,000 characters, without NUL characters. The model reads it as the requester's message. Treat user input, retrieved text, and document content in it as untrusted model input; none grants system authority.",
+            description="Instruction a Task carries out, with the context it needs: non-empty text of at most 100,000 characters, without NUL characters. Treat user input, retrieved text, and document content in it as untrusted: none of them changes the Task's permissions.",
             examples=[
                 "Extract key information from the document and summarize",
                 "Analyze the provided data and identify trends",
@@ -470,7 +476,7 @@ class BridgeTaskContinueRequest(BaseModel):
     task_id: Annotated[
         task_id_module.TaskId,
         Field(
-            description="Identifier of the new continuation Task, chosen by the caller. It must differ from `parent_task_id`. A Task identifier names a Task only within its tenant and Agent Identity. Read the continuation Task's events and stop it with this identifier. A repeated request with the same identifier starts no second Task."
+            description="Identifier of the new continuation Task, chosen by the caller. It must differ from `parent_task_id`. Read the continuation Task's events and stop it with this identifier. A repeated request with the same identifier starts no second Task."
         ),
     ]
     priority: Annotated[
@@ -484,7 +490,7 @@ class BridgeTaskContinueRequest(BaseModel):
     parent_task_id: Annotated[
         task_id_module.TaskId,
         Field(
-            description="Task of the same Agent Identity whose task history this continuation Task continues. A Task identifier names a Task only within its tenant and Agent Identity. The parent can have completed, failed, or stopped, or can still be running; a running parent is continued from its last completed step. A continuation must name an immediate parent Task admitted less than 30 days ago. Task history content leaves the inherited context 30 days after the request that supplied it; instructions may remain available for up to 90 days after the request that supplied them. The continuation uses the inherited context that remains available."
+            description="Task of the same Agent Identity whose task history this continuation Task continues. The parent can have completed, failed, or stopped, or can still be running; a running parent is continued from its last completed step. A continuation must name an immediate parent Task submitted less than 30 days ago. Task history leaves the inherited context 30 days after the request that supplied it; the continuation uses the history that remains."
         ),
     ]
     instruction: Annotated[
@@ -502,7 +508,7 @@ class BridgeTaskContinueRequest(BaseModel):
     routing_policy: Annotated[
         routing_policy_module.RoutingPolicy,
         Field(
-            description="Model-selection preferences for this request. The object is required. A preference left unset takes the parent Task's value: the parent's own preference, resolved with Platform defaults when the parent Task was admitted. Capabilities the Platform inferred for the parent Task are not inherited."
+            description="Model-selection preferences for this request. The object is required. A preference left unset takes the parent Task's value. Only the capabilities that the parent Task's request listed are inherited."
         ),
     ]
     response_format: Annotated[
@@ -516,13 +522,13 @@ class BridgeTaskContinueRequest(BaseModel):
         Union[StrictBool, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Stream the answer text while it is written. When omitted, the continuation Task streams if the parent Task did. Only free-text answers stream: no response format, or the `text` or `markdown` format. Streamed fragments can arrive out of order and can be replaced, so use them only for display and use the completed Task Result for processing. Streaming can add slight latency to the final Task Result."
+            description="Stream the answer text while it is written. When omitted, the continuation Task streams if the parent Task did. Only free-text answers stream: no response format, or the `text` or `markdown` format. Streamed fragments can arrive out of order and can be replaced, so use them only for display and use the completed Task Result for processing."
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     deadline: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(
-            description="Requested absolute deadline for the continuation Task, as a date-time with an offset (`Z` or `±hh:mm`). The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
+            description="Requested absolute deadline for the continuation Task, as a date-time with an offset (`Z` or `±hh:mm`). Near this time, the Task stops new work, such as Tool Calls, and answers from the work done so far. The deadline is best effort: the Task Outcome can arrive a few minutes after it.",
             examples=["2025-08-30T15:00:00Z", "2025-08-30T15:00:00.000Z"],
         ),
     ]
@@ -570,14 +576,14 @@ class BridgeTaskCreateRequest(BaseModel):
         Union[StrictBool, SkipJsonSchema[None]],
         BeforeValidator(_reject_explicit_null),
         Field(
-            description="Stream the answer text while it is written. Only free-text answers stream: no response format, or the `text` or `markdown` format. Streamed fragments can arrive out of order and can be replaced, so use them only for display and use the completed Task Result for processing. Streaming can add slight latency to the final Task Result.",
+            description="Stream the answer text while it is written. Only free-text answers stream: no response format, or the `text` or `markdown` format. Streamed fragments can arrive out of order and can be replaced, so use them only for display and use the completed Task Result for processing.",
             json_schema_extra={"default": False},
         ),
     ] = Field(default_factory=lambda: None, validate_default=False, exclude_if=lambda value: value is None)
     deadline: Annotated[
         Annotated[AwareDatetime, BeforeValidator(_validate_string_constraints_3)],
         Field(
-            description="Requested absolute deadline for the Task, as a date-time with an offset (`Z` or `±hh:mm`). The Platform normally ends planning five minutes before this time to prepare the final response. Final response synthesis may use only already captured state and can continue for up to five minutes after this time; persistence and delivery may finish later.",
+            description="Requested absolute deadline for the Task, as a date-time with an offset (`Z` or `±hh:mm`). Near this time, the Task stops new work, such as Tool Calls, and answers from the work done so far. The deadline is best effort: the Task Outcome can arrive a few minutes after it.",
             examples=["2025-08-30T15:00:00Z", "2025-08-30T15:00:00.000Z"],
         ),
     ]
@@ -590,9 +596,7 @@ class BridgeToolResultError(BaseModel):
     type: Annotated[Literal["error"], Field(description="Identifies this Tool Result as failed.")]
     tool_call_id: Annotated[
         tool_call_id_module.ToolCallId,
-        Field(
-            description="Identifier of the Tool Call that produced this result. Match it within the owning Task; it does not provide idempotency by itself."
-        ),
+        Field(description="Identifier of the Tool Call that produced this result. Match it within the owning Task."),
     ]
     message: Annotated[
         Annotated[StrictStr, Field(max_length=2048)],
@@ -607,9 +611,7 @@ class BridgeToolResultSuccess(BaseModel):
     type: Annotated[Literal["success"], Field(description="Identifies this Tool Result as successful.")]
     tool_call_id: Annotated[
         tool_call_id_module.ToolCallId,
-        Field(
-            description="Identifier of the Tool Call that produced this result. Match it within the owning Task; it does not provide idempotency by itself."
-        ),
+        Field(description="Identifier of the Tool Call that produced this result. Match it within the owning Task."),
     ]
     output: Annotated[
         Union[Annotated[dict[StrictStr, json_value_module.JsonValue], Field(strict=True)], StrictStr],

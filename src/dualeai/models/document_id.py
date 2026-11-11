@@ -26,7 +26,7 @@ DocumentId = TypeAliasType(
         Annotated[UUID, BeforeValidator(_validate_string_constraints_1)],
         Field(
             title="DocumentId",
-            description="Deterministic document identifier (UUIDv5, RFC 9562 §5.5). Unique within a Library.",
+            description="Stable document identifier, unique within a Library.",
             examples=["376dbee0-d70a-52e4-a801-d9dd72a5a083"],
         ),
     ],
