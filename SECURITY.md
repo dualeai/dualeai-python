@@ -4,7 +4,7 @@
 
 - [`/security/advisories/new`](https://github.com/dualeai/dualeai-python/security/advisories/new)
   — private vulnerability reporting is the preferred route.
-- **Email `security@duale.ai`** if you would rather not use GitHub.
+- **Email `contact+security@mail.duale.ai`** if you would rather not use GitHub.
 
 **Do not open a public issue for a suspected vulnerability.** The timeline below runs
 from whichever channel you use.
@@ -55,7 +55,7 @@ released against the latest `0.x` only. The supported runtimes are CPython 3.10 
 ### Out of scope
 
 - A service-side authorization or availability defect that reproduces without this
-  SDK. Report it through the Duale AI security channel and include the affected API.
+  SDK. Report it by email to the address above and include the affected API.
 - Code executed by a Customer Tool. The SDK calls registered Tool code, but the Tool
   owner controls that code and its external effects.
 - Credentials, network clients, exporters, or callbacks supplied by the application.

@@ -15,16 +15,13 @@ python -m pip install dualeai
 
 ## Run the first live Task
 
-Ask your administrator for an API token and access to a configured model; the SDK creates neither.
-Use synthetic, non-sensitive input: live requests can consume metered or limited service resources.
+Ask your administrator for a provisioned Tenant, an Agent Identity API token, and a model pool with at least one
+configured model.
 Set your provisioned token in the current shell:
 
 ```bash
 export DUALEAI_TOKEN=dualeai_your_provisioned_token_here
 ```
-
-<!-- Provisioning, model eligibility, and service usage are Platform
-requirements, unproved in this SDK. -->
 
 Save this as `quickstart.py`:
 
@@ -44,7 +41,11 @@ class SupportDecision(BaseModel):
 async def main() -> None:
     async with create_sdk() as sdk:
         response = await ask(
-            instruction="Review this synthetic support case and return the next safe action.",
+            instruction=(
+                "Synthetic support case: A customer asks to reset an account password, "
+                "but identity verification has not been completed. Recommend the next "
+                "safe step and explain why; do not change the account."
+            ),
             res=SupportDecision,
             sdk=sdk,
         )
@@ -57,55 +58,73 @@ asyncio.run(main())
 ```
 
 Run `python quickstart.py`. A successful run prints the Task ID, then the validated `next_action`; values depend on the model.
-`ask()` returns a response handle. `await response.model()` waits for the final Task result and validates it against
-`SupportDecision`.
+`ask()` returns a response handle. `await response.model()` waits until the Task ends and validates its result
+against `SupportDecision`.
 
 Before retrying a failure, use [Errors and reliability](https://duale.ai/en/docs/sdk/errors) to identify its cause.
 
-<!-- Nothing executes this live quickstart or enforces its printed shape. -->
-
 ## Configuration
 
-`DUALEAI_TOKEN` is required for live requests. Set the other values only when your workflow needs them:
-
-| Setting | When to use it |
-| --- | --- |
-| `DUALEAI_ENDPOINT` | A different API environment; the default is `https://api.beta.duale.ai` |
-| `DUALEAI_AGENT_ID` | Hosting Tools or uploading Task attachments |
-| `DUALEAI_TENANT_ID` | Managing Libraries or uploading Task attachments |
-| `DUALEAI_OBSERVABILITY__TOKEN` | Exporting telemetry, with a separate telemetry token |
-
-Attachment uploads also accept `agent_id=` in place of `DUALEAI_AGENT_ID`.
-`dualeai[telemetry]` adds automatic instrumentation; configuration is still required to enable it.
-See the [configuration example](https://github.com/dualeai/dualeai-python/blob/main/.env.example) for all settings.
-
-## Examples and next steps
-
-The [examples guide](https://github.com/dualeai/dualeai-python/tree/main/examples) lists setup and permissions.
-Arrange Dashboard cleanup before running document examples: they leave stored Libraries.
-
-For application tests without a live connection, use the
-[MockSDK reference](https://duale.ai/en/docs/sdk/reference#mocksdk).
+`DUALEAI_TOKEN` is required for live requests.
+[SDK configuration](https://duale.ai/en/docs/sdk/configuration#environment-variables) lists every other setting, its
+default, and the workflow that needs it. The
+[configuration example](https://github.com/dualeai/dualeai-python/blob/main/.env.example) has every setting in one file.
 
 ## Integrate into an application
 
-- **Results:** streamed text is a live view of the answer and can arrive out of order. Order it by `generation` and
-  `sequence` as the [examples guide](https://github.com/dualeai/dualeai-python/blob/main/examples/README.md#order-and-replace-streamed-content)
-  shows, and use `await response.model()` for the validated result.
-- **Stopping:** cancelling `response.task` stops local observation. Use `await response.stop(reason)` to request a
-  Platform Stop. The response confirms acceptance of the Stop request, not that the Task has stopped.
-  A Stop without the permission is refused at once with `DualeAIAuthError`. A permitted Stop is accepted even when
-  the Task has already ended or the Platform does not know it.
-  Keep `response.task_id` for diagnosis; the SDK cannot reattach to a Task using only its saved ID.
-- **Tools:** calls execute on Task streams opened by the same SDK instance that registered the functions. Protect
-  side effects with durable duplicate detection and redact exception text with `error_transform`. The
-  [inventory example](https://github.com/dualeai/dualeai-python/blob/main/examples/inventory_agent.py) demonstrates
-  redaction and explains where your application must record side effects durably.
-- **Logging and telemetry:** SDK initialization replaces the process's root logging handlers; cleanup does not restore
-  them. Optional telemetry instrumentation also acts across the process. Coordinate these settings with your host
-  application.
+```mermaid
+sequenceDiagram
+    accTitle: How one Task flows between your app, the dualeai SDK, and Duale AI
+    accDescr {
+      Your app calls ask() and gets an AgentResponse with its task_id at
+      once. The dualeai SDK submits the Task to Duale AI. If you asked for a
+      free-text answer with streaming, Duale AI streams text chunks and
+      stream() yields them as a live view.
+      When the model needs one of your Tools, its Tool Call arrives on that
+      Task's stream. The SDK runs your @tool function and returns the Tool
+      Result. The Task ends with one outcome: completed, failed, or stopped.
+      model() returns the validated result or raises.
+    }
+    participant App as Your app
+    participant SDK as dualeai SDK
+    participant D as Duale AI
+    App->>SDK: ask(instruction, ...)
+    SDK-->>App: AgentResponse with its task_id
+    SDK->>D: Submit the Task
+    opt Free-text answer, and you passed streaming=True
+        D-->>SDK: Text chunks
+        SDK-->>App: stream() yields a live view of the answer
+    end
+    opt The model needs one of your Tools
+        D-->>SDK: Tool Call, on that Task's stream
+        SDK->>App: Run your @tool function
+        App-->>SDK: Return value
+        SDK->>D: Tool Result
+    end
+    D-->>SDK: One outcome: completed, failed, or stopped
+    App->>SDK: await response.model()
+    SDK-->>App: The validated result, or an exception
+```
 
-<!-- Saved-ID reattachment limits and process-global logging/telemetry behavior are source-inspection findings; nothing enforces them. Platform permissions and Library cleanup requirements belong to the service and are documented in examples/README.md. Out-of-order content arrival is Platform behavior; nothing in this SDK enforces it. Acceptance of a permitted Stop for an ended or unknown Task is Platform behavior; nothing in this SDK enforces it. -->
+- **Results:** streamed text is a live view; take the result from `await response.model()`. See
+  [Stream an answer](https://duale.ai/en/docs/sdk/streaming).
+- **Stopping:** `await response.stop(reason)` asks Duale AI to stop the Task; cancelling `response.task` stops only
+  your own code. See
+  [Observe the Task outcome](https://duale.ai/en/docs/sdk/concepts#observe-the-task-outcome).
+- **Tools:** the same Tool Call can arrive more than once, so make each Tool safe to call twice. See
+  [Handle delivery and retries](https://duale.ai/en/docs/sdk/tools#handle-delivery-and-retries).
+- **Permissions:** [Task actions](https://duale.ai/en/docs/sdk/reference#task-actions) and
+  [Library actions](https://duale.ai/en/docs/sdk/reference#library-actions) list the permission each operation needs.
+- **Logging:** constructing the SDK replaces your process's root logging handlers. See
+  [SDK configuration](https://duale.ai/en/docs/sdk/configuration#logging).
+
+## Examples and next steps
+
+The [examples guide](https://github.com/dualeai/dualeai-python/tree/main/examples) lists setup, permissions, and the
+cleanup that document examples need.
+
+For application tests without a live connection, use the
+[MockSDK reference](https://duale.ai/en/docs/sdk/reference#mocksdk).
 
 ## Project links
 
