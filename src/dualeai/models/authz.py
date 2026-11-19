@@ -285,7 +285,10 @@ class AuthzPermissionAction(str, Enum):
     audit_export_events = "audit:export_events"
     audit_read_events = "audit:read_events"
     audit_read_proof = "audit:read_proof"
+    billing_deactivate_coupons = "billing:deactivate_coupons"
+    billing_generate_coupons = "billing:generate_coupons"
     billing_read = "billing:read"
+    billing_read_coupons = "billing:read_coupons"
     billing_write = "billing:write"
     config_create_config = "config:create_config"
     config_delete_config = "config:delete_config"
@@ -334,7 +337,10 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.audit_export_events: "Export the audit log",
             AuthzPermissionAction.audit_read_events: "Read the audit log",
             AuthzPermissionAction.audit_read_proof: "Read an audit record proof",
+            AuthzPermissionAction.billing_deactivate_coupons: "Deactivate coupon codes",
+            AuthzPermissionAction.billing_generate_coupons: "Generate coupon codes",
             AuthzPermissionAction.billing_read: "Read billing",
+            AuthzPermissionAction.billing_read_coupons: "Read coupon codes",
             AuthzPermissionAction.billing_write: "Change billing",
             AuthzPermissionAction.config_create_config: "Create a configuration",
             AuthzPermissionAction.config_delete_config: "Delete a configuration",
@@ -384,7 +390,10 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.audit_export_events: "Streams the tenant's audit log as a JSONL or CSV attachment.",
             AuthzPermissionAction.audit_read_events: "Queries the tenant's audit log with filters and pagination.",
             AuthzPermissionAction.audit_read_proof: "Verifies one audit record's integrity and returns its proof.",
+            AuthzPermissionAction.billing_deactivate_coupons: "Deactivates one coupon code or a whole batch, so that no account can add it afterwards. A staff action: no tenant policy grants it.",
+            AuthzPermissionAction.billing_generate_coupons: "Generates a batch of coupon codes, shown once. A staff action: no tenant policy grants it.",
             AuthzPermissionAction.billing_read: "Reads the tenant's balance, invoices, meters, usage and fiscal identity.",
+            AuthzPermissionAction.billing_read_coupons: "Lists coupon batches, the state of each code, and how many accounts added each batch's codes. A staff action: no tenant policy grants it.",
             AuthzPermissionAction.billing_write: "Changes the tenant's fiscal identity and auto-recharge, opens checkout and billing portal sessions, and runs the company and VAT lookups that fill those forms.",
             AuthzPermissionAction.config_create_config: "Creates one configuration item from data or a preset.",
             AuthzPermissionAction.config_delete_config: "Deletes one configuration item.",
@@ -488,9 +497,24 @@ class AuthzPermissionAction(str, Enum):
                     "Verifies one audit record's integrity and returns its proof.",
                 ),
                 (
+                    "billing:deactivate_coupons",
+                    "Deactivate coupon codes",
+                    "Deactivates one coupon code or a whole batch, so that no account can add it afterwards. A staff action: no tenant policy grants it.",
+                ),
+                (
+                    "billing:generate_coupons",
+                    "Generate coupon codes",
+                    "Generates a batch of coupon codes, shown once. A staff action: no tenant policy grants it.",
+                ),
+                (
                     "billing:read",
                     "Read billing",
                     "Reads the tenant's balance, invoices, meters, usage and fiscal identity.",
+                ),
+                (
+                    "billing:read_coupons",
+                    "Read coupon codes",
+                    "Lists coupon batches, the state of each code, and how many accounts added each batch's codes. A staff action: no tenant policy grants it.",
                 ),
                 (
                     "billing:write",
