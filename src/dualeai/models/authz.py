@@ -290,6 +290,7 @@ class AuthzPermissionAction(str, Enum):
     billing_read = "billing:read"
     billing_read_coupons = "billing:read_coupons"
     billing_read_legal_names = "billing:read_legal_names"
+    billing_read_usage = "billing:read_usage"
     billing_write = "billing:write"
     config_create_config = "config:create_config"
     config_delete_config = "config:delete_config"
@@ -345,6 +346,7 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.billing_read: "Read billing",
             AuthzPermissionAction.billing_read_coupons: "Read coupon codes",
             AuthzPermissionAction.billing_read_legal_names: "Read legal names",
+            AuthzPermissionAction.billing_read_usage: "Read usage across tenants",
             AuthzPermissionAction.billing_write: "Change billing",
             AuthzPermissionAction.config_create_config: "Create a configuration",
             AuthzPermissionAction.config_delete_config: "Delete a configuration",
@@ -398,9 +400,10 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.audit_read_proof: "Verifies one audit record's integrity and returns its proof.",
             AuthzPermissionAction.billing_deactivate_coupons: "Deactivates one coupon code or a whole batch, so that no account can add it afterwards. A staff action: no tenant policy grants it.",
             AuthzPermissionAction.billing_generate_coupons: "Generates a batch of coupon codes, shown once. A staff action: no tenant policy grants it.",
-            AuthzPermissionAction.billing_read: "Reads the tenant's balance, invoices, meters, usage and fiscal identity.",
+            AuthzPermissionAction.billing_read: "Reads the tenant's balance, invoices, usage and fiscal identity.",
             AuthzPermissionAction.billing_read_coupons: "Lists coupon batches, the state of each code, and how many accounts added each batch's codes. A staff action: no tenant policy grants it.",
             AuthzPermissionAction.billing_read_legal_names: "Reads the legal name on the billing details of the tenants named. A staff action: no tenant policy grants it.",
+            AuthzPermissionAction.billing_read_usage: "Reads the usage and costs of every tenant or of the tenants named, deleted tenants included. A staff action: no tenant policy grants it.",
             AuthzPermissionAction.billing_write: "Changes the tenant's fiscal identity and auto-recharge, opens checkout and billing portal sessions, and runs the company and VAT lookups that fill those forms.",
             AuthzPermissionAction.config_create_config: "Creates one configuration item from data or a preset.",
             AuthzPermissionAction.config_delete_config: "Deletes one configuration item.",
@@ -515,11 +518,7 @@ class AuthzPermissionAction(str, Enum):
                     "Generate coupon codes",
                     "Generates a batch of coupon codes, shown once. A staff action: no tenant policy grants it.",
                 ),
-                (
-                    "billing:read",
-                    "Read billing",
-                    "Reads the tenant's balance, invoices, meters, usage and fiscal identity.",
-                ),
+                ("billing:read", "Read billing", "Reads the tenant's balance, invoices, usage and fiscal identity."),
                 (
                     "billing:read_coupons",
                     "Read coupon codes",
@@ -529,6 +528,11 @@ class AuthzPermissionAction(str, Enum):
                     "billing:read_legal_names",
                     "Read legal names",
                     "Reads the legal name on the billing details of the tenants named. A staff action: no tenant policy grants it.",
+                ),
+                (
+                    "billing:read_usage",
+                    "Read usage across tenants",
+                    "Reads the usage and costs of every tenant or of the tenants named, deleted tenants included. A staff action: no tenant policy grants it.",
                 ),
                 (
                     "billing:write",
