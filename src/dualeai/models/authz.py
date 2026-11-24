@@ -281,7 +281,6 @@ class AuthzPermissionAction(str, Enum):
     agent_revoke_token = "agent:revoke_token"
     agent_stop_task = "agent:stop_task"
     agent_update = "agent:update"
-    analytics_read_metrics = "analytics:read_metrics"
     audit_export_events = "audit:export_events"
     audit_read_events = "audit:read_events"
     audit_read_proof = "audit:read_proof"
@@ -337,7 +336,6 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.agent_revoke_token: "Revoke an agent API token",
             AuthzPermissionAction.agent_stop_task: "Stop a Task",
             AuthzPermissionAction.agent_update: "Update an Agent Identity",
-            AuthzPermissionAction.analytics_read_metrics: "Read analytics",
             AuthzPermissionAction.audit_export_events: "Export the audit log",
             AuthzPermissionAction.audit_read_events: "Read the audit log",
             AuthzPermissionAction.audit_read_proof: "Read an audit record proof",
@@ -387,14 +385,13 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.agent_heartbeat: "Lets an SDK process keep its registered Tools available.",
             AuthzPermissionAction.agent_manage_tools: "Assigns and withdraws the Tool Sources that one Agent Identity can call.",
             AuthzPermissionAction.agent_mint_token: "Exchanges an Agent Identity's API token for a platform token.",
-            AuthzPermissionAction.agent_read: "Reads one Agent Identity and the Tools assigned to it.",
+            AuthzPermissionAction.agent_read: "Reads one Agent Identity, the Tools assigned to it, its model cost, and the outcomes of the Tool Calls counted under it: its Tasks' calls, and the calls to the SDK Tools it hosts.",
             AuthzPermissionAction.agent_read_task: "Reads a task: its event stream, its result, and its Analytics records.",
             AuthzPermissionAction.agent_read_token: "Lists an Agent Identity's API tokens without their values.",
             AuthzPermissionAction.agent_register_tools: "Registers the complete Tool catalog an SDK process offers for an Agent Identity.",
             AuthzPermissionAction.agent_revoke_token: "Revokes one API token of an Agent Identity.",
             AuthzPermissionAction.agent_stop_task: "Requests a Stop of a Task and of the work started under it.",
             AuthzPermissionAction.agent_update: "Changes an Agent Identity's name or description.",
-            AuthzPermissionAction.analytics_read_metrics: "Reads the tenant-wide aggregates: cost, provider, Tool and performance metrics. A task's own metrics and history need `agent:read_task` on that task.",
             AuthzPermissionAction.audit_export_events: "Streams the tenant's audit log as a JSONL or CSV attachment.",
             AuthzPermissionAction.audit_read_events: "Queries the tenant's audit log with filters and pagination.",
             AuthzPermissionAction.audit_read_proof: "Verifies one audit record's integrity and returns its proof.",
@@ -407,7 +404,7 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.billing_write: "Changes the tenant's fiscal identity and auto-recharge, opens checkout and billing portal sessions, and runs the company and VAT lookups that fill those forms.",
             AuthzPermissionAction.config_create_config: "Creates one configuration item from data or a preset.",
             AuthzPermissionAction.config_delete_config: "Deletes one configuration item.",
-            AuthzPermissionAction.config_read_config: "Reads configuration items and the preset catalog.",
+            AuthzPermissionAction.config_read_config: "Reads configuration items, the preset catalog, and the LLM performance and model comparison of those configurations.",
             AuthzPermissionAction.config_update_config: "Changes one configuration item's values and preset ownership.",
             AuthzPermissionAction.library_admin: "Reads, writes and revokes the access grants on a Library's path, which every Library at that path shares.",
             AuthzPermissionAction.library_delete: "Deletes one document or one whole Library.",
@@ -469,7 +466,11 @@ class AuthzPermissionAction(str, Enum):
                     "Obtain a platform token",
                     "Exchanges an Agent Identity's API token for a platform token.",
                 ),
-                ("agent:read", "Read an Agent Identity", "Reads one Agent Identity and the Tools assigned to it."),
+                (
+                    "agent:read",
+                    "Read an Agent Identity",
+                    "Reads one Agent Identity, the Tools assigned to it, its model cost, and the outcomes of the Tool Calls counted under it: its Tasks' calls, and the calls to the SDK Tools it hosts.",
+                ),
                 (
                     "agent:read_task",
                     "Read a Task",
@@ -488,11 +489,6 @@ class AuthzPermissionAction(str, Enum):
                 ("agent:revoke_token", "Revoke an agent API token", "Revokes one API token of an Agent Identity."),
                 ("agent:stop_task", "Stop a Task", "Requests a Stop of a Task and of the work started under it."),
                 ("agent:update", "Update an Agent Identity", "Changes an Agent Identity's name or description."),
-                (
-                    "analytics:read_metrics",
-                    "Read analytics",
-                    "Reads the tenant-wide aggregates: cost, provider, Tool and performance metrics. A task's own metrics and history need `agent:read_task` on that task.",
-                ),
                 (
                     "audit:export_events",
                     "Export the audit log",
@@ -545,7 +541,11 @@ class AuthzPermissionAction(str, Enum):
                     "Creates one configuration item from data or a preset.",
                 ),
                 ("config:delete_config", "Delete a configuration", "Deletes one configuration item."),
-                ("config:read_config", "Read configurations", "Reads configuration items and the preset catalog."),
+                (
+                    "config:read_config",
+                    "Read configurations",
+                    "Reads configuration items, the preset catalog, and the LLM performance and model comparison of those configurations.",
+                ),
                 (
                     "config:update_config",
                     "Update a configuration",
