@@ -281,6 +281,7 @@ class AuthzPermissionAction(str, Enum):
     agent_revoke_token = "agent:revoke_token"
     agent_stop_task = "agent:stop_task"
     agent_update = "agent:update"
+    agent_view_memory = "agent:view_memory"
     audit_export_events = "audit:export_events"
     audit_read_events = "audit:read_events"
     audit_read_proof = "audit:read_proof"
@@ -336,6 +337,7 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.agent_revoke_token: "Revoke an agent API token",
             AuthzPermissionAction.agent_stop_task: "Stop a Task",
             AuthzPermissionAction.agent_update: "Update an Agent Identity",
+            AuthzPermissionAction.agent_view_memory: "Read an Agent Identity's memory",
             AuthzPermissionAction.audit_export_events: "Export the audit log",
             AuthzPermissionAction.audit_read_events: "Read the audit log",
             AuthzPermissionAction.audit_read_proof: "Read an audit record proof",
@@ -385,13 +387,14 @@ class AuthzPermissionAction(str, Enum):
             AuthzPermissionAction.agent_heartbeat: "Lets an SDK process keep its registered Tools available.",
             AuthzPermissionAction.agent_manage_tools: "Assigns and withdraws the Tool Sources that one Agent Identity can call.",
             AuthzPermissionAction.agent_mint_token: "Exchanges an Agent Identity's API token for a platform token.",
-            AuthzPermissionAction.agent_read: "Reads one Agent Identity, the Tools assigned to it, its model cost, and the outcomes of the Tool Calls counted under it: its Tasks' calls, and the calls to the SDK Tools it hosts.",
-            AuthzPermissionAction.agent_read_task: "Reads a task: its event stream, its result, and its Analytics records.",
+            AuthzPermissionAction.agent_read: "Reads one Agent Identity, the Tools assigned to it, its model cost, and the outcomes of the Tool Calls counted under it: its Tasks' calls, and the calls to the SDK Tools it hosts. Its memory needs `agent:view_memory`.",
+            AuthzPermissionAction.agent_read_task: "Reads a task: its event stream, its result, and its Analytics records. The memory that an Executor of the task started with also needs `agent:view_memory`.",
             AuthzPermissionAction.agent_read_token: "Lists an Agent Identity's API tokens without their values.",
             AuthzPermissionAction.agent_register_tools: "Registers the complete Tool catalog an SDK process offers for an Agent Identity.",
             AuthzPermissionAction.agent_revoke_token: "Revokes one API token of an Agent Identity.",
             AuthzPermissionAction.agent_stop_task: "Requests a Stop of a Task and of the work started under it.",
             AuthzPermissionAction.agent_update: "Changes an Agent Identity's name or description.",
+            AuthzPermissionAction.agent_view_memory: "Reads what an Agent Identity learned from its Tasks: its current memory, and the memory each Executor of its Tasks started with, which also needs `agent:read_task` on that Task. Memory can hold personal data.",
             AuthzPermissionAction.audit_export_events: "Streams the tenant's audit log as a JSONL or CSV attachment.",
             AuthzPermissionAction.audit_read_events: "Queries the tenant's audit log with filters and pagination.",
             AuthzPermissionAction.audit_read_proof: "Verifies one audit record's integrity and returns its proof.",
@@ -469,12 +472,12 @@ class AuthzPermissionAction(str, Enum):
                 (
                     "agent:read",
                     "Read an Agent Identity",
-                    "Reads one Agent Identity, the Tools assigned to it, its model cost, and the outcomes of the Tool Calls counted under it: its Tasks' calls, and the calls to the SDK Tools it hosts.",
+                    "Reads one Agent Identity, the Tools assigned to it, its model cost, and the outcomes of the Tool Calls counted under it: its Tasks' calls, and the calls to the SDK Tools it hosts. Its memory needs `agent:view_memory`.",
                 ),
                 (
                     "agent:read_task",
                     "Read a Task",
-                    "Reads a task: its event stream, its result, and its Analytics records.",
+                    "Reads a task: its event stream, its result, and its Analytics records. The memory that an Executor of the task started with also needs `agent:view_memory`.",
                 ),
                 (
                     "agent:read_token",
@@ -489,6 +492,11 @@ class AuthzPermissionAction(str, Enum):
                 ("agent:revoke_token", "Revoke an agent API token", "Revokes one API token of an Agent Identity."),
                 ("agent:stop_task", "Stop a Task", "Requests a Stop of a Task and of the work started under it."),
                 ("agent:update", "Update an Agent Identity", "Changes an Agent Identity's name or description."),
+                (
+                    "agent:view_memory",
+                    "Read an Agent Identity's memory",
+                    "Reads what an Agent Identity learned from its Tasks: its current memory, and the memory each Executor of its Tasks started with, which also needs `agent:read_task` on that Task. Memory can hold personal data.",
+                ),
                 (
                     "audit:export_events",
                     "Export the audit log",
